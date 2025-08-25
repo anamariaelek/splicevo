@@ -1,0 +1,65 @@
+[project]
+name = "splicevo"
+version = "0.1.0"
+description = "DL model for splicing across evolution"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+
+authors = [
+  {name = "Anamaria Elek", email = "a.elek@zmbh.uni-heidelberg.de"}
+]
+maintainers = [
+  {name = "Anamaria Elek", email = "a.elek@zmbh.uni-heidelberg.de"}
+]
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Operating System :: OS Independent"
+]
+
+dependencies = [
+  "typer>=0.9",
+  "torch", 
+  "numpy",
+  "pandas"
+]
+
+[project.optional-dependencies]
+test = [
+  "coverage",
+  "pytest",
+  "ruff",
+  "ty",
+  "ipdb"
+]
+
+[project.urls]
+homepage = "https://github.com/anamariaelek/splicevo"
+bugs = "https://github.com/anamariaelek/splicevo/issues"
+changelog = "https://github.com/anamariaelek/splicevo/blob/master/HISTORY.md"
+
+[project.scripts]
+splicevo = "splicevo.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"*" = ["*.*"]
+
+[tool.ty]
+# You can override individual rules like:
+# rules.TY001 = "warn"
+
+[[tool.ty.overrides]]
+# Add overrides here if you want to selectively ignore files or relax rules
+# Example:
+# path = "tests/"
+# rules.TY001 = "ignore"
+
