@@ -1,6 +1,6 @@
+"""Utilities for working with genomes"""
+
 from pathlib import Path
-import shutil
-import gzip
 from grelu.io.genome import CustomGenome
 from tangermeme.utils import one_hot_encode
 
@@ -60,5 +60,4 @@ def encode_transcript(transcript: Transcript, genome: CustomGenome) -> tuple:
 	except ImportError:
 		pass  # If torch is not available, return as list
 	return ohe_seq, ann_vec
-
 

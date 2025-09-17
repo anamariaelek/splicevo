@@ -1,10 +1,30 @@
+"""Utilities for processing genome annotations"""
+
 import pandas as pd
-from collections import defaultdict
 import gzip
-from typing import Dict, List, Tuple, Set
 import re
+from typing import Dict, List, Tuple, Set
 
 class Transcript:
+    """
+    A class representing a transcript with its exons, introns, and splice sites.
+    A transcript is a specific isoform of a gene that contains a series of exons
+    and introns. This class calculates intron coordinates and splice site positions
+    based on the provided exon coordinates.
+    Attributes:
+        transcript_id (str): Unique identifier for the transcript
+        gene_id (str): Identifier of the gene this transcript belongs to
+        strand (str): Genomic strand ('+' or '-') on which the transcript is located
+        exons (pd.DataFrame): DataFrame containing exon coordinates with 'start' and 'end' columns
+        introns (List[Tuple[int, int]]): List of intron coordinates as (start, end) tuples
+        splice_donor_sites (Set[int]): Set of splice donor site positions
+        splice_acceptor_sites (Set[int]): Set of splice acceptor site positions
+    Note:
+        - Introns shorter than 4 base pairs are excluded from splice site calculations
+        - Single-exon transcripts have no introns or splice sites
+        - For positive strand: donor sites are intron starts, acceptor sites are intron ends
+        - For negative strand: donor sites are intron ends, acceptor sites are intron starts
+    """
     def __init__(self, transcript_id: str, gene_id: str, strand: str, exons: pd.DataFrame):
         self.transcript_id = transcript_id
         self.gene_id = gene_id
@@ -51,6 +71,31 @@ class Transcript:
         return splice_donor_sites, splice_acceptor_sites
 
 class GTFProcessor:
+    """
+    A class for processing GTF (Gene Transfer Format) files and extracting transcript and splice site information.
+    This class provides functionality to parse GTF files, filter for high-confidence protein-coding transcripts,
+    extract transcript information, and identify splice sites from gene annotations.
+    Attributes:
+        gtf_file (str): Path to the GTF file to be processed.
+    Methods:
+        parse_gtf_attributes(attr_string: str) -> Dict[str, str]:
+            Parse GTF attribute string into a dictionary of key-value pairs.
+        load_gtf(chromosomes: List[str]) -> pd.DataFrame:
+            Load and parse GTF file, optionally filtering by chromosomes.
+        filter_exons(df: pd.DataFrame) -> pd.DataFrame:
+            Filter DataFrame to include only exon features.
+        filter_high_confidence(df: pd.DataFrame) -> pd.DataFrame:
+            Filter for high-confidence protein-coding transcripts based on biotype and support level.
+        get_transcripts(df: pd.DataFrame, chromosomes: List[str] = None) -> List[Transcript]:
+            Extract transcript objects from filtered GTF DataFrame.
+        get_splice_sites(transcripts: List[Transcript]) -> Dict[str, Dict[str, list]]:
+            Extract splice donor and acceptor sites from transcripts, grouped by chromosome.
+        process_gtf(chromosomes: List[str] = None) -> pd.DataFrame:
+            Main processing method that combines all steps to return filtered transcripts.
+    Example:
+        processor = GTFProcessor('path/to/annotation.gtf')
+        transcripts = processor.process_gtf(chromosomes=['chr1', 'chr2'])
+    """
     def __init__(self, gtf_file: str):
         self.gtf_file = gtf_file
     
