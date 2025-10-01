@@ -176,19 +176,38 @@ class GTFProcessor:
         return filtered
 
     def get_transcripts(self, df: pd.DataFrame, chromosomes: List[str] = None) -> List[Transcript]:
-        """Get transcripts"""
+        """Get transcripts using optimized batch processing"""
+        print("Extracting transcripts...")
+        
+        # Filter chromosomes early if specified
         if chromosomes is not None:
             df = df[df['chrom'].isin(chromosomes)]
+        
+        # Pre-filter to only exons once, instead of per transcript
+        exon_df = self.filter_exons(df)
+        if exon_df is None or len(exon_df) == 0:
+            print("No exons found after filtering")
+            return []
+        
+        print(f"Processing {len(exon_df)} exon records from {exon_df['transcript_id'].nunique()} transcripts...")
+        
+        # Group by transcript_id and process in batches
         transcripts = []
-        for transcript_id in df['transcript_id'].unique():
-            records = df[df['transcript_id'] == transcript_id].reset_index(drop=True).sort_values(by='start')
-            gene_id = records['gene_id'].iloc[0]
-            strand = records['strand'].iloc[0]
-            exons = self.filter_exons(records)
-            if exons is None or len(exons) == 0:
-                continue
-            transcript = Transcript(transcript_id, gene_id, strand, exons)
+        transcript_groups = exon_df.groupby('transcript_id')
+        
+        for transcript_id, transcript_records in transcript_groups:
+            # Sort by start position
+            transcript_records = transcript_records.sort_values(by='start').reset_index(drop=True)
+            
+            # Get metadata from first record
+            gene_id = transcript_records['gene_id'].iloc[0]
+            strand = transcript_records['strand'].iloc[0]
+            
+            # Create transcript with pre-filtered exon data
+            transcript = Transcript(transcript_id, gene_id, strand, transcript_records)
             transcripts.append(transcript)
+        
+        print(f"Created {len(transcripts)} transcript objects")
         return transcripts
 
     def get_splice_sites(self, transcripts: List[Transcript]) -> Dict[str, Dict[str, list]]:
