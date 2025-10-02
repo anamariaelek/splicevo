@@ -5,9 +5,14 @@ from ..io.splice_sites import SpliceSite
 from .data_loader import (
     MultiGenomeDataLoader
 )
-
+from .data_splitter import (
+    DataSplit,
+    StratifiedGCSplitter
+)
 __all__ = [
     'GenomeData',
     'SpliceSite', 
-    'MultiGenomeDataLoader'
+    'MultiGenomeDataLoader',
+    'DataSplit',
+    'StratifiedGCSplitter'
 ]

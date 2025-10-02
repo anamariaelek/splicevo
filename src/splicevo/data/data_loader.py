@@ -18,16 +18,78 @@ class MultiGenomeDataLoader:
     keeping track of genome, chromosome, and transcript origin for each example.
     """
     
-    def __init__(self, window_size: int = 200):
+    def __init__(self, 
+                 window_size: int = 200,
+                 orthology_file: Optional[Union[str, Path]] = None):
         """
         Initialize the data loader.
         
         Args:
             window_size: Size of sequence window around splice sites
+            orthology_file: Path to orthology TSV file with columns 
+                            'ortholog_group', 'gene_id', 'genome_id'
         """
         self.window_size = window_size
         self.genomes: Dict[str, GenomeData] = {}
         self.loaded_data: List[SpliceSite] = []
+        self.orthology_table: Optional[pd.DataFrame] = None
+        
+        # Load orthology file if provided
+        if orthology_file is not None:
+            self._load_orthology_file(orthology_file)
+            
+    def _load_orthology_file(self, orthology_file: Union[str, Path]) -> None:
+        """
+        Load orthology mapping from file.
+        
+        Args:
+            orthology_file: Path to orthology file
+            
+        Expected format: TSV file with columns: ortholog_group, gene_id, genome_id
+        """
+        orthology_path = Path(orthology_file)
+        
+        if not orthology_path.exists():
+            raise FileNotFoundError(f"Orthology file not found: {orthology_path}")
+            
+        print(f"Loading orthology file: {orthology_path}")
+        
+        try:
+            # Read as tab-separated file
+            df = pd.read_csv(orthology_path, sep='\t', header=0)
+            
+            # Check for required columns
+            required_columns = {'ortholog_group', 'gene_id', 'genome_id'}
+            available_columns = set(df.columns)
+            
+            if not required_columns.issubset(available_columns):
+                missing_columns = required_columns - available_columns
+                raise ValueError(
+                    f"Orthology file missing required columns: {missing_columns}. "
+                    f"Expected columns: {required_columns}, found: {available_columns}"
+                )
+            
+            # Use provided table
+            self.orthology_table = df[['ortholog_group', 'gene_id', 'genome_id']].copy()
+            
+            # Clean up the data
+            self.orthology_table = self.orthology_table.dropna()
+
+            # Make sure that each gene_id genome_id pair appears only once
+            self.orthology_table = self.orthology_table.drop_duplicates(subset=['gene_id', 'genome_id'])
+
+            # Ensure correct data types
+            self.orthology_table['gene_id'] = self.orthology_table['gene_id'].astype(str)
+            self.orthology_table['ortholog_group'] = self.orthology_table['ortholog_group'].astype(str)
+            self.orthology_table['genome_id'] = self.orthology_table['genome_id'].astype(str)
+            
+            print(f"Loaded orthology mappings for {len(self.orthology_table)} genes from "
+                  f"{self.orthology_table['genome_id'].nunique()} genomes in "
+                  f"{self.orthology_table['ortholog_group'].nunique()} ortholog groups")
+                  
+        except Exception as e:
+            print(f"Warning: Could not load orthology file {orthology_path}: {e}")
+            self.orthology_table = None
         
     def add_genome(self, 
                    genome_id: str, 
@@ -351,7 +413,116 @@ class MultiGenomeDataLoader:
         })
         
         return summary
+                
+    def _add_ortholog_groups(self, metadata: pd.DataFrame) -> pd.DataFrame:
+        """
+        Add ortholog group information to metadata.
         
+        Args:
+            metadata: Metadata DataFrame
+            
+        Returns:
+            Metadata DataFrame with ortholog_group column added
+        """
+        # Merge with orthology table
+        metadata_with_orthologs = metadata.merge(
+            self.orthology_table,
+            on=['gene_id', 'genome_id'],
+            how='left'
+        )
+        
+        # Fill missing ortholog groups with unique identifiers
+        # This ensures genes without orthologs get unique groups
+        missing_mask = metadata_with_orthologs['ortholog_group'].isna()
+        n_missing = missing_mask.sum()
+        
+        if n_missing > 0:
+            # Create unique ortholog groups for genes without mappings
+            unique_groups = [f"singleton_{i}" for i in range(n_missing)]
+            metadata_with_orthologs.loc[missing_mask, 'ortholog_group'] = unique_groups
+            
+            print(f"Added {n_missing} singleton ortholog groups for genes without mappings")
+        
+        return metadata_with_orthologs
+
+    def get_ortholog_groups_for_genes(self, gene_ids: List[str]) -> Dict[str, str]:
+        """
+        Get ortholog group mappings for a list of gene IDs.
+        
+        Args:
+            gene_ids: List of gene IDs to look up
+            
+        Returns:
+            Dictionary mapping gene_id to ortholog_group
+        """
+        if self.orthology_table is None:
+            return {}
+            
+        # Filter orthology table for requested genes
+        subset = self.orthology_table[self.orthology_table['gene_id'].isin(gene_ids)]
+        return dict(zip(subset['gene_id'], subset['ortholog_group']))
+        
+    def get_genes_in_ortholog_group(self, ortholog_group: str) -> List[str]:
+        """
+        Get all gene IDs belonging to a specific ortholog group.
+        
+        Args:
+            ortholog_group: Ortholog group identifier
+            
+        Returns:
+            List of gene IDs in the ortholog group
+        """
+        if self.orthology_table is None:
+            return []
+            
+        subset = self.orthology_table[self.orthology_table['ortholog_group'] == ortholog_group]
+        return subset['gene_id'].tolist()
+        
+    def get_genes_in_ortholog_group_by_genome(self, ortholog_group: str, genome_id: str) -> List[str]:
+        """
+        Get gene IDs belonging to a specific ortholog group in a specific genome.
+        
+        Args:
+            ortholog_group: Ortholog group identifier
+            genome_id: Genome identifier
+            
+        Returns:
+            List of gene IDs in the ortholog group for the specified genome
+        """
+        if self.orthology_table is None:
+            return []
+            
+        subset = self.orthology_table[
+            (self.orthology_table['ortholog_group'] == ortholog_group) &
+            (self.orthology_table['genome_id'] == genome_id)
+        ]
+        return subset['gene_id'].tolist()
+        
+    def get_ortholog_groups_by_genome(self, genome_id: str) -> Dict[str, List[str]]:
+        """
+        Get all ortholog groups and their genes for a specific genome.
+        
+        Args:
+            genome_id: Genome identifier
+            
+        Returns:
+            Dictionary mapping ortholog_group to list of gene_ids for that genome
+        """
+        if self.orthology_table is None:
+            return {}
+            
+        genome_subset = self.orthology_table[self.orthology_table['genome_id'] == genome_id]
+        result = {}
+        for ortholog_group in genome_subset['ortholog_group'].unique():
+            genes = genome_subset[genome_subset['ortholog_group'] == ortholog_group]['gene_id'].tolist()
+            result[ortholog_group] = genes
+            
+        return result
+        
+    def has_orthology_data(self) -> bool:
+        """Check if orthology data is available."""
+        return self.orthology_table is not None and len(self.orthology_table) > 0
+
     def to_arrays(self) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
         """
         Convert loaded data to arrays suitable for ML training.
@@ -379,4 +550,12 @@ class MultiGenomeDataLoader:
             for example in self.loaded_data
         ])
         
+        # Add ortholog group information if available
+        if self.orthology_table is not None:
+            metadata = self._add_ortholog_groups(metadata)
+        
+        # Ensure data and metadata are aligned
+        assert len(sequences) == len(labels) == len(metadata), "Data and metadata lengths do not match" 
+
         return sequences, labels, metadata
+        
