@@ -36,6 +36,7 @@ dependencies = [
   "pyfaidx>=0.7.2,<1.0.0",
   "tangermeme==0.5.1",
   "grelu==1.0.9",
+  "setuptools<81",  # Pin setuptools to avoid pkg_resources deprecation warnings
 ]
 
 [project.optional-dependencies]
@@ -43,7 +44,7 @@ test = [
   "coverage>=7.0.0,<8.0.0",
   "pytest>=7.0.0,<9.0.0",
   "ruff>=0.1.0,<0.5.0",
-  "ty>=0.4.0,<0.5.0",
+  "mypy>=1.0.0,<2.0.0",
   "ipdb>=0.13.0,<0.14.0"
 ]
 
@@ -61,13 +62,16 @@ package-dir = {"" = "src"}
 [tool.setuptools.package-data]
 "*" = ["*.*"]
 
-[tool.ty]
-# You can override individual rules like:
-# rules.TY001 = "warn"
+[tool.mypy]
+# Basic mypy configuration
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
 
-[[tool.ty.overrides]]
+[[tool.mypy.overrides]]
 # Add overrides here if you want to selectively ignore files or relax rules
 # Example:
-# path = "tests/"
-# rules.TY001 = "ignore"
+# module = "tests.*"
+# disallow_untyped_defs = false
 
