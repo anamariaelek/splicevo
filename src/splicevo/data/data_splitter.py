@@ -20,6 +20,9 @@ class DataSplit:
     y_val: np.ndarray
     X_test: np.ndarray
     y_test: np.ndarray
+    usage_arrays_train: Optional[Dict[str, np.ndarray]]
+    usage_arrays_val: Optional[Dict[str, np.ndarray]]
+    usage_arrays_test: Optional[Dict[str, np.ndarray]]
     train_metadata: pd.DataFrame
     val_metadata: pd.DataFrame
     test_metadata: pd.DataFrame
@@ -228,6 +231,7 @@ class StratifiedGCSplitter:
                         X: np.ndarray, 
                         y: np.ndarray, 
                         metadata: pd.DataFrame,
+                        usage_arrays: Optional[Dict[str, np.ndarray]] = None,
                         stratify_by: str = 'gc_class') -> DataSplit:
         """
         Split data using stratified sampling based on GC content and/or class.
@@ -236,6 +240,7 @@ class StratifiedGCSplitter:
             X: Feature matrix (sequences)
             y: Target labels  
             metadata: Metadata DataFrame
+            usage_arrays: Optional dictionary of usage arrays {'alpha', 'beta', 'sse'}
             stratify_by: Stratification strategy ('gc_class', 'genome_class', 'gc_genome_class')
         """
         # Create stratification labels
@@ -253,6 +258,17 @@ class StratifiedGCSplitter:
         train_val_metadata = metadata.iloc[train_val_idx].reset_index(drop=True)
         test_metadata = metadata.iloc[test_idx].reset_index(drop=True)
         
+        # Split usage arrays if provided
+        usage_arrays_train_val = None
+        usage_arrays_test = None
+        if usage_arrays is not None:
+            usage_arrays_train_val = {
+                key: array[train_val_idx] for key, array in usage_arrays.items()
+            }
+            usage_arrays_test = {
+                key: array[test_idx] for key, array in usage_arrays.items()
+            }
+        
         # Second split: train vs val
         if self.val_size > 0:
             train_val_strat = strat_labels[train_val_idx]
@@ -267,25 +283,42 @@ class StratifiedGCSplitter:
             
             train_metadata = train_val_metadata.iloc[train_idx].reset_index(drop=True)
             val_metadata = train_val_metadata.iloc[val_idx].reset_index(drop=True)
+            
+            # Split usage arrays for train/val
+            usage_arrays_train = None
+            usage_arrays_val = None
+            if usage_arrays_train_val is not None:
+                usage_arrays_train = {
+                    key: array[train_idx] for key, array in usage_arrays_train_val.items()
+                }
+                usage_arrays_val = {
+                    key: array[val_idx] for key, array in usage_arrays_train_val.items()
+                }
         else:
             X_train, y_train = X_train_val, y_train_val
             train_metadata = train_val_metadata
+            usage_arrays_train = usage_arrays_train_val
             X_val = np.array([])
             y_val = np.array([])
             val_metadata = pd.DataFrame()
+            usage_arrays_val = None
         
         split_info = {
             'strategy': 'stratified',
             'stratify_by': stratify_by,
             'n_train': len(y_train),
             'n_val': len(y_val),
-            'n_test': len(y_test)
+            'n_test': len(y_test),
+            'has_usage_arrays': usage_arrays is not None
         }
         
         return DataSplit(
             X_train=X_train, y_train=y_train,
             X_val=X_val, y_val=y_val,
             X_test=X_test, y_test=y_test,
+            usage_arrays_train=usage_arrays_train,
+            usage_arrays_val=usage_arrays_val,
+            usage_arrays_test=usage_arrays_test,
             train_metadata=train_metadata,
             val_metadata=val_metadata,
             test_metadata=test_metadata,
@@ -296,6 +329,7 @@ class StratifiedGCSplitter:
                               X: np.ndarray, 
                               y: np.ndarray, 
                               metadata: pd.DataFrame,
+                              usage_arrays: Optional[Dict[str, np.ndarray]] = None,
                               test_chromosomes: Optional[Dict[str, List[str]]] = None,
                               val_chromosomes: Optional[Dict[str, List[str]]] = None,
                               exclude_orthologs: bool = True) -> DataSplit:
@@ -307,6 +341,7 @@ class StratifiedGCSplitter:
             X: Feature matrix (sequences)
             y: Target labels
             metadata: Metadata DataFrame (must contain 'genome_id' and 'chromosome' columns)
+            usage_arrays: Optional dictionary of usage arrays {'alpha', 'beta', 'sse'}
             test_chromosomes: Dict mapping genome_id to list of chromosome names for testing
             val_chromosomes: Dict mapping genome_id to list of chromosome names for validation  
             exclude_orthologs: Whether to exclude orthologous genes from training set
@@ -383,6 +418,21 @@ class StratifiedGCSplitter:
         y_val = y[val_mask]
         val_metadata = metadata[val_mask].reset_index(drop=True)
         
+        # Split usage arrays if provided
+        usage_arrays_train = None
+        usage_arrays_val = None
+        usage_arrays_test = None
+        if usage_arrays is not None:
+            usage_arrays_train = {
+                key: array[train_mask] for key, array in usage_arrays.items()
+            }
+            usage_arrays_val = {
+                key: array[val_mask] for key, array in usage_arrays.items()
+            }
+            usage_arrays_test = {
+                key: array[test_mask] for key, array in usage_arrays.items()
+            }
+        
         # If no validation chromosomes specified and val_size > 0, 
         # create validation set from training data
         if not val_chromosomes and self.val_size > 0 and len(y_train) > 0:
@@ -402,18 +452,42 @@ class StratifiedGCSplitter:
             train_metadata_new = train_metadata.iloc[train_idx].reset_index(drop=True)
             val_metadata_new = train_metadata.iloc[val_idx].reset_index(drop=True)
             
-            # Update metadata
-            train_metadata = train_metadata_new
-            
-            # Combine chromosome-based validation with stratified validation
-            if len(y_val) > 0:
-                X_val = np.vstack([X_val, X_val_new])
-                y_val = np.concatenate([y_val, y_val_new])
-                val_metadata = pd.concat([val_metadata, val_metadata_new], ignore_index=True)
+            # Split usage arrays for train/val from training data
+            if usage_arrays_train is not None:
+                usage_arrays_train_new = {
+                    key: array[train_idx] for key, array in usage_arrays_train.items()
+                }
+                usage_arrays_val_new = {
+                    key: array[val_idx] for key, array in usage_arrays_train.items()
+                }
+                usage_arrays_train = usage_arrays_train_new
+                
+                # Combine chromosome-based validation with stratified validation
+                if len(y_val) > 0:
+                    X_val = np.vstack([X_val, X_val_new])
+                    y_val = np.concatenate([y_val, y_val_new])
+                    val_metadata = pd.concat([val_metadata, val_metadata_new], ignore_index=True)
+                    usage_arrays_val = {
+                        key: np.vstack([usage_arrays_val[key], usage_arrays_val_new[key]])
+                        for key in usage_arrays_val.keys()
+                    }
+                else:
+                    X_val = X_val_new
+                    y_val = y_val_new
+                    val_metadata = val_metadata_new
+                    usage_arrays_val = usage_arrays_val_new
             else:
-                X_val = X_val_new
-                y_val = y_val_new
-                val_metadata = val_metadata_new
+                # Update metadata without usage arrays
+                train_metadata = train_metadata_new
+                
+                if len(y_val) > 0:
+                    X_val = np.vstack([X_val, X_val_new])
+                    y_val = np.concatenate([y_val, y_val_new])
+                    val_metadata = pd.concat([val_metadata, val_metadata_new], ignore_index=True)
+                else:
+                    X_val = X_val_new
+                    y_val = y_val_new
+                    val_metadata = val_metadata_new
         
         split_info = {
             'strategy': 'chromosome_aware',
@@ -423,13 +497,17 @@ class StratifiedGCSplitter:
             'n_train': len(y_train),
             'n_val': len(y_val),
             'n_test': len(y_test),
-            'n_excluded_orthologs': np.sum(ortholog_mask) if exclude_orthologs else 0
+            'n_excluded_orthologs': np.sum(ortholog_mask) if exclude_orthologs else 0,
+            'has_usage_arrays': usage_arrays is not None
         }
         
         return DataSplit(
             X_train=X_train, y_train=y_train,
             X_val=X_val, y_val=y_val,
             X_test=X_test, y_test=y_test,
+            usage_arrays_train=usage_arrays_train,
+            usage_arrays_val=usage_arrays_val,
+            usage_arrays_test=usage_arrays_test,
             train_metadata=train_metadata,
             val_metadata=val_metadata,
             test_metadata=test_metadata,
@@ -440,6 +518,7 @@ class StratifiedGCSplitter:
                            X: np.ndarray, 
                            y: np.ndarray, 
                            metadata: pd.DataFrame,
+                           usage_arrays: Optional[Dict[str, np.ndarray]] = None,
                            balance_method: str = 'undersample',
                            stratify_by: str = 'gc_class') -> DataSplit:
         """
@@ -448,7 +527,8 @@ class StratifiedGCSplitter:
         Args:
             X: Feature matrix (sequences)
             y: Target labels
-            metadata: Metadata DataFrame  
+            metadata: Metadata DataFrame
+            usage_arrays: Optional dictionary of usage arrays {'alpha', 'beta', 'sse'}
             balance_method: Method for balancing ('undersample', 'oversample', 'smote')
             stratify_by: Stratification strategy for final split ('gc_class', etc.)
         Returns:
@@ -480,6 +560,13 @@ class StratifiedGCSplitter:
             y_balanced = y[balanced_indices]
             metadata_balanced = metadata.iloc[balanced_indices].reset_index(drop=True)
             
+            # Balance usage arrays if provided
+            usage_arrays_balanced = None
+            if usage_arrays is not None:
+                usage_arrays_balanced = {
+                    key: array[balanced_indices] for key, array in usage_arrays.items()
+                }
+            
         elif balance_method == 'oversample':
             # Simple random oversampling
             max_count = max(class_counts.values())
@@ -506,14 +593,22 @@ class StratifiedGCSplitter:
             y_balanced = y[balanced_indices]
             metadata_balanced = metadata.iloc[balanced_indices].reset_index(drop=True)
             
+            # Balance usage arrays if provided
+            usage_arrays_balanced = None
+            if usage_arrays is not None:
+                usage_arrays_balanced = {
+                    key: array[balanced_indices] for key, array in usage_arrays.items()
+                }
+            
         else:
             # No balancing, use original data
             X_balanced = X
             y_balanced = y
             metadata_balanced = metadata
+            usage_arrays_balanced = usage_arrays
         
         # Now perform stratified split on balanced data
-        return self.stratified_split(X_balanced, y_balanced, metadata_balanced, stratify_by)
+        return self.stratified_split(X_balanced, y_balanced, metadata_balanced, usage_arrays_balanced, stratify_by)
         
     def get_split_statistics(self, data_split: DataSplit) -> pd.DataFrame:
         """Generate comprehensive statistics for data splits."""

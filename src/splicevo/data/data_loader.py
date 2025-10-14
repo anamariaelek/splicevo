@@ -16,6 +16,7 @@ class MultiGenomeDataLoader:
     
     This class handles loading and processing splice site data from multiple genomes,
     keeping track of genome, chromosome, and transcript origin for each example.
+    Supports loading splice site usage statistics from tissue/cell-type specific files.
     """
     
     def __init__(self, 
@@ -33,11 +34,164 @@ class MultiGenomeDataLoader:
         self.genomes: Dict[str, GenomeData] = {}
         self.loaded_data: List[SpliceSite] = []
         self.orthology_table: Optional[pd.DataFrame] = None
+        self.usage_data: Dict[str, Dict[str, pd.DataFrame]] = {}  # {genome_id: {condition_key: usage_df}}
+        self.usage_conditions: List[Dict[str, str]] = []  # List of condition metadata
+        self.condition_to_key: Dict[str, str] = {}  # Maps (tissue, timepoint) to condition_key
         
         # Load orthology file if provided
         if orthology_file is not None:
             self._load_orthology_file(orthology_file)
+
+    def add_usage_file(self, 
+                      genome_id: str,
+                      usage_file: Union[str, Path],
+                      tissue: str,
+                      timepoint: Optional[str] = None) -> None:
+        """
+        Add a usage statistics file for a specific genome, tissue, and optionally timepoint.
+        
+        Args:
+            genome_id: Genome identifier
+            usage_file: Path to usage statistics file
+            tissue: Tissue or cell type name
+            timepoint: Optional timepoint identifier
             
+        Expected file format: TSV with columns: Sample, Region, Site, Strand, Gene, SSE, alpha_count, beta1_count, beta2_count
+        """
+        usage_path = Path(usage_file)
+        
+        if not usage_path.exists():
+            raise FileNotFoundError(f"Usage file not found: {usage_path}")
+            
+        # Create condition key
+        if timepoint is not None:
+            condition_key = f"{tissue}_{timepoint}"
+            condition_display = f"{tissue} {timepoint}"
+        else:
+            condition_key = tissue
+            condition_display = tissue
+            
+        print(f"Loading usage file for {genome_id} - {condition_display}: {usage_path}")
+        
+        try:
+            # Load usage data
+            df = pd.read_csv(usage_path, sep='\t', header=0, dtype={'Region': str})
+            
+            # Check required columns
+            required_columns = {'Sample', 'Region', 'Site', 'Strand', 'Gene', 'SSE', 'alpha_count', 'beta1_count', 'beta2_count'}
+            if not required_columns.issubset(set(df.columns)):
+                missing = required_columns - set(df.columns)
+                raise ValueError(f"Usage file missing required columns: {missing}")
+            
+            # Clean and validate data
+            df = df.dropna(subset=['Region', 'Site', 'Strand', 'SSE', 'alpha_count', 'beta1_count'])
+            df['Site'] = df['Site'].astype(int)
+            df['SSE'] = df['SSE'].astype(float)
+            df['alpha_count'] = df['alpha_count'].astype(float)
+            df['beta1_count'] = df['beta1_count'].astype(float)
+            df['beta2_count'] = df['beta2_count'].astype(float)
+            df['Strand'] = df['Strand'].astype(str)
+            df['Region'] = df['Region'].astype(str)
+            
+            # Create standardized columns for compatibility with existing code
+            df['chromosome'] = df['Region']
+            df['position'] = df['Site']
+            df['strand'] = df['Strand']
+            df['sse'] = df['SSE']
+            df['alpha'] = df['alpha_count']
+            df['beta'] = df['beta1_count'] + df['beta2_count']  # Combine beta counts
+            
+            # Create lookup key for fast access
+            df['lookup_key'] = df['chromosome'] + ':' + df['position'].astype(str) + ':' + df['strand']
+            
+            # Handle duplicates by taking the first occurrence
+            n_before = len(df)
+            df = df.drop_duplicates(subset=['lookup_key'], keep='first')
+            n_after = len(df)
+            if n_before != n_after:
+                print(f"Removed {n_before - n_after} duplicate entries")
+            
+            df = df.set_index('lookup_key')
+            
+            # Store in nested dictionary
+            if genome_id not in self.usage_data:
+                self.usage_data[genome_id] = {}
+                
+            self.usage_data[genome_id][condition_key] = df
+            
+            # Store condition metadata if not already present
+            condition_metadata = {
+                'condition_key': condition_key,
+                'tissue': tissue,
+                'timepoint': timepoint if timepoint is not None else 'NA',
+                'display_name': condition_display
+            }
+            
+            # Check if this condition already exists
+            existing_condition = None
+            for cond in self.usage_conditions:
+                if cond['condition_key'] == condition_key:
+                    existing_condition = cond
+                    break
+                    
+            if existing_condition is None:
+                self.usage_conditions.append(condition_metadata)
+                self.condition_to_key[f"{tissue}_{timepoint if timepoint else 'NA'}"] = condition_key
+            
+            print(f"Loaded {len(df)} usage entries for {condition_display}")
+            
+        except Exception as e:
+            raise ValueError(f"Failed to load usage file {usage_path}: {e}")
+    
+    def get_available_conditions(self) -> pd.DataFrame:
+        """
+        Get a DataFrame of all available usage conditions.
+        
+        Returns:
+            DataFrame with columns: condition_key, tissue, timepoint, display_name
+        """
+        return pd.DataFrame(self.usage_conditions)
+    
+    def get_usage_stats(self, 
+                       genome_id: str, 
+                       chromosome: str, 
+                       position: int, 
+                       strand: str) -> Dict[str, Dict[str, float]]:
+        """
+        Get usage statistics for a splice site across all conditions.
+        
+        Args:
+            genome_id: Genome identifier
+            chromosome: Chromosome name
+            position: Genomic position
+            strand: Strand (+ or -)
+            
+        Returns:
+            Dictionary mapping condition_key -> {alpha, beta, sse}
+        """
+        usage_stats = {}
+        
+        if genome_id not in self.usage_data:
+            return usage_stats
+            
+        lookup_key = f"{chromosome}:{position}:{strand}"
+        
+        for condition_key, usage_df in self.usage_data[genome_id].items():
+            if lookup_key in usage_df.index:
+                row = usage_df.loc[lookup_key]
+                # Handle case where row might be a Series (single match) or DataFrame (multiple matches)
+                if isinstance(row, pd.DataFrame):
+                    # Take the first row if there are duplicates (shouldn't happen after deduplication)
+                    row = row.iloc[0]
+                
+                usage_stats[condition_key] = {
+                    'alpha': float(row['alpha']),
+                    'beta': float(row['beta']),
+                    'sse': float(row['sse'])
+                }
+                
+        return usage_stats
+
     def _load_orthology_file(self, orthology_file: Union[str, Path]) -> None:
         """
         Load orthology mapping from file.
@@ -165,6 +319,9 @@ class MultiGenomeDataLoader:
         
         for pos in sampled_positions:
             try:
+                # Get usage stats for this position
+                usage_stats = self.get_usage_stats(genome_id, chrom, pos, transcript.strand)
+                
                 negative_site = SpliceSite.from_genomic_position(
                     genome_id=genome_id,
                     chromosome=chrom,
@@ -174,7 +331,8 @@ class MultiGenomeDataLoader:
                     site_type=0,  # negative
                     strand=transcript.strand,
                     genome=genome,
-                    window_size=self.window_size
+                    window_size=self.window_size,
+                    site_usage=usage_stats
                 )
                 negative_examples.append(negative_site)
             except Exception as e:
@@ -226,6 +384,7 @@ class MultiGenomeDataLoader:
                 
                 # Collect donor sites in bulk
                 for donor_pos in transcript.splice_donor_sites:
+                    usage_stats = self.get_usage_stats(genome_id, chrom, donor_pos, transcript.strand)
                     batch_positives.append({
                         'genome_id': genome_id,
                         'chromosome': chrom,
@@ -234,11 +393,12 @@ class MultiGenomeDataLoader:
                         'position': donor_pos,
                         'site_type': 1,  # donor
                         'strand': transcript.strand,
-                        'site_usage': {}
+                        'site_usage': usage_stats
                     })
                     
                 # Collect acceptor sites in bulk
                 for acceptor_pos in transcript.splice_acceptor_sites:
+                    usage_stats = self.get_usage_stats(genome_id, chrom, acceptor_pos, transcript.strand)
                     batch_positives.append({
                         'genome_id': genome_id,
                         'chromosome': chrom,
@@ -247,7 +407,7 @@ class MultiGenomeDataLoader:
                         'position': acceptor_pos,
                         'site_type': 2,  # acceptor
                         'strand': transcript.strand,
-                        'site_usage': {}
+                        'site_usage': usage_stats
                     })
                 
                 # Generate negative positions efficiently
@@ -255,6 +415,7 @@ class MultiGenomeDataLoader:
                 if n_negatives > 0:
                     negative_positions = self._generate_negative_positions(transcript, n_negatives)
                     for neg_pos in negative_positions:
+                        usage_stats = self.get_usage_stats(genome_id, chrom, neg_pos, transcript.strand)
                         batch_negatives.append({
                             'genome_id': genome_id,
                             'chromosome': chrom,
@@ -263,7 +424,7 @@ class MultiGenomeDataLoader:
                             'position': neg_pos,
                             'site_type': 0,  # negative
                             'strand': transcript.strand,
-                            'site_usage': {}
+                            'site_usage': usage_stats
                         })
             
             # Bulk extend instead of individual appends
@@ -320,7 +481,8 @@ class MultiGenomeDataLoader:
     def load_genome_data(self, 
                         genome_id: str, 
                         negative_ratio: float = 2.0,
-                        max_transcripts: Optional[int] = None) -> List[SpliceSite]:
+                        max_transcripts: Optional[int] = None,
+                        batch_size: int = 10000) -> List[SpliceSite]:
         """
         Load splice site data from a specific genome using optimized batch processing.
         
@@ -328,6 +490,7 @@ class MultiGenomeDataLoader:
             genome_id: ID of the genome to load
             negative_ratio: Ratio of negative to positive examples
             max_transcripts: Maximum number of transcripts to process (None for all)
+            batch_size: Number of sequences to process in each batch
             
         Returns:
             List of splice sites
@@ -357,15 +520,29 @@ class MultiGenomeDataLoader:
             print("No splice sites found")
             return []
         
-        # Batch process all sequences (this is the optimized part!)
-        print(f"Batch processing {len(positions_data)} sequences...")
-        examples = SpliceSite.from_positions_batch(
-            positions_data, genome, self.window_size
-        )
+        # Process sequences in smaller batches to reduce memory usage
+        print(f"Batch processing {len(positions_data)} sequences in batches of {batch_size}...")
+        all_examples = []
         
-        print(f"Loaded {len(examples)} examples ({positive_count} positive, "
-              f"{len(examples) - positive_count} negative)")
-        return examples
+        for i in range(0, len(positions_data), batch_size):
+            batch_end = min(i + batch_size, len(positions_data))
+            batch_positions = positions_data[i:batch_end]
+            
+            if i % (batch_size * 5) == 0:
+                print(f"Processing sequence batch {i//batch_size + 1}/{(len(positions_data) + batch_size - 1)//batch_size}")
+            
+            batch_examples = SpliceSite.from_positions_batch(
+                batch_positions, genome, self.window_size
+            )
+            all_examples.extend(batch_examples)
+            
+            # Force garbage collection to free memory
+            import gc
+            gc.collect()
+        
+        print(f"Loaded {len(all_examples)} examples ({positive_count} positive, "
+              f"{len(all_examples) - positive_count} negative)")
+        return all_examples
      
     def load_all_genomes(self, 
                         negative_ratio: float = 2.0,
@@ -523,12 +700,17 @@ class MultiGenomeDataLoader:
         """Check if orthology data is available."""
         return self.orthology_table is not None and len(self.orthology_table) > 0
 
-    def to_arrays(self) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    def to_arrays(self) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
         """
         Convert loaded data to arrays suitable for ML training.
         
         Returns:
-            Tuple of (sequences, labels, metadata_df)
+            Tuple of (sequences, labels, usage_arrays, metadata_df)
+            - sequences: DNA sequences as strings
+            - labels: Site type labels (0=negative, 1=donor, 2=acceptor)
+            - usage_arrays: Dictionary with keys 'alpha', 'beta', 'sse', each containing
+              arrays of shape (n_samples, n_conditions) for multi-task learning
+            - metadata_df: DataFrame with additional metadata including condition info
         """
         if not self.loaded_data:
             raise ValueError("No data loaded. Call load_all_genomes() first.")
@@ -536,8 +718,23 @@ class MultiGenomeDataLoader:
         sequences = np.array([example.sequence for example in self.loaded_data])
         labels = np.array([example.site_type for example in self.loaded_data])
         
-        metadata = pd.DataFrame([
-            {
+        # Initialize usage arrays
+        n_samples = len(self.loaded_data)
+        n_conditions = len(self.usage_conditions)
+        
+        usage_arrays = {
+            'alpha': np.full((n_samples, n_conditions), np.nan, dtype=np.float32),
+            'beta': np.full((n_samples, n_conditions), np.nan, dtype=np.float32), 
+            'sse': np.full((n_samples, n_conditions), np.nan, dtype=np.float32)
+        }
+        
+        # Create condition index mapping for efficient lookup
+        condition_to_idx = {cond['condition_key']: idx for idx, cond in enumerate(self.usage_conditions)}
+        
+        # Build metadata and fill usage arrays
+        metadata_rows = []
+        for sample_idx, example in enumerate(self.loaded_data):
+            row = {
                 'genome_id': example.genome_id,
                 'chromosome': example.chromosome,
                 'transcript_id': example.transcript_id,
@@ -545,17 +742,134 @@ class MultiGenomeDataLoader:
                 'position': example.position,
                 'gc_content': example.gc_content,
                 'strand': example.strand,
-                'site_usage': example.site_usage
+                'n_conditions_with_usage': len(example.site_usage)
             }
-            for example in self.loaded_data
-        ])
+            
+            # Fill usage arrays for this sample
+            for condition_key, usage_stats in example.site_usage.items():
+                if condition_key in condition_to_idx:
+                    condition_idx = condition_to_idx[condition_key]
+                    usage_arrays['alpha'][sample_idx, condition_idx] = usage_stats['alpha']
+                    usage_arrays['beta'][sample_idx, condition_idx] = usage_stats['beta']
+                    usage_arrays['sse'][sample_idx, condition_idx] = usage_stats['sse']
+            
+            metadata_rows.append(row)
+        
+        metadata = pd.DataFrame(metadata_rows)
+        
+        # Add condition availability flags to metadata
+        for cond in self.usage_conditions:
+            condition_key = cond['condition_key']
+            if condition_key in condition_to_idx:
+                condition_idx = condition_to_idx[condition_key]
+                metadata[f'has_{condition_key}_usage'] = ~np.isnan(usage_arrays['sse'][:, condition_idx])
         
         # Add ortholog group information if available
         if self.orthology_table is not None:
             metadata = self._add_ortholog_groups(metadata)
         
         # Ensure data and metadata are aligned
-        assert len(sequences) == len(labels) == len(metadata), "Data and metadata lengths do not match" 
+        assert len(sequences) == len(labels) == len(metadata), "Data and metadata lengths do not match"
+        assert usage_arrays['alpha'].shape[0] == len(sequences), "Usage arrays and sequences length mismatch"
 
-        return sequences, labels, metadata
+        return sequences, labels, usage_arrays, metadata
+    
+    def get_usage_array_info(self) -> Dict[str, any]:
+        """
+        Get information about usage arrays structure.
         
+        Returns:
+            Dictionary with usage array metadata including condition details
+        """
+        if not self.loaded_data:
+            return {}
+            
+        sequences, labels, usage_arrays, metadata = self.to_arrays()
+        
+        info = {
+            'n_samples': usage_arrays['alpha'].shape[0],
+            'n_conditions': usage_arrays['alpha'].shape[1],
+            'conditions': self.usage_conditions,
+            'condition_coverage': {}
+        }
+        
+        # Calculate coverage per condition
+        for i, cond in enumerate(self.usage_conditions):
+            condition_key = cond['condition_key']
+            n_with_data = np.sum(~np.isnan(usage_arrays['sse'][:, i]))
+            info['condition_coverage'][condition_key] = {
+                'tissue': cond['tissue'],
+                'timepoint': cond['timepoint'],
+                'display_name': cond['display_name'],
+                'n_samples_with_data': int(n_with_data),
+                'coverage_fraction': float(n_with_data / info['n_samples']),
+                'mean_sse': float(np.nanmean(usage_arrays['sse'][:, i])),
+                'mean_alpha': float(np.nanmean(usage_arrays['alpha'][:, i])),
+                'mean_beta': float(np.nanmean(usage_arrays['beta'][:, i]))
+            }
+        
+        return info
+
+    def get_usage_summary(self) -> pd.DataFrame:
+        """
+        Get summary of usage data coverage across genomes and conditions.
+        
+        Returns:
+            DataFrame with usage statistics summary
+        """
+        summary_rows = []
+        
+        for genome_id, conditions_data in self.usage_data.items():
+            for condition_key, usage_df in conditions_data.items():
+                # Find condition metadata
+                condition_info = next((c for c in self.usage_conditions if c['condition_key'] == condition_key), {})
+                
+                summary_rows.append({
+                    'genome_id': genome_id,
+                    'condition_key': condition_key,
+                    'tissue': condition_info.get('tissue', 'unknown'),
+                    'timepoint': condition_info.get('timepoint', 'NA'),
+                    'display_name': condition_info.get('display_name', condition_key),
+                    'n_sites': len(usage_df),
+                    'mean_sse': usage_df['sse'].mean(),
+                    'std_sse': usage_df['sse'].std(),
+                    'mean_alpha': usage_df['alpha'].mean(),
+                    'mean_beta': usage_df['beta'].mean()
+                })
+        
+        return pd.DataFrame(summary_rows)
+    
+    def filter_by_usage_coverage(self, min_conditions: int = 1) -> 'MultiGenomeDataLoader':
+        """
+        Create a filtered version of the data loader with sites having usage data in at least min_conditions.
+        
+        Args:
+            min_conditions: Minimum number of conditions with usage data required
+            
+        Returns:
+            New MultiGenomeDataLoader instance with filtered data
+        """
+        if not self.loaded_data:
+            raise ValueError("No data loaded. Call load_all_genomes() first.")
+            
+        filtered_data = []
+        
+        for example in self.loaded_data:
+            if len(example.site_usage) >= min_conditions:
+                filtered_data.append(example)
+        
+        # Create new instance with filtered data
+        filtered_loader = MultiGenomeDataLoader(
+            window_size=self.window_size
+        )
+        filtered_loader.genomes = self.genomes
+        filtered_loader.orthology_table = self.orthology_table
+        filtered_loader.usage_data = self.usage_data
+        filtered_loader.usage_conditions = self.usage_conditions
+        filtered_loader.condition_to_key = self.condition_to_key
+        filtered_loader.loaded_data = filtered_data
+        
+        print(f"Filtered from {len(self.loaded_data)} to {len(filtered_data)} examples "
+              f"(min_conditions={min_conditions})")
+        
+        return filtered_loader

@@ -129,7 +129,7 @@ class SpliceSite:
         """
         Create multiple SpliceSite instances efficiently by batching sequence extraction.
         
-        This is much faster than calling from_genomic_position() repeatedly.
+        This should be faster than calling from_genomic_position() repeatedly.
         
         Args:
             positions_data: List of dicts with keys: genome_id, chromosome, transcript_id,
@@ -205,7 +205,7 @@ class SpliceSite:
                     sequences.append('N' * window_size)
                     gc_contents.append(0.0)
             
-            # Batch one-hot encode all sequences for this chromosome
+            # Batch one-hot encode
             try:
                 from tangermeme.utils import one_hot_encode
                 # Try to batch encode if possible
