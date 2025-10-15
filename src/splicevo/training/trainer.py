@@ -1,0 +1,318 @@
+"""Training module for splice site prediction models."""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from typing import Dict, Optional, Callable
+import numpy as np
+from pathlib import Path
+import json
+from datetime import datetime
+
+
+class SpliceTrainer:
+    """
+    Trainer class for splice site prediction with multi-task learning.
+    
+    Handles training, validation, checkpointing, and logging for models
+    with dual decoders (splice site classification + usage prediction).
+    """
+    
+    def __init__(
+        self,
+        model: nn.Module,
+        train_loader: DataLoader,
+        val_loader: Optional[DataLoader] = None,
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        learning_rate: float = 1e-4,
+        weight_decay: float = 1e-5,
+        splice_weight: float = 1.0,
+        usage_weight: float = 0.5,
+        class_weights: Optional[torch.Tensor] = None,
+        checkpoint_dir: Optional[str] = None
+    ):
+        """
+        Initialize trainer.
+        
+        Args:
+            model: The model to train
+            train_loader: DataLoader for training data
+            val_loader: DataLoader for validation data
+            device: Device to train on ('cuda' or 'cpu')
+            learning_rate: Initial learning rate
+            weight_decay: L2 regularization weight
+            splice_weight: Weight for splice classification loss
+            usage_weight: Weight for usage prediction loss
+            class_weights: Weights for each splice site class (for imbalanced data)
+            checkpoint_dir: Directory to save checkpoints
+        """
+        self.model = model.to(device)
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.device = device
+        
+        # Loss functions
+        if class_weights is not None:
+            class_weights = class_weights.to(device)
+        self.splice_criterion = nn.CrossEntropyLoss(weight=class_weights)
+        self.usage_criterion = nn.MSELoss()
+        
+        # Loss weights for multi-task learning
+        self.splice_weight = splice_weight
+        self.usage_weight = usage_weight
+        
+        # Optimizer and scheduler
+        self.optimizer = optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay
+        )
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=len(train_loader) * 100  # Assume max 100 epochs
+        )
+        
+        # Checkpointing
+        self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
+        if self.checkpoint_dir:
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Training state
+        self.current_epoch = 0
+        self.best_val_loss = float('inf')
+        self.history = {
+            'train_loss': [],
+            'train_splice_loss': [],
+            'train_usage_loss': [],
+            'val_loss': [],
+            'val_splice_loss': [],
+            'val_usage_loss': [],
+            'learning_rate': []
+        }
+    
+    def train_epoch(self) -> Dict[str, float]:
+        """Train for one epoch."""
+        self.model.train()
+        
+        total_loss = 0
+        total_splice_loss = 0
+        total_usage_loss = 0
+        n_batches = 0
+        
+        for batch in self.train_loader:
+            sequences = batch['sequences'].to(self.device)
+            splice_labels = batch['splice_labels'].to(self.device)
+            usage_targets = batch['usage_targets'].to(self.device)
+            
+            # Forward pass
+            output = self.model(sequences)
+            
+            # Compute splice classification loss
+            splice_logits = output['splice_logits']
+            splice_loss = self.splice_criterion(
+                splice_logits.view(-1, splice_logits.size(-1)),
+                splice_labels.view(-1)
+            )
+            
+            # Compute usage prediction loss (only at actual splice sites)
+            splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)
+            # Shape: (batch, seq_len, 1, 1)
+            
+            usage_predictions = output['usage_predictions']
+            
+            # Mask out non-splice-site positions and NaN values
+            valid_mask = splice_mask & ~torch.isnan(usage_targets)
+            
+            if valid_mask.sum() > 0:
+                usage_loss = self.usage_criterion(
+                    usage_predictions[valid_mask],
+                    usage_targets[valid_mask]
+                )
+            else:
+                usage_loss = torch.tensor(0.0, device=self.device)
+            
+            # Combined loss
+            loss = (
+                self.splice_weight * splice_loss +
+                self.usage_weight * usage_loss
+            )
+            
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
+            self.scheduler.step()
+            
+            # Accumulate losses
+            total_loss += loss.item()
+            total_splice_loss += splice_loss.item()
+            total_usage_loss += usage_loss.item()
+            n_batches += 1
+        
+        return {
+            'loss': total_loss / n_batches,
+            'splice_loss': total_splice_loss / n_batches,
+            'usage_loss': total_usage_loss / n_batches
+        }
+    
+    def validate(self) -> Dict[str, float]:
+        """Validate the model."""
+        if self.val_loader is None:
+            return {}
+        
+        self.model.eval()
+        
+        total_loss = 0
+        total_splice_loss = 0
+        total_usage_loss = 0
+        n_batches = 0
+        
+        with torch.no_grad():
+            for batch in self.val_loader:
+                sequences = batch['sequences'].to(self.device)
+                splice_labels = batch['splice_labels'].to(self.device)
+                usage_targets = batch['usage_targets'].to(self.device)
+                
+                # Forward pass
+                output = self.model(sequences)
+                
+                # Compute losses (same as training)
+                splice_logits = output['splice_logits']
+                splice_loss = self.splice_criterion(
+                    splice_logits.view(-1, splice_logits.size(-1)),
+                    splice_labels.view(-1)
+                )
+                
+                splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)
+                usage_predictions = output['usage_predictions']
+                valid_mask = splice_mask & ~torch.isnan(usage_targets)
+                
+                if valid_mask.sum() > 0:
+                    usage_loss = self.usage_criterion(
+                        usage_predictions[valid_mask],
+                        usage_targets[valid_mask]
+                    )
+                else:
+                    usage_loss = torch.tensor(0.0, device=self.device)
+                
+                loss = (
+                    self.splice_weight * splice_loss +
+                    self.usage_weight * usage_loss
+                )
+                
+                total_loss += loss.item()
+                total_splice_loss += splice_loss.item()
+                total_usage_loss += usage_loss.item()
+                n_batches += 1
+        
+        return {
+            'loss': total_loss / n_batches,
+            'splice_loss': total_splice_loss / n_batches,
+            'usage_loss': total_usage_loss / n_batches
+        }
+    
+    def train(
+        self,
+        n_epochs: int,
+        verbose: bool = True,
+        save_best: bool = True,
+        early_stopping_patience: Optional[int] = None
+    ):
+        """
+        Train the model for multiple epochs.
+        
+        Args:
+            n_epochs: Number of epochs to train
+            verbose: Whether to print progress
+            save_best: Whether to save best model checkpoint
+            early_stopping_patience: Stop if no improvement for N epochs
+        """
+        epochs_without_improvement = 0
+        
+        for epoch in range(n_epochs):
+            self.current_epoch = epoch
+            
+            # Train
+            train_metrics = self.train_epoch()
+            
+            # Validate
+            val_metrics = self.validate()
+            
+            # Update history
+            self.history['train_loss'].append(train_metrics['loss'])
+            self.history['train_splice_loss'].append(train_metrics['splice_loss'])
+            self.history['train_usage_loss'].append(train_metrics['usage_loss'])
+            self.history['learning_rate'].append(self.optimizer.param_groups[0]['lr'])
+            
+            if val_metrics:
+                self.history['val_loss'].append(val_metrics['loss'])
+                self.history['val_splice_loss'].append(val_metrics['splice_loss'])
+                self.history['val_usage_loss'].append(val_metrics['usage_loss'])
+            
+            # Print progress
+            if verbose:
+                msg = f"Epoch {epoch+1}/{n_epochs} - "
+                msg += f"Train Loss: {train_metrics['loss']:.4f} "
+                msg += f"(Splice: {train_metrics['splice_loss']:.4f}, "
+                msg += f"Usage: {train_metrics['usage_loss']:.4f})"
+                
+                if val_metrics:
+                    msg += f" - Val Loss: {val_metrics['loss']:.4f} "
+                    msg += f"(Splice: {val_metrics['splice_loss']:.4f}, "
+                    msg += f"Usage: {val_metrics['usage_loss']:.4f})"
+                
+                print(msg)
+            
+            # Save best model
+            if save_best and val_metrics:
+                if val_metrics['loss'] < self.best_val_loss:
+                    self.best_val_loss = val_metrics['loss']
+                    epochs_without_improvement = 0
+                    if self.checkpoint_dir:
+                        self.save_checkpoint('best_model.pt')
+                        if verbose:
+                            print(f"  → Saved best model (val_loss: {self.best_val_loss:.4f})")
+                else:
+                    epochs_without_improvement += 1
+            
+            # Early stopping
+            if early_stopping_patience and epochs_without_improvement >= early_stopping_patience:
+                if verbose:
+                    print(f"Early stopping after {epoch+1} epochs")
+                break
+            
+            # Save periodic checkpoint
+            if self.checkpoint_dir and (epoch + 1) % 10 == 0:
+                self.save_checkpoint(f'checkpoint_epoch_{epoch+1}.pt')
+    
+    def save_checkpoint(self, filename: str):
+        """Save model checkpoint."""
+        if self.checkpoint_dir is None:
+            return
+        
+        checkpoint = {
+            'epoch': self.current_epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'best_val_loss': self.best_val_loss,
+            'history': self.history
+        }
+        
+        torch.save(checkpoint, self.checkpoint_dir / filename)
+    
+    def load_checkpoint(self, filename: str):
+        """Load model checkpoint."""
+        if self.checkpoint_dir is None:
+            raise ValueError("checkpoint_dir not set")
+        
+        checkpoint = torch.load(self.checkpoint_dir / filename, map_location=self.device)
+        
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        self.current_epoch = checkpoint['epoch']
+        self.best_val_loss = checkpoint['best_val_loss']
+        self.history = checkpoint['history']
