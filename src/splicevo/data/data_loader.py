@@ -19,28 +19,273 @@ class MultiGenomeDataLoader:
     Supports loading splice site usage statistics from tissue/cell-type specific files.
     """
     
-    def __init__(self, 
-                 window_size: int = 200,
+    def __init__(self,
                  orthology_file: Optional[Union[str, Path]] = None):
         """
         Initialize the data loader.
         
         Args:
-            window_size: Size of sequence window around splice sites
             orthology_file: Path to orthology TSV file with columns 
                             'ortholog_group', 'gene_id', 'genome_id'
         """
-        self.window_size = window_size
         self.genomes: Dict[str, GenomeData] = {}
         self.loaded_data: List[SpliceSite] = []
         self.orthology_table: Optional[pd.DataFrame] = None
         self.usage_data: Dict[str, Dict[str, pd.DataFrame]] = {}  # {genome_id: {condition_key: usage_df}}
         self.usage_conditions: List[Dict[str, str]] = []  # List of condition metadata
         self.condition_to_key: Dict[str, str] = {}  # Maps (tissue, timepoint) to condition_key
-        
         # Load orthology file if provided
         if orthology_file is not None:
             self._load_orthology_file(orthology_file)
+        
+    def add_genome(self, 
+                   genome_id: str, 
+                   genome_path: Union[str, Path], 
+                   gtf_path: Union[str, Path],
+                   chromosomes: Optional[List[str]] = None,
+                   metadata: Optional[Dict] = None) -> None:
+        """
+        Add a genome to the data loader.
+        
+        Args:
+            genome_id: Unique identifier for the genome
+            genome_path: Path to the genome FASTA file
+            gtf_path: Path to the GTF annotation file
+            chromosomes: List of chromosomes to include (None for all)
+            metadata: Additional metadata for the genome
+        """
+        if metadata is None:
+            metadata = {}
+            
+        self.genomes[genome_id] = GenomeData(
+            genome_id=genome_id,
+            genome_path=Path(genome_path),
+            gtf_path=Path(gtf_path),
+            chromosomes=chromosomes,
+            metadata=metadata
+        )
+
+    def _load_orthology_file(self, orthology_file: Union[str, Path]) -> None:
+        """
+        Load orthology mapping from file.
+        
+        Args:
+            orthology_file: Path to orthology file
+            
+        Expected format: TSV file with columns: ortholog_group, gene_id, genome_id
+        """
+        orthology_path = Path(orthology_file)
+        
+        if not orthology_path.exists():
+            raise FileNotFoundError(f"Orthology file not found: {orthology_path}")
+            
+        print(f"Loading orthology file: {orthology_path}")
+        
+        try:
+            # Read as tab-separated file
+            df = pd.read_csv(orthology_path, sep='\t', header=0)
+            
+            # Check for required columns
+            required_columns = {'ortholog_group', 'gene_id', 'genome_id'}
+            available_columns = set(df.columns)
+            
+            if not required_columns.issubset(available_columns):
+                missing_columns = required_columns - available_columns
+                raise ValueError(
+                    f"Orthology file missing required columns: {missing_columns}. "
+                    f"Expected columns: {required_columns}, found: {available_columns}"
+                )
+            
+            # Use provided table
+            self.orthology_table = df[['ortholog_group', 'gene_id', 'genome_id']].copy()
+            
+            # Clean up the data
+            self.orthology_table = self.orthology_table.dropna()
+
+            # Make sure that each gene_id genome_id pair appears only once
+            self.orthology_table = self.orthology_table.drop_duplicates(subset=['gene_id', 'genome_id'])
+
+            # Ensure correct data types
+            self.orthology_table['gene_id'] = self.orthology_table['gene_id'].astype(str)
+            self.orthology_table['ortholog_group'] = self.orthology_table['ortholog_group'].astype(str)
+            self.orthology_table['genome_id'] = self.orthology_table['genome_id'].astype(str)
+            
+            print(f"Loaded orthology mappings for {len(self.orthology_table)} genes from "
+                  f"{self.orthology_table['genome_id'].nunique()} genomes in "
+                  f"{self.orthology_table['ortholog_group'].nunique()} ortholog groups")
+                  
+        except Exception as e:
+            print(f"Warning: Could not load orthology file {orthology_path}: {e}")
+            self.orthology_table = None
+            
+    def _collect_all_positions(self, 
+                             transcripts: List[Transcript],
+                             genome_id: str) -> Tuple[List[Dict], int]:
+        """
+        Collect all splice site positions for batch processing using optimized bulk operations.
+        
+        Args:
+            transcripts: List of Transcript objects
+            genome_id: Genome identifier
+            
+        Returns:
+            Tuple of (positions_data, positive_count)
+        """
+        print(f"Collecting positions from {len(transcripts)} transcripts...")
+        
+        # Pre-allocate lists for bulk operations
+        all_positions = []
+        positive_count = 0
+        
+        # Process transcripts in batches for better memory usage
+        batch_size = 1000
+        for batch_start in range(0, len(transcripts), batch_size):
+            batch_end = min(batch_start + batch_size, len(transcripts))
+            batch_transcripts = transcripts[batch_start:batch_end]
+            
+            if batch_start % 5000 == 0:
+                print(f"Processing batch {batch_start//batch_size + 1}/{(len(transcripts) + batch_size - 1)//batch_size}")
+            
+            # Collect all positive positions for this batch
+            batch_positives = []
+            
+            for transcript in batch_transcripts:
+                # Skip transcripts without splice sites
+                if len(transcript.splice_donor_sites) == 0 and len(transcript.splice_acceptor_sites) == 0:
+                    continue
+                    
+                chrom = transcript.exons.iloc[0]['chrom']
+                
+                # Collect donor sites in bulk
+                for donor_pos in transcript.splice_donor_sites:
+                    usage_stats = self.get_usage_stats(genome_id, chrom, donor_pos, transcript.strand)
+                    batch_positives.append({
+                        'genome_id': genome_id,
+                        'chromosome': chrom,
+                        'transcript_id': transcript.transcript_id,
+                        'gene_id': transcript.gene_id,
+                        'position': donor_pos,
+                        'site_type': 1,  # donor
+                        'strand': transcript.strand,
+                        'site_usage': usage_stats
+                    })
+                    
+                # Collect acceptor sites in bulk
+                for acceptor_pos in transcript.splice_acceptor_sites:
+                    usage_stats = self.get_usage_stats(genome_id, chrom, acceptor_pos, transcript.strand)
+                    batch_positives.append({
+                        'genome_id': genome_id,
+                        'chromosome': chrom,
+                        'transcript_id': transcript.transcript_id,
+                        'gene_id': transcript.gene_id,
+                        'position': acceptor_pos,
+                        'site_type': 2,  # acceptor
+                        'strand': transcript.strand,
+                        'site_usage': usage_stats
+                    })
+            
+            # Bulk extend instead of individual appends
+            all_positions.extend(batch_positives)
+            positive_count += len(batch_positives)
+        
+        print(f"Collected {len(all_positions)} positions ({positive_count} positive)")
+        return all_positions, positive_count
+    
+    def load_genome_data(self, 
+                        genome_id: str, 
+                        max_transcripts: Optional[int] = None) -> List[SpliceSite]:
+        """
+        Load splice site data from a specific genome using optimized batch processing.
+        
+        Args:
+            genome_id: ID of the genome to load
+            max_transcripts: Maximum number of transcripts to process (None for all)
+            
+        Returns:
+            List of splice sites
+        """
+        if genome_id not in self.genomes:
+            raise ValueError(f"Genome {genome_id} not found. Add it first with add_genome().")
+            
+        genome_data = self.genomes[genome_id]
+        
+        # Load genome and annotations
+        print(f"Loading genome {genome_id}...")
+        genome = genome_data.load_genome()
+        
+        print(f"Processing GTF annotations for {genome_id}...")
+        gtf_processor = GTFProcessor(str(genome_data.gtf_path))
+        transcripts = gtf_processor.process_gtf(chromosomes=genome_data.chromosomes)
+        
+        if max_transcripts is not None:
+            transcripts = transcripts[:max_transcripts]
+        
+        # Collect all positions first (fast)
+        positions_data, positive_count = self._collect_all_positions(
+            transcripts, genome_id
+        )
+        
+        if not positions_data:
+            print("No splice sites found")
+            return []
+        
+        # Process all splice sites
+        print(f"Processing {len(positions_data)} sequences...")
+        examples = SpliceSite.from_positions_batch(positions_data)
+        print(f"Loaded {len(examples)} examples")
+        return examples
+
+    def load_all_genomes_data(self,
+                              max_transcripts_per_genome: Optional[int] = None) -> None:
+        """
+        Load data from all added genomes using optimized parallel batch processing.
+        
+        Args:
+            batch_size: Number of sequences to process in each batch
+            max_transcripts_per_genome: Maximum transcripts per genome
+            n_jobs: Number of parallel jobs (None for auto-detection)
+        """
+        self.loaded_data = []
+        
+        for genome_id in self.genomes:
+            # Load all splice sites
+            genome_examples = self.load_genome_data(
+                genome_id, 
+                max_transcripts=max_transcripts_per_genome
+            )
+            self.loaded_data.extend(genome_examples)
+            
+        print(f"Total loaded examples: {len(self.loaded_data)}")
+        
+    def get_dataframe(self) -> pd.DataFrame:
+        """Get loaded data as DataFrame"""
+        if not self.loaded_data:
+            return pd.DataFrame()
+        
+        loaded_data = []
+
+        for example in self.loaded_data:
+            loaded_data.append({
+                'position': example.position,
+                'genome_id': example.genome_id,
+                'chromosome': example.chromosome,
+                'gene_id': example.gene_id,
+                'transcript_id': example.transcript_id,
+                'site_type': example.site_type,
+                'strand': example.strand
+            })
+        df = pd.DataFrame(loaded_data)
+        return df
+    
+    def get_summary(self) -> pd.DataFrame:
+        """Get summary statistics of loaded data."""
+        df = self.get_dataframe()
+        summary = df.groupby(['genome_id', 'site_type']).agg({
+            'chromosome': 'nunique',
+            'strand': 'count'
+        })
+        
+        return summary
 
     def add_usage_file(self, 
                       genome_id: str,
@@ -192,589 +437,8 @@ class MultiGenomeDataLoader:
                 
         return usage_stats
 
-    def _load_orthology_file(self, orthology_file: Union[str, Path]) -> None:
-        """
-        Load orthology mapping from file.
-        
-        Args:
-            orthology_file: Path to orthology file
-            
-        Expected format: TSV file with columns: ortholog_group, gene_id, genome_id
-        """
-        orthology_path = Path(orthology_file)
-        
-        if not orthology_path.exists():
-            raise FileNotFoundError(f"Orthology file not found: {orthology_path}")
-            
-        print(f"Loading orthology file: {orthology_path}")
-        
-        try:
-            # Read as tab-separated file
-            df = pd.read_csv(orthology_path, sep='\t', header=0)
-            
-            # Check for required columns
-            required_columns = {'ortholog_group', 'gene_id', 'genome_id'}
-            available_columns = set(df.columns)
-            
-            if not required_columns.issubset(available_columns):
-                missing_columns = required_columns - available_columns
-                raise ValueError(
-                    f"Orthology file missing required columns: {missing_columns}. "
-                    f"Expected columns: {required_columns}, found: {available_columns}"
-                )
-            
-            # Use provided table
-            self.orthology_table = df[['ortholog_group', 'gene_id', 'genome_id']].copy()
-            
-            # Clean up the data
-            self.orthology_table = self.orthology_table.dropna()
-
-            # Make sure that each gene_id genome_id pair appears only once
-            self.orthology_table = self.orthology_table.drop_duplicates(subset=['gene_id', 'genome_id'])
-
-            # Ensure correct data types
-            self.orthology_table['gene_id'] = self.orthology_table['gene_id'].astype(str)
-            self.orthology_table['ortholog_group'] = self.orthology_table['ortholog_group'].astype(str)
-            self.orthology_table['genome_id'] = self.orthology_table['genome_id'].astype(str)
-            
-            print(f"Loaded orthology mappings for {len(self.orthology_table)} genes from "
-                  f"{self.orthology_table['genome_id'].nunique()} genomes in "
-                  f"{self.orthology_table['ortholog_group'].nunique()} ortholog groups")
-                  
-        except Exception as e:
-            print(f"Warning: Could not load orthology file {orthology_path}: {e}")
-            self.orthology_table = None
-        
-    def add_genome(self, 
-                   genome_id: str, 
-                   genome_path: Union[str, Path], 
-                   gtf_path: Union[str, Path],
-                   chromosomes: Optional[List[str]] = None,
-                   metadata: Optional[Dict] = None) -> None:
-        """
-        Add a genome to the data loader.
-        
-        Args:
-            genome_id: Unique identifier for the genome
-            genome_path: Path to the genome FASTA file
-            gtf_path: Path to the GTF annotation file
-            chromosomes: List of chromosomes to include (None for all)
-            metadata: Additional metadata for the genome
-        """
-        if metadata is None:
-            metadata = {}
-            
-        self.genomes[genome_id] = GenomeData(
-            genome_id=genome_id,
-            genome_path=Path(genome_path),
-            gtf_path=Path(gtf_path),
-            chromosomes=chromosomes,
-            metadata=metadata
-        )
-        
-    def generate_negative_examples(self, 
-                                  transcript: Transcript, 
-                                  genome,
-                                  genome_id: str,
-                                  n_negatives: int) -> List[SpliceSite]:
-        """
-        Generate negative examples from transcript sequence.
-        
-        Args:
-            transcript: Transcript object
-            genome: Loaded genome object
-            genome_id: Genome identifier
-            n_negatives: Number of negative examples to generate
-            
-        Returns:
-            List of negative splice site examples
-        """
-        negative_examples = []
-        
-        # Get all splice site positions for this transcript
-        all_splice_sites = transcript.splice_donor_sites.union(transcript.splice_acceptor_sites)
-        
-        # Get transcript span
-        exons = transcript.exons.sort_values(by='start')
-        chrom = exons.iloc[0]['chrom']
-        tx_start = exons['start'].min()
-        tx_end = exons['end'].max()
-        
-        # Generate random positions avoiding splice sites
-        half_window = self.window_size // 2
-        valid_positions = []
-        
-        for pos in range(tx_start + half_window, tx_end - half_window):
-            if pos not in all_splice_sites:
-                # Make sure we're not too close to splice sites
-                too_close = any(abs(pos - ss) < 10 for ss in all_splice_sites)
-                if not too_close:
-                    valid_positions.append(pos)
-        
-        if len(valid_positions) < n_negatives:
-            n_negatives = len(valid_positions)
-            
-        # Randomly sample positions
-        sampled_positions = np.random.choice(valid_positions, size=n_negatives, replace=False)
-        
-        for pos in sampled_positions:
-            try:
-                # Get usage stats for this position
-                usage_stats = self.get_usage_stats(genome_id, chrom, pos, transcript.strand)
-                
-                negative_site = SpliceSite.from_genomic_position(
-                    genome_id=genome_id,
-                    chromosome=chrom,
-                    transcript_id=transcript.transcript_id,
-                    gene_id=transcript.gene_id,
-                    position=pos,
-                    site_type=0,  # negative
-                    strand=transcript.strand,
-                    genome=genome,
-                    window_size=self.window_size,
-                    site_usage=usage_stats
-                )
-                negative_examples.append(negative_site)
-            except Exception as e:
-                # Skip if sequence extraction fails
-                continue
-                
-        return negative_examples
-        
-    def _collect_all_positions(self, 
-                             transcripts: List[Transcript],
-                             genome_id: str,
-                             negative_ratio: float) -> Tuple[List[Dict], int]:
-        """
-        Collect all splice site positions for batch processing using optimized bulk operations.
-        
-        Args:
-            transcripts: List of Transcript objects
-            genome_id: Genome identifier
-            negative_ratio: Ratio of negative to positive examples
-            
-        Returns:
-            Tuple of (positions_data, positive_count)
-        """
-        print(f"Collecting positions from {len(transcripts)} transcripts...")
-        
-        # Pre-allocate lists for bulk operations
-        all_positions = []
-        positive_count = 0
-        
-        # Process transcripts in batches for better memory usage
-        batch_size = 1000
-        for batch_start in range(0, len(transcripts), batch_size):
-            batch_end = min(batch_start + batch_size, len(transcripts))
-            batch_transcripts = transcripts[batch_start:batch_end]
-            
-            if batch_start % 5000 == 0:
-                print(f"Processing batch {batch_start//batch_size + 1}/{(len(transcripts) + batch_size - 1)//batch_size}")
-            
-            # Collect all positive positions for this batch
-            batch_positives = []
-            batch_negatives = []
-            
-            for transcript in batch_transcripts:
-                # Skip transcripts without splice sites
-                if len(transcript.splice_donor_sites) == 0 and len(transcript.splice_acceptor_sites) == 0:
-                    continue
-                    
-                chrom = transcript.exons.iloc[0]['chrom']
-                
-                # Collect donor sites in bulk
-                for donor_pos in transcript.splice_donor_sites:
-                    usage_stats = self.get_usage_stats(genome_id, chrom, donor_pos, transcript.strand)
-                    batch_positives.append({
-                        'genome_id': genome_id,
-                        'chromosome': chrom,
-                        'transcript_id': transcript.transcript_id,
-                        'gene_id': transcript.gene_id,
-                        'position': donor_pos,
-                        'site_type': 1,  # donor
-                        'strand': transcript.strand,
-                        'site_usage': usage_stats
-                    })
-                    
-                # Collect acceptor sites in bulk
-                for acceptor_pos in transcript.splice_acceptor_sites:
-                    usage_stats = self.get_usage_stats(genome_id, chrom, acceptor_pos, transcript.strand)
-                    batch_positives.append({
-                        'genome_id': genome_id,
-                        'chromosome': chrom,
-                        'transcript_id': transcript.transcript_id,
-                        'gene_id': transcript.gene_id,
-                        'position': acceptor_pos,
-                        'site_type': 2,  # acceptor
-                        'strand': transcript.strand,
-                        'site_usage': usage_stats
-                    })
-                
-                # Generate negative positions efficiently
-                n_negatives = int((len(transcript.splice_donor_sites) + len(transcript.splice_acceptor_sites)) * negative_ratio)
-                if n_negatives > 0:
-                    negative_positions = self._generate_negative_positions(transcript, n_negatives)
-                    for neg_pos in negative_positions:
-                        usage_stats = self.get_usage_stats(genome_id, chrom, neg_pos, transcript.strand)
-                        batch_negatives.append({
-                            'genome_id': genome_id,
-                            'chromosome': chrom,
-                            'transcript_id': transcript.transcript_id,
-                            'gene_id': transcript.gene_id,
-                            'position': neg_pos,
-                            'site_type': 0,  # negative
-                            'strand': transcript.strand,
-                            'site_usage': usage_stats
-                        })
-            
-            # Bulk extend instead of individual appends
-            all_positions.extend(batch_positives)
-            all_positions.extend(batch_negatives)
-            positive_count += len(batch_positives)
-        
-        print(f"Collected {len(all_positions)} positions ({positive_count} positive)")
-        return all_positions, positive_count
-    
-    def _generate_negative_positions(self, transcript: Transcript, n_negatives: int) -> List[int]:
-        """Generate negative positions using optimized vectorized operations."""
-        if n_negatives <= 0:
-            return []
-            
-        # Get all splice site positions for this transcript
-        all_splice_sites = transcript.splice_donor_sites.union(transcript.splice_acceptor_sites)
-        
-        # Get transcript span
-        exons = transcript.exons.sort_values(by='start')
-        tx_start = exons['start'].min()
-        tx_end = exons['end'].max()
-        
-        # Use vectorized approach for position generation
-        half_window = self.window_size // 2
-        
-        # Generate all possible positions at once
-        all_possible_pos = np.arange(tx_start + half_window, tx_end - half_window)
-        
-        if len(all_possible_pos) == 0:
-            return []
-        
-        # Convert splice sites to numpy array for faster operations
-        splice_sites_array = np.array(list(all_splice_sites))
-        
-        # Vectorized filtering: remove positions too close to splice sites
-        if len(splice_sites_array) > 0:
-            # Use broadcasting to compute distances efficiently
-            distances = np.abs(all_possible_pos[:, np.newaxis] - splice_sites_array[np.newaxis, :])
-            min_distances = np.min(distances, axis=1)
-            valid_mask = min_distances >= 10  # Not too close to splice sites
-            valid_positions = all_possible_pos[valid_mask]
-        else:
-            valid_positions = all_possible_pos
-        
-        # Randomly sample positions
-        if len(valid_positions) == 0:
-            return []
-        
-        n_negatives = min(n_negatives, len(valid_positions))
-        sampled_positions = np.random.choice(valid_positions, size=n_negatives, replace=False)
-        return sampled_positions.tolist()
-    
-    def load_genome_data(self, 
-                        genome_id: str, 
-                        negative_ratio: float = 2.0,
-                        max_transcripts: Optional[int] = None,
-                        batch_size: int = 10000) -> List[SpliceSite]:
-        """
-        Load splice site data from a specific genome using optimized batch processing.
-        
-        Args:
-            genome_id: ID of the genome to load
-            negative_ratio: Ratio of negative to positive examples
-            max_transcripts: Maximum number of transcripts to process (None for all)
-            batch_size: Number of sequences to process in each batch
-            
-        Returns:
-            List of splice sites
-        """
-        if genome_id not in self.genomes:
-            raise ValueError(f"Genome {genome_id} not found. Add it first with add_genome().")
-            
-        genome_data = self.genomes[genome_id]
-        
-        # Load genome and annotations
-        print(f"Loading genome {genome_id}...")
-        genome = genome_data.load_genome()
-        
-        print(f"Processing GTF annotations for {genome_id}...")
-        gtf_processor = GTFProcessor(str(genome_data.gtf_path))
-        transcripts = gtf_processor.process_gtf(chromosomes=genome_data.chromosomes)
-        
-        if max_transcripts is not None:
-            transcripts = transcripts[:max_transcripts]
-        
-        # Collect all positions first (fast)
-        positions_data, positive_count = self._collect_all_positions(
-            transcripts, genome_id, negative_ratio
-        )
-        
-        if not positions_data:
-            print("No splice sites found")
-            return []
-        
-        # Process sequences in smaller batches to reduce memory usage
-        print(f"Batch processing {len(positions_data)} sequences in batches of {batch_size}...")
-        all_examples = []
-        
-        for i in range(0, len(positions_data), batch_size):
-            batch_end = min(i + batch_size, len(positions_data))
-            batch_positions = positions_data[i:batch_end]
-            
-            if i % (batch_size * 5) == 0:
-                print(f"Processing sequence batch {i//batch_size + 1}/{(len(positions_data) + batch_size - 1)//batch_size}")
-            
-            batch_examples = SpliceSite.from_positions_batch(
-                batch_positions, genome, self.window_size
-            )
-            all_examples.extend(batch_examples)
-            
-            # Force garbage collection to free memory
-            import gc
-            gc.collect()
-        
-        print(f"Loaded {len(all_examples)} examples ({positive_count} positive, "
-              f"{len(all_examples) - positive_count} negative)")
-        return all_examples
-     
-    def load_all_genomes(self, 
-                        negative_ratio: float = 2.0,
-                        max_transcripts_per_genome: Optional[int] = None) -> None:
-        """
-        Load data from all added genomes using optimized batch processing.
-        
-        Args:
-            negative_ratio: Ratio of negative to positive examples
-            max_transcripts_per_genome: Maximum transcripts per genome
-        """
-        self.loaded_data = []
-        
-        for genome_id in self.genomes:
-            genome_examples = self.load_genome_data(
-                genome_id, 
-                negative_ratio=negative_ratio,
-                max_transcripts=max_transcripts_per_genome
-            )
-            self.loaded_data.extend(genome_examples)
-            
-        print(f"Total loaded examples: {len(self.loaded_data)}")
-        
-    def get_data_summary(self) -> pd.DataFrame:
-        """Get summary statistics of loaded data."""
-        if not self.loaded_data:
-            return pd.DataFrame()
-            
-        summary_data = []
-        
-        for example in self.loaded_data:
-            summary_data.append({
-                'genome_id': example.genome_id,
-                'chromosome': example.chromosome,
-                'site_type': example.site_type,
-                'strand': example.strand
-            })
-            
-        df = pd.DataFrame(summary_data)
-        
-        # Generate summary statistics
-        summary = df.groupby(['genome_id', 'site_type']).agg({
-            'chromosome': 'nunique',
-            'strand': 'count'
-        })
-        
-        return summary
-                
-    def _add_ortholog_groups(self, metadata: pd.DataFrame) -> pd.DataFrame:
-        """
-        Add ortholog group information to metadata.
-        
-        Args:
-            metadata: Metadata DataFrame
-            
-        Returns:
-            Metadata DataFrame with ortholog_group column added
-        """
-        # Merge with orthology table
-        metadata_with_orthologs = metadata.merge(
-            self.orthology_table,
-            on=['gene_id', 'genome_id'],
-            how='left'
-        )
-        
-        # Fill missing ortholog groups with unique identifiers
-        # This ensures genes without orthologs get unique groups
-        missing_mask = metadata_with_orthologs['ortholog_group'].isna()
-        n_missing = missing_mask.sum()
-        
-        if n_missing > 0:
-            # Create unique ortholog groups for genes without mappings
-            unique_groups = [f"singleton_{i}" for i in range(n_missing)]
-            metadata_with_orthologs.loc[missing_mask, 'ortholog_group'] = unique_groups
-            
-            print(f"Added {n_missing} singleton ortholog groups for genes without mappings")
-        
-        return metadata_with_orthologs
-
-    def get_ortholog_groups_for_genes(self, gene_ids: List[str]) -> Dict[str, str]:
-        """
-        Get ortholog group mappings for a list of gene IDs.
-        
-        Args:
-            gene_ids: List of gene IDs to look up
-            
-        Returns:
-            Dictionary mapping gene_id to ortholog_group
-        """
-        if self.orthology_table is None:
-            return {}
-            
-        # Filter orthology table for requested genes
-        subset = self.orthology_table[self.orthology_table['gene_id'].isin(gene_ids)]
-        return dict(zip(subset['gene_id'], subset['ortholog_group']))
-        
-    def get_genes_in_ortholog_group(self, ortholog_group: str) -> List[str]:
-        """
-        Get all gene IDs belonging to a specific ortholog group.
-        
-        Args:
-            ortholog_group: Ortholog group identifier
-            
-        Returns:
-            List of gene IDs in the ortholog group
-        """
-        if self.orthology_table is None:
-            return []
-            
-        subset = self.orthology_table[self.orthology_table['ortholog_group'] == ortholog_group]
-        return subset['gene_id'].tolist()
-        
-    def get_genes_in_ortholog_group_by_genome(self, ortholog_group: str, genome_id: str) -> List[str]:
-        """
-        Get gene IDs belonging to a specific ortholog group in a specific genome.
-        
-        Args:
-            ortholog_group: Ortholog group identifier
-            genome_id: Genome identifier
-            
-        Returns:
-            List of gene IDs in the ortholog group for the specified genome
-        """
-        if self.orthology_table is None:
-            return []
-            
-        subset = self.orthology_table[
-            (self.orthology_table['ortholog_group'] == ortholog_group) &
-            (self.orthology_table['genome_id'] == genome_id)
-        ]
-        return subset['gene_id'].tolist()
-        
-    def get_ortholog_groups_by_genome(self, genome_id: str) -> Dict[str, List[str]]:
-        """
-        Get all ortholog groups and their genes for a specific genome.
-        
-        Args:
-            genome_id: Genome identifier
-            
-        Returns:
-            Dictionary mapping ortholog_group to list of gene_ids for that genome
-        """
-        if self.orthology_table is None:
-            return {}
-            
-        genome_subset = self.orthology_table[self.orthology_table['genome_id'] == genome_id]
-        result = {}
-        for ortholog_group in genome_subset['ortholog_group'].unique():
-            genes = genome_subset[genome_subset['ortholog_group'] == ortholog_group]['gene_id'].tolist()
-            result[ortholog_group] = genes
-            
-        return result
-        
-    def has_orthology_data(self) -> bool:
-        """Check if orthology data is available."""
-        return self.orthology_table is not None and len(self.orthology_table) > 0
-
-    def to_arrays(self) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
-        """
-        Convert loaded data to arrays suitable for ML training.
-        
-        Returns:
-            Tuple of (sequences, labels, usage_arrays, metadata_df)
-            - sequences: DNA sequences as strings
-            - labels: Site type labels (0=negative, 1=donor, 2=acceptor)
-            - usage_arrays: Dictionary with keys 'alpha', 'beta', 'sse', each containing
-              arrays of shape (n_samples, n_conditions) for multi-task learning
-            - metadata_df: DataFrame with additional metadata including condition info
-        """
-        if not self.loaded_data:
-            raise ValueError("No data loaded. Call load_all_genomes() first.")
-            
-        sequences = np.array([example.sequence for example in self.loaded_data])
-        labels = np.array([example.site_type for example in self.loaded_data])
-        
-        # Initialize usage arrays
-        n_samples = len(self.loaded_data)
-        n_conditions = len(self.usage_conditions)
-        
-        usage_arrays = {
-            'alpha': np.full((n_samples, n_conditions), np.nan, dtype=np.float32),
-            'beta': np.full((n_samples, n_conditions), np.nan, dtype=np.float32), 
-            'sse': np.full((n_samples, n_conditions), np.nan, dtype=np.float32)
-        }
-        
-        # Create condition index mapping for efficient lookup
-        condition_to_idx = {cond['condition_key']: idx for idx, cond in enumerate(self.usage_conditions)}
-        
-        # Build metadata and fill usage arrays
-        metadata_rows = []
-        for sample_idx, example in enumerate(self.loaded_data):
-            row = {
-                'genome_id': example.genome_id,
-                'chromosome': example.chromosome,
-                'transcript_id': example.transcript_id,
-                'gene_id': example.gene_id,
-                'position': example.position,
-                'gc_content': example.gc_content,
-                'strand': example.strand,
-                'n_conditions_with_usage': len(example.site_usage)
-            }
-            
-            # Fill usage arrays for this sample
-            for condition_key, usage_stats in example.site_usage.items():
-                if condition_key in condition_to_idx:
-                    condition_idx = condition_to_idx[condition_key]
-                    usage_arrays['alpha'][sample_idx, condition_idx] = usage_stats['alpha']
-                    usage_arrays['beta'][sample_idx, condition_idx] = usage_stats['beta']
-                    usage_arrays['sse'][sample_idx, condition_idx] = usage_stats['sse']
-            
-            metadata_rows.append(row)
-        
-        metadata = pd.DataFrame(metadata_rows)
-        
-        # Add condition availability flags to metadata
-        for cond in self.usage_conditions:
-            condition_key = cond['condition_key']
-            if condition_key in condition_to_idx:
-                condition_idx = condition_to_idx[condition_key]
-                metadata[f'has_{condition_key}_usage'] = ~np.isnan(usage_arrays['sse'][:, condition_idx])
-        
-        # Add ortholog group information if available
-        if self.orthology_table is not None:
-            metadata = self._add_ortholog_groups(metadata)
-        
-        # Ensure data and metadata are aligned
-        assert len(sequences) == len(labels) == len(metadata), "Data and metadata lengths do not match"
-        assert usage_arrays['alpha'].shape[0] == len(sequences), "Usage arrays and sequences length mismatch"
-
-        return sequences, labels, usage_arrays, metadata
-    
-    def get_usage_array_info(self) -> Dict[str, any]:
+    def get_usage_array_info(self,
+                            usage_arrays: Optional[Dict[str, np.ndarray]] = None) -> Dict[str, any]:
         """
         Get information about usage arrays structure.
         
@@ -783,9 +447,10 @@ class MultiGenomeDataLoader:
         """
         if not self.loaded_data:
             return {}
-            
-        sequences, labels, usage_arrays, metadata = self.to_arrays()
-        
+
+        if usage_arrays is None:
+            sequences, labels, usage_arrays, metadata = self.to_arrays()
+
         info = {
             'n_samples': usage_arrays['alpha'].shape[0],
             'n_conditions': usage_arrays['alpha'].shape[1],
@@ -807,7 +472,7 @@ class MultiGenomeDataLoader:
                 'mean_alpha': float(np.nanmean(usage_arrays['alpha'][:, i])),
                 'mean_beta': float(np.nanmean(usage_arrays['beta'][:, i]))
             }
-        
+                
         return info
 
     def get_usage_summary(self) -> pd.DataFrame:
@@ -838,38 +503,215 @@ class MultiGenomeDataLoader:
                 })
         
         return pd.DataFrame(summary_rows)
-    
-    def filter_by_usage_coverage(self, min_conditions: int = 1) -> 'MultiGenomeDataLoader':
+
+    def to_arrays(self,
+                  window_size: int = 1000,
+                  context_size: int = 4500) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
         """
-        Create a filtered version of the data loader with sites having usage data in at least min_conditions.
+        Convert loaded data to arrays for ML training.
         
         Args:
-            min_conditions: Minimum number of conditions with usage data required
-            
+            window_size: Size of the window containing splice sites
+            context_size: Size of context on each side of the window
+        
         Returns:
-            New MultiGenomeDataLoader instance with filtered data
+            Tuple of (sequences, labels, usage_arrays, metadata_df)
+            - sequences: One-hot encoded DNA sequences of shape (n_samples, total_window, 4)
+              where total_window = context_size + window_size + context_size
+            - labels: Array of shape (n_samples, window_size) with values:
+              0 = no splice site, 1 = donor site, 2 = acceptor site
+            - usage_arrays: Dictionary with keys 'alpha', 'beta', 'sse', each containing
+              arrays of shape (n_samples, window_size, n_conditions)
+              Usage values are only meaningful where labels > 0
+            - metadata_df: DataFrame with window metadata
         """
         if not self.loaded_data:
-            raise ValueError("No data loaded. Call load_all_genomes() first.")
+            raise ValueError("No data loaded. Call load_all_genomes_data() first.")
+
+        # One-hot encoding mapping
+        nuc_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
+        
+        # Pre-build index for O(1) splice site lookup - THIS IS THE KEY OPTIMIZATION
+        print("Building splice site index...")
+        splice_site_index = {}
+        for site in self.loaded_data:
+            key = (site.genome_id, site.chromosome, site.position, site.strand)
+            splice_site_index[key] = site
+        print(f"Indexed {len(splice_site_index)} splice sites")
+        
+        # Get all splice sites info
+        df = self.get_dataframe()
+
+        all_sequences = []
+        all_labels = []
+        all_usage = {'alpha': [], 'beta': [], 'sse': []}
+        all_metadata_rows = []
+        
+        n_conditions = len(self.usage_conditions)
+        condition_to_idx = {cond['condition_key']: idx for idx, cond in enumerate(self.usage_conditions)}
+        
+        # For each gene in each genome, get interval from 5'-most to 3'-most splice sites
+        loaded_genomes = df['genome_id'].unique()
+        total_window = context_size + window_size + context_size
+        
+        n_total_windows = 0
+        n_skipped_windows = 0
+
+        for genome_id in loaded_genomes:
+            print(f"Processing genome {genome_id}...")
+            genome = self.genomes[genome_id].load_genome()
+            df_genome = df[df['genome_id'] == genome_id]
+            genes = df_genome['gene_id'].unique()
             
-        filtered_data = []
+            print(f"  Processing {len(genes)} genes...")
+
+            for gene_idx, gene_id in enumerate(genes):
+                if gene_idx % 100 == 0:
+                    print(f"    Gene {gene_idx}/{len(genes)}")
+                    
+                df_gene = df_genome[df_genome['gene_id'] == gene_id]
+                chrom = df_gene['chromosome'].iloc[0]
+                strand = df_gene['strand'].iloc[0]
+                
+                # Get 5'-most and 3'-most positions
+                min_pos = df_gene['position'].min() 
+                max_pos = df_gene['position'].max()
+
+                # Extend the gene range for specified context
+                gene_start = min_pos - context_size
+                gene_end = max_pos + context_size
+
+                # Get sequence of the gene with context
+                rc = strand == '-'
+                seq = genome.get_seq(chrom, gene_start + 1, gene_end, rc)
+                if rc:
+                    seq = seq.complement
+                
+                # Ensure seq is a string
+                if not isinstance(seq, str):
+                    seq = str(seq).upper()
+                else:
+                    seq = seq.upper()
+                
+                # Pre-compute one-hot encoding for the entire gene sequence
+                gene_ohe = np.zeros((len(seq), 4), dtype=np.float32)
+                for i, nuc in enumerate(seq):
+                    idx = nuc_to_idx.get(nuc, 4)
+                    if idx < 4:
+                        gene_ohe[i, idx] = 1.0
+                
+                # Split gene into windows shifted by window_size
+                for window_start in range(0, len(seq) - total_window + 1, window_size):
+                    n_total_windows += 1
+                    
+                    # Calculate the genomic position of this window
+                    window_genomic_start = gene_start + window_start
+                    
+                    # The central window spans from context_size to context_size+window_size
+                    window_center_genomic_start = window_genomic_start + context_size
+                    window_center_genomic_end = window_center_genomic_start + window_size
+                    
+                    # Find splice sites in this window's central region
+                    sites_in_window = df_gene[
+                        (df_gene['position'] >= window_center_genomic_start) & 
+                        (df_gene['position'] < window_center_genomic_end)
+                    ]
+                    
+                    # Skip windows with no splice sites
+                    if len(sites_in_window) == 0:
+                        n_skipped_windows += 1
+                        continue
+                    
+                    # Extract pre-computed one-hot encoding
+                    ohe_seq = gene_ohe[window_start:window_start + total_window]
+                    
+                    # Initialize label array for this window (0=no site, 1=donor, 2=acceptor)
+                    labels = np.zeros(window_size, dtype=np.int8)
+                    
+                    # Initialize usage arrays for this window
+                    usage_alpha = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+                    usage_beta = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+                    usage_sse = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+                    
+                    n_donor_sites = 0
+                    n_acceptor_sites = 0
+                    
+                    # Mark positions and add usage stats for each site
+                    for _, site_row in sites_in_window.iterrows():
+                        site_pos = site_row['position']
+                        site_type = site_row['site_type']
+                        
+                        # Calculate position within the window (0 to window_size-1)
+                        window_pos = site_pos - window_center_genomic_start
+                        
+                        if 0 <= window_pos < window_size:
+                            lookup_key = (genome_id, chrom, site_pos, strand)
+                            splice_site = splice_site_index.get(lookup_key)
+                            
+                            if splice_site is not None:
+                                # Set label: 1 for donor, 2 for acceptor
+                                labels[window_pos] = site_type
+                                
+                                if site_type == 1:
+                                    n_donor_sites += 1
+                                elif site_type == 2:
+                                    n_acceptor_sites += 1
+                                
+                                # Fill usage stats for this position
+                                for condition_key, usage_stats in splice_site.site_usage.items():
+                                    if condition_key in condition_to_idx:
+                                        cond_idx = condition_to_idx[condition_key]
+                                        usage_alpha[window_pos, cond_idx] = usage_stats['alpha']
+                                        usage_beta[window_pos, cond_idx] = usage_stats['beta']
+                                        usage_sse[window_pos, cond_idx] = usage_stats['sse']
+                    
+                    # Store this window's data
+                    all_sequences.append(ohe_seq)
+                    all_labels.append(labels)
+                    all_usage['alpha'].append(usage_alpha)
+                    all_usage['beta'].append(usage_beta)
+                    all_usage['sse'].append(usage_sse)
+                    
+                    # Create metadata for this window
+                    metadata_row = {
+                        'genome_id': genome_id,
+                        'chromosome': chrom,
+                        'gene_id': gene_id,
+                        'strand': strand,
+                        'window_start': window_center_genomic_start,
+                        'window_end': window_center_genomic_end,
+                        'n_donor_sites': n_donor_sites,
+                        'n_acceptor_sites': n_acceptor_sites
+                    }
+                    all_metadata_rows.append(metadata_row)
         
-        for example in self.loaded_data:
-            if len(example.site_usage) >= min_conditions:
-                filtered_data.append(example)
+        print("Converting to numpy arrays...")
+        print(f"Skipped {n_skipped_windows}/{n_total_windows} windows with no splice sites ({100*n_skipped_windows/n_total_windows:.1f}%)")
         
-        # Create new instance with filtered data
-        filtered_loader = MultiGenomeDataLoader(
-            window_size=self.window_size
-        )
-        filtered_loader.genomes = self.genomes
-        filtered_loader.orthology_table = self.orthology_table
-        filtered_loader.usage_data = self.usage_data
-        filtered_loader.usage_conditions = self.usage_conditions
-        filtered_loader.condition_to_key = self.condition_to_key
-        filtered_loader.loaded_data = filtered_data
+        # Convert lists to arrays
+        sequences = np.array(all_sequences, dtype=np.float32)  # (n_samples, total_window, 4)
+        labels = np.array(all_labels, dtype=np.int8)  # (n_samples, window_size)
         
-        print(f"Filtered from {len(self.loaded_data)} to {len(filtered_data)} examples "
-              f"(min_conditions={min_conditions})")
+        usage_arrays = {
+            'alpha': np.array(all_usage['alpha'], dtype=np.float32),  # (n_samples, window_size, n_conditions)
+            'beta': np.array(all_usage['beta'], dtype=np.float32),
+            'sse': np.array(all_usage['sse'], dtype=np.float32)
+        }
         
-        return filtered_loader
+        metadata = pd.DataFrame(all_metadata_rows)
+        
+        # Validation
+        n_samples = len(sequences)
+        assert labels.shape[0] == n_samples, "Labels shape mismatch"
+        assert usage_arrays['alpha'].shape[0] == n_samples, "Usage arrays shape mismatch"
+        assert len(metadata) == n_samples, "Metadata mismatch"
+
+        print(f"Created {n_samples} windowed examples")
+        print(f"  Sequence shape: {sequences.shape}")
+        print(f"  Labels shape: {labels.shape}")
+        print(f"  Usage arrays shape: {usage_arrays['alpha'].shape}")
+        print(f"  Total donor sites: {(labels == 1).sum()}")
+        print(f"  Total acceptor sites: {(labels == 2).sum()}")
+        print(f"  Total no-site positions: {(labels == 0).sum()}")
+        
+        return sequences, labels, usage_arrays, metadata

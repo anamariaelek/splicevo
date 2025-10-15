@@ -12,24 +12,6 @@ This module provides comprehensive functionality for loading, processing, and sp
 - Calculate GC content for each sequence window
 - Load tissue-specific splice site usage statistics (alpha, beta, SSE values)
 
-### 2. Advanced Data Splitting
-- **Stratified splitting** by GC content and class to maintain balanced representation
-- **Genome-aware splitting** to prevent data leakage between related species
-- **Class balancing** to handle positive/negative example imbalance
-- **Site-specific extensions** for modeling tissue-specific, condition-specific, or stage-specific splice site usage
-
-### 3. GC Content Analysis & Normalization
-- Comprehensive GC content bias detection
-- Statistical analysis of GC distributions across classes and genomes
-- Multiple normalization methods (standard, min-max, quantile)
-- Visualization tools for GC content analysis
-
-### 4. Splice Site Usage Integration
-- Load tissue-specific splice site usage statistics individually
-- Support for arbitrary number of tissues/cell types and timepoints
-- Each splice site characterized by alpha (supporting reads), beta (non-supporting reads), and SSE (alpha/(alpha+beta))
-- Multi-task learning support for predicting both splice sites and their usage
-
 ## Core Classes
 
 ### MultiGenomeDataLoader
@@ -40,7 +22,6 @@ from splicevo.data import MultiGenomeDataLoader
 
 # Initialize loader
 loader = MultiGenomeDataLoader(
-    window_size=200, 
     orthology_file='../splicing/data/mazin/ortholog_groups.tsv'
 )
 
@@ -51,6 +32,14 @@ loader.add_genome(
     gtf_path="../../sds/sd17d003/Anamaria/genomes/mazin/gtf/Homo_sapiens.gtf.gz",
     chromosomes=["21", "20"],
     metadata={"species": "homo_sapiens", "assembly": "GRCh37"}
+)
+
+loader.add_genome(
+    genome_id="mouse_GRCm38",
+    genome_path="../../sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa.gz",
+    gtf_path="../../sds/sd17d003/Anamaria/genomes/mazin/gtf/Mus_musculus.gtf.gz",
+    chromosomes=['18', '19'],
+    metadata={"species": "mus_musculus", "assembly": "GRCm38"}
 )
 
 # Add usage files individually for different tissues and timepoints
@@ -75,20 +64,51 @@ loader.add_usage_file(
     timepoint="0dpb"
 )
 
+loader.add_usage_file(
+    genome_id="mouse_GRCm38",
+    usage_file="../splicing/results/spliser/usage_stats/Mouse.Cerebellum.0dpb.combined.nochr.tsv", 
+    tissue="Cerebellum",
+    timepoint="0dpb"
+)
+
+loader.add_usage_file(
+    genome_id="mouse_GRCm38",
+    usage_file="../splicing/results/spliser/usage_stats/Mouse.Heart.0dpb.combined.nochr.tsv", 
+    tissue="Heart",
+    timepoint="0dpb"
+)
+
 # Check available conditions
 conditions_df = loader.get_available_conditions()
 print(conditions_df)
 
 # Load all data
-loader.load_all_genomes(negative_ratio=2.0)
+loader.load_all_genomes_data()
 
-# Convert to arrays for ML (now includes usage arrays)
-sequences, labels, usage_arrays, metadata = loader.to_arrays()
+# Dataframe with all splice sites from loaded genomes
+df = loader.get_dataframe().head()
+df.head()
+
+# Summarize
+loader.get_summary()
+
+# Convert to arrays for ML
+sequences, labels, usage_arrays, metadata = loader.to_arrays(
+    window_size=1000,
+    context_size=4500
+)
 
 # Get usage information
-usage_info = loader.get_usage_array_info()
+usage_info = loader.get_usage_array_info(usage_arrays=usage_arrays)
 print(f"Available conditions: {[c['display_name'] for c in usage_info['conditions']]}")
 print(f"Coverage per condition: {usage_info['condition_coverage']}")
+
+# Save arrays to disk as .npz compressed file
+import numpy as np
+np.savez_compressed('splicevo_data.npz', sequences=sequences, labels=labels, usage_arrays=usage_arrays)
+metadata.to_csv('splicevo_metadata.csv', index=False)
+
+
 ```
 
 ### StratifiedGCSplitter
