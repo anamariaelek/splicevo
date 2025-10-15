@@ -578,14 +578,29 @@ class MultiGenomeDataLoader:
                 max_pos = df_gene['position'].max()
 
                 # Extend the gene range for specified context
-                gene_start = min_pos - context_size
-                gene_end = max_pos + context_size
-
-                # Get sequence of the gene with context
-                rc = strand == '-'
-                seq = genome.get_seq(chrom, gene_start + 1, gene_end, rc)
-                if rc:
-                    seq = seq.complement
+                requested_start = min_pos - context_size
+                requested_end = max_pos + context_size
+                
+                # Adjust boundaries to valid range
+                actual_start = max(0, requested_start)
+                
+                # Get chromosome length if available
+                try:
+                    chrom_length = len(genome._genome[chrom])
+                    actual_end = min(requested_end, chrom_length)
+                except (KeyError, AttributeError):
+                    actual_end = requested_end
+                
+                # Calculate padding needed
+                left_pad = actual_start - requested_start
+                right_pad = requested_end - actual_end
+                
+                # Get sequence with valid coordinates
+                try:
+                    seq = genome.get_seq(chrom, actual_start + 1, actual_end, strand == '-')
+                except Exception as e:
+                    print(f"    Skipping gene {gene_id}: {e}")
+                    continue
                 
                 # Ensure seq is a string
                 if not isinstance(seq, str):
@@ -593,19 +608,27 @@ class MultiGenomeDataLoader:
                 else:
                     seq = seq.upper()
                 
+                # Add padding with 'N' if needed
+                if left_pad > 0:
+                    seq = 'N' * left_pad + seq
+                if right_pad > 0:
+                    seq = seq + 'N' * right_pad
+                
                 # Pre-compute one-hot encoding for the entire gene sequence
                 gene_ohe = np.zeros((len(seq), 4), dtype=np.float32)
                 for i, nuc in enumerate(seq):
                     idx = nuc_to_idx.get(nuc, 4)
                     if idx < 4:
                         gene_ohe[i, idx] = 1.0
+                # Note: 'N' (idx=4) will remain as all-zeros vector
                 
                 # Split gene into windows shifted by window_size
                 for window_start in range(0, len(seq) - total_window + 1, window_size):
                     n_total_windows += 1
                     
                     # Calculate the genomic position of this window
-                    window_genomic_start = gene_start + window_start
+                    # Adjust for the padding offset
+                    window_genomic_start = requested_start + window_start
                     
                     # The central window spans from context_size to context_size+window_size
                     window_center_genomic_start = window_genomic_start + context_size
