@@ -10,6 +10,10 @@ class SpliceDataset(Dataset):
     PyTorch Dataset for splice site sequences with labels and usage data.
     
     Loads data from numpy arrays created by MultiGenomeDataLoader.to_arrays()
+
+    Note: Usage arrays should be normalized using 
+    splicevo.training.normalization.normalize_usage_arrays() before
+    passing to this dataset.
     """
     
     def __init__(
