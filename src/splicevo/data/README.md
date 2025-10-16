@@ -108,34 +108,5 @@ import numpy as np
 np.savez_compressed('splicevo_data.npz', sequences=sequences, labels=labels, usage_arrays=usage_arrays)
 metadata.to_csv('splicevo_metadata.csv', index=False)
 
-
 ```
-
-### StratifiedGCSplitter
-Advanced data splitter that handles class imbalance and GC content stratification.
-
-```python
-from splicevo.data import StratifiedGCSplitter
-
-splitter = StratifiedGCSplitter(
-    test_size=0.2,
-    val_size=0.2, 
-    gc_bins=10,
-    random_state=42
-)
-
-# Stratified split by GC content and class (acceptor, donor, none)
-split_data_gc = splitter.stratified_split(sequences, labels, metadata, stratify_by='gc_class')
-splitter.get_split_statistics(split_data_gc)
-
-# Balanced class (acceptor, donor, none) split with undersampling
-split_data_balanced = splitter.balanced_class_split(sequences, labels, metadata, balance_method='undersample', stratify_by='gc_class')
-splitter.get_split_statistics(split_data_balanced)
-
-# Chromosome-aware split with ortholog exclusion
-test_chromosomes = {'human_GRCh37': ['21'], 'mouse_GRCm38': ['19']}
-split_data_ortholog = splitter.chromosome_aware_split(
-    sequences, labels, metadata, test_chromosomes=test_chromosomes
-)
-splitter.get_split_statistics(split_data_ortholog)
-```
+    

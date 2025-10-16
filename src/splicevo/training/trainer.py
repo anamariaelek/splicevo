@@ -30,7 +30,8 @@ class SpliceTrainer:
         splice_weight: float = 1.0,
         usage_weight: float = 0.5,
         class_weights: Optional[torch.Tensor] = None,
-        checkpoint_dir: Optional[str] = None
+        checkpoint_dir: Optional[str] = None,
+        use_tensorboard: bool = True
     ):
         """
         Initialize trainer.
@@ -51,6 +52,7 @@ class SpliceTrainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
+        self.use_tensorboard = use_tensorboard and (checkpoint_dir is not None)
         
         # Loss functions
         if class_weights is not None:
@@ -78,8 +80,15 @@ class SpliceTrainer:
         if self.checkpoint_dir:
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
+        # TensorBoard logging
+        self.writer = None
+        if self.use_tensorboard:
+            from torch.utils.tensorboard import SummaryWriter
+            self.writer = SummaryWriter(log_dir=self.checkpoint_dir / 'logs')
+            
         # Training state
         self.current_epoch = 0
+        self.global_step = 0
         self.best_val_loss = float('inf')
         self.history = {
             'train_loss': [],
@@ -144,6 +153,25 @@ class SpliceTrainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
             self.scheduler.step()
+            
+            # Log to TensorBoard (per batch)
+            if self.writer is not None:
+                self.writer.add_scalar('Train/Loss_Batch', loss.item(), self.global_step)
+                self.writer.add_scalar('Train/Splice_Loss_Batch', splice_loss.item(), self.global_step)
+                self.writer.add_scalar('Train/Usage_Loss_Batch', usage_loss.item(), self.global_step)
+                self.writer.add_scalar('Train/Learning_Rate', self.optimizer.param_groups[0]['lr'], self.global_step)
+                
+                # Log gradient norms every N steps
+                if self.global_step % 100 == 0:
+                    total_norm = 0.0
+                    for p in self.model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                    total_norm = total_norm ** 0.5
+                    self.writer.add_scalar('Train/Gradient_Norm', total_norm, self.global_step)
+            
+            self.global_step += 1
             
             # Accumulate losses
             total_loss += loss.item()
@@ -251,6 +279,33 @@ class SpliceTrainer:
                 self.history['val_splice_loss'].append(val_metrics['splice_loss'])
                 self.history['val_usage_loss'].append(val_metrics['usage_loss'])
             
+            # Log epoch metrics to TensorBoard
+            if self.writer is not None:
+                self.writer.add_scalar('Train/Loss_Epoch', train_metrics['loss'], epoch)
+                self.writer.add_scalar('Train/Splice_Loss_Epoch', train_metrics['splice_loss'], epoch)
+                self.writer.add_scalar('Train/Usage_Loss_Epoch', train_metrics['usage_loss'], epoch)
+                
+                if val_metrics:
+                    self.writer.add_scalar('Val/Loss_Epoch', val_metrics['loss'], epoch)
+                    self.writer.add_scalar('Val/Splice_Loss_Epoch', val_metrics['splice_loss'], epoch)
+                    self.writer.add_scalar('Val/Usage_Loss_Epoch', val_metrics['usage_loss'], epoch)
+                
+                # Log combined metrics for easy comparison
+                self.writer.add_scalars('Loss/Combined', {
+                    'train': train_metrics['loss'],
+                    'val': val_metrics['loss'] if val_metrics else 0.0
+                }, epoch)
+                
+                self.writer.add_scalars('Splice_Loss/Combined', {
+                    'train': train_metrics['splice_loss'],
+                    'val': val_metrics['splice_loss'] if val_metrics else 0.0
+                }, epoch)
+                
+                self.writer.add_scalars('Usage_Loss/Combined', {
+                    'train': train_metrics['usage_loss'],
+                    'val': val_metrics['usage_loss'] if val_metrics else 0.0
+                }, epoch)
+            
             # Print progress
             if verbose:
                 msg = f"Epoch {epoch+1}/{n_epochs} - "
@@ -286,6 +341,10 @@ class SpliceTrainer:
             # Save periodic checkpoint
             if self.checkpoint_dir and (epoch + 1) % 10 == 0:
                 self.save_checkpoint(f'checkpoint_epoch_{epoch+1}.pt')
+        
+        # Close TensorBoard writer
+        if self.writer is not None:
+            self.writer.close()
     
     def save_checkpoint(self, filename: str):
         """Save model checkpoint."""
