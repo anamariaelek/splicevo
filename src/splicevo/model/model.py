@@ -82,7 +82,8 @@ class EncoderModule(nn.Module):
                  num_classes: int = 3,
                  n_conditions: int = 5,
                  add_output_heads: bool = True,
-                 context_len: int = 4500):
+                 context_len: int = 4500,
+                 dropout: float = 0.0):
         """
         Initialize encoder module.
         
@@ -94,6 +95,7 @@ class EncoderModule(nn.Module):
             n_conditions: Number of tissue/timepoint conditions for usage prediction
             add_output_heads: Whether to add classification and usage prediction heads
             context_len: Number of positions on each end to treat as context (removed from output)
+            dropout: Dropout rate (default: 0.0)
         """
         super().__init__()
         
@@ -118,6 +120,9 @@ class EncoderModule(nn.Module):
             
         # Output normalization
         self.output_norm = nn.LayerNorm(embed_dim)
+        
+        # Dropout layer
+        self.dropout = nn.Dropout(dropout)
         
         # Optional output heads
         if add_output_heads:
@@ -194,6 +199,9 @@ class EncoderModule(nn.Module):
         # Output normalization
         encoder_features = self.output_norm(x)
         
+        # Apply dropout
+        encoder_features = self.dropout(encoder_features)
+        
         # Extract central region (remove context from both ends)
         # If context_len = 0, use full sequence
         if self.context_len > 0:
@@ -237,7 +245,8 @@ class SplicevoModel(nn.Module):
                  dilation_strategy: str = 'exponential',
                  num_classes: int = 3,
                  n_conditions: int = 5,
-                 context_len: int = 4500):
+                 context_len: int = 4500,
+                 dropout: float = 0.2):
         """
         Initialize model with encoder and dual decoders.
         
@@ -250,6 +259,7 @@ class SplicevoModel(nn.Module):
             context_len: Number of positions on each end to treat as context
                         For input of length L, predictions are made for positions
                         [context_len : L - context_len]
+            dropout: Dropout rate (default: 0.2)
         """
         super().__init__()
         
@@ -263,7 +273,8 @@ class SplicevoModel(nn.Module):
             num_classes=num_classes,
             n_conditions=n_conditions,
             add_output_heads=True,
-            context_len=context_len
+            context_len=context_len,
+            dropout=dropout
         )
         
     def forward(self, sequences, return_features: bool = False):
