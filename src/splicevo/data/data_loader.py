@@ -4,6 +4,9 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Union
 from pathlib import Path
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 
 from ..io.genome import GenomeData
 from ..io.gene_annotation import GTFProcessor, Transcript
@@ -139,12 +142,13 @@ class MultiGenomeDataLoader:
         
         # Process transcripts in batches for better memory usage
         batch_size = 1000
-        for batch_start in range(0, len(transcripts), batch_size):
+        
+        # Use tqdm for progress bar
+        for batch_start in tqdm(range(0, len(transcripts), batch_size), 
+                               desc="Processing transcripts", 
+                               unit="batch"):
             batch_end = min(batch_start + batch_size, len(transcripts))
             batch_transcripts = transcripts[batch_start:batch_end]
-            
-            if batch_start % 5000 == 0:
-                print(f"Processing batch {batch_start//batch_size + 1}/{(len(transcripts) + batch_size - 1)//batch_size}")
             
             # Collect all positive positions for this batch
             batch_positives = []
@@ -504,15 +508,185 @@ class MultiGenomeDataLoader:
         
         return pd.DataFrame(summary_rows)
 
+    def _process_gene_windows(self,
+                             genome_id: str,
+                             gene_id: str,
+                             df_gene: pd.DataFrame,
+                             splice_site_index: Dict,
+                             condition_to_idx: Dict[str, int],
+                             n_conditions: int,
+                             window_size: int,
+                             context_size: int,
+                             total_window: int,
+                             genome_cache: Optional[Dict] = None) -> Tuple[List[np.ndarray], List[np.ndarray], Dict[str, List[np.ndarray]], List[Dict]]:
+        """
+        Process windows for a single gene (parallelizable).
+        
+        Args:
+            genome_cache: Optional pre-loaded genome to avoid repeated loading
+        
+        Returns:
+            Tuple of (sequences, labels, usage_dict, metadata_rows)
+        """
+        nuc_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
+        
+        sequences = []
+        labels_list = []
+        usage_dict = {'alpha': [], 'beta': [], 'sse': []}
+        metadata_rows = []
+        
+        # Use cached genome if available, otherwise load it
+        if genome_cache is not None and genome_id in genome_cache:
+            genome = genome_cache[genome_id]
+        else:
+            genome = self.genomes[genome_id].load_genome()
+        
+        chrom = df_gene['chromosome'].iloc[0]
+        strand = df_gene['strand'].iloc[0]
+        
+        # Get 5'-most and 3'-most positions
+        min_pos = df_gene['position'].min() 
+        max_pos = df_gene['position'].max()
+
+        # Extend the gene range for specified context
+        requested_start = min_pos - context_size
+        requested_end = max_pos + context_size
+        
+        # Adjust boundaries to valid range
+        actual_start = max(0, requested_start)
+        
+        # Get chromosome length if available
+        try:
+            chrom_length = len(genome._genome[chrom])
+            actual_end = min(requested_end, chrom_length)
+        except (KeyError, AttributeError):
+            actual_end = requested_end
+        
+        # Calculate padding needed
+        left_pad = actual_start - requested_start
+        right_pad = requested_end - actual_end
+        
+        # Get sequence with valid coordinates
+        try:
+            seq = genome.get_seq(chrom, actual_start + 1, actual_end, strand == '-')
+        except Exception:
+            return sequences, labels_list, usage_dict, metadata_rows
+        
+        # Ensure seq is a string
+        if not isinstance(seq, str):
+            seq = str(seq).upper()
+        else:
+            seq = seq.upper()
+        
+        # Add padding with 'N' if needed
+        if left_pad > 0:
+            seq = 'N' * left_pad + seq
+        if right_pad > 0:
+            seq = seq + 'N' * right_pad
+        
+        # Pre-compute one-hot encoding for the entire gene sequence
+        gene_ohe = np.zeros((len(seq), 4), dtype=np.float32)
+        for i, nuc in enumerate(seq):
+            idx = nuc_to_idx.get(nuc, 4)
+            if idx < 4:
+                gene_ohe[i, idx] = 1.0
+        
+        # Split gene into windows shifted by window_size
+        for window_start in range(0, len(seq) - total_window + 1, window_size):
+            # Calculate the genomic position of this window
+            window_genomic_start = requested_start + window_start
+            
+            # The central window spans from context_size to context_size+window_size
+            window_center_genomic_start = window_genomic_start + context_size
+            window_center_genomic_end = window_center_genomic_start + window_size
+            
+            # Find splice sites in this window's central region
+            sites_in_window = df_gene[
+                (df_gene['position'] >= window_center_genomic_start) & 
+                (df_gene['position'] < window_center_genomic_end)
+            ]
+            
+            # Skip windows with no splice sites
+            if len(sites_in_window) == 0:
+                continue
+            
+            # Extract pre-computed one-hot encoding
+            ohe_seq = gene_ohe[window_start:window_start + total_window]
+            
+            # Initialize label array for this window
+            labels = np.zeros(window_size, dtype=np.int8)
+            
+            # Initialize usage arrays for this window
+            usage_alpha = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+            usage_beta = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+            usage_sse = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+            
+            n_donor_sites = 0
+            n_acceptor_sites = 0
+            
+            # Mark positions and add usage stats for each site
+            for _, site_row in sites_in_window.iterrows():
+                site_pos = site_row['position']
+                site_type = site_row['site_type']
+                
+                # Calculate position within the window
+                window_pos = site_pos - window_center_genomic_start
+                
+                if 0 <= window_pos < window_size:
+                    lookup_key = (genome_id, chrom, site_pos, strand)
+                    splice_site = splice_site_index.get(lookup_key)
+                    
+                    if splice_site is not None:
+                        labels[window_pos] = site_type
+                        
+                        if site_type == 1:
+                            n_donor_sites += 1
+                        elif site_type == 2:
+                            n_acceptor_sites += 1
+                        
+                        # Fill usage stats for this position
+                        for condition_key, usage_stats in splice_site.site_usage.items():
+                            if condition_key in condition_to_idx:
+                                cond_idx = condition_to_idx[condition_key]
+                                usage_alpha[window_pos, cond_idx] = usage_stats['alpha']
+                                usage_beta[window_pos, cond_idx] = usage_stats['beta']
+                                usage_sse[window_pos, cond_idx] = usage_stats['sse']
+            
+            # Store this window's data
+            sequences.append(ohe_seq)
+            labels_list.append(labels)
+            usage_dict['alpha'].append(usage_alpha)
+            usage_dict['beta'].append(usage_beta)
+            usage_dict['sse'].append(usage_sse)
+            
+            # Create metadata for this window
+            metadata_row = {
+                'genome_id': genome_id,
+                'chromosome': chrom,
+                'gene_id': gene_id,
+                'strand': strand,
+                'window_start': window_center_genomic_start,
+                'window_end': window_center_genomic_end,
+                'n_donor_sites': n_donor_sites,
+                'n_acceptor_sites': n_acceptor_sites
+            }
+            metadata_rows.append(metadata_row)
+        
+        return sequences, labels_list, usage_dict, metadata_rows
+
     def to_arrays(self,
                   window_size: int = 1000,
-                  context_size: int = 4500) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
+                  context_size: int = 4500,
+                  n_workers: Optional[int] = None,
+                  use_parallel: bool = True) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
         """
         Convert loaded data to arrays for ML training.
         
         Args:
             window_size: Size of the window containing splice sites
             context_size: Size of context on each side of the window
+            n_workers: Number of parallel workers (None for CPU count)
+            use_parallel: Whether to use parallel processing for genes
         
         Returns:
             Tuple of (sequences, labels, usage_arrays, metadata_df)
@@ -528,10 +702,10 @@ class MultiGenomeDataLoader:
         if not self.loaded_data:
             raise ValueError("No data loaded. Call load_all_genomes_data() first.")
 
-        # One-hot encoding mapping
-        nuc_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
+        if n_workers is None:
+            n_workers = min(mp.cpu_count(), 8)
         
-        # Pre-build index for O(1) splice site lookup - THIS IS THE KEY OPTIMIZATION
+        # Pre-build index for O(1) splice site lookup
         print("Building splice site index...")
         splice_site_index = {}
         for site in self.loaded_data:
@@ -550,173 +724,99 @@ class MultiGenomeDataLoader:
         n_conditions = len(self.usage_conditions)
         condition_to_idx = {cond['condition_key']: idx for idx, cond in enumerate(self.usage_conditions)}
         
-        # For each gene in each genome, get interval from 5'-most to 3'-most splice sites
         loaded_genomes = df['genome_id'].unique()
         total_window = context_size + window_size + context_size
-        
-        n_total_windows = 0
-        n_skipped_windows = 0
 
         for genome_id in loaded_genomes:
             print(f"Processing genome {genome_id}...")
-            genome = self.genomes[genome_id].load_genome()
             df_genome = df[df['genome_id'] == genome_id]
             genes = df_genome['gene_id'].unique()
             
             print(f"  Processing {len(genes)} genes...")
+            
+            # Pre-load genome once for this genome_id to avoid repeated loading
+            print(f"  Pre-loading genome for parallel processing...")
+            genome_cache = {genome_id: self.genomes[genome_id].load_genome()}
 
-            for gene_idx, gene_id in enumerate(genes):
-                if gene_idx % 100 == 0:
-                    print(f"    Gene {gene_idx}/{len(genes)}")
-                    
+            # Prepare gene data for parallel processing
+            gene_tasks = []
+            for gene_id in genes:
                 df_gene = df_genome[df_genome['gene_id'] == gene_id]
-                chrom = df_gene['chromosome'].iloc[0]
-                strand = df_gene['strand'].iloc[0]
+                gene_tasks.append((genome_id, gene_id, df_gene))
+            
+            # Process genes in parallel or sequentially
+            if use_parallel and len(gene_tasks) > 10:
+                print(f"  Using {n_workers} parallel workers...")
                 
-                # Get 5'-most and 3'-most positions
-                min_pos = df_gene['position'].min() 
-                max_pos = df_gene['position'].max()
-
-                # Extend the gene range for specified context
-                requested_start = min_pos - context_size
-                requested_end = max_pos + context_size
+                from concurrent.futures import ThreadPoolExecutor
                 
-                # Adjust boundaries to valid range
-                actual_start = max(0, requested_start)
-                
-                # Get chromosome length if available
-                try:
-                    chrom_length = len(genome._genome[chrom])
-                    actual_end = min(requested_end, chrom_length)
-                except (KeyError, AttributeError):
-                    actual_end = requested_end
-                
-                # Calculate padding needed
-                left_pad = actual_start - requested_start
-                right_pad = requested_end - actual_end
-                
-                # Get sequence with valid coordinates
-                try:
-                    seq = genome.get_seq(chrom, actual_start + 1, actual_end, strand == '-')
-                except Exception as e:
-                    print(f"    Skipping gene {gene_id}: {e}")
-                    continue
-                
-                # Ensure seq is a string
-                if not isinstance(seq, str):
-                    seq = str(seq).upper()
-                else:
-                    seq = seq.upper()
-                
-                # Add padding with 'N' if needed
-                if left_pad > 0:
-                    seq = 'N' * left_pad + seq
-                if right_pad > 0:
-                    seq = seq + 'N' * right_pad
-                
-                # Pre-compute one-hot encoding for the entire gene sequence
-                gene_ohe = np.zeros((len(seq), 4), dtype=np.float32)
-                for i, nuc in enumerate(seq):
-                    idx = nuc_to_idx.get(nuc, 4)
-                    if idx < 4:
-                        gene_ohe[i, idx] = 1.0
-                # Note: 'N' (idx=4) will remain as all-zeros vector
-                
-                # Split gene into windows shifted by window_size
-                for window_start in range(0, len(seq) - total_window + 1, window_size):
-                    n_total_windows += 1
+                with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                    # Submit all tasks
+                    future_to_gene = {}
+                    for genome_id, gene_id, df_gene in gene_tasks:
+                        future = executor.submit(
+                            self._process_gene_windows,
+                            genome_id,
+                            gene_id,
+                            df_gene,
+                            splice_site_index,
+                            condition_to_idx,
+                            n_conditions,
+                            window_size,
+                            context_size,
+                            total_window,
+                            genome_cache  # Pass pre-loaded genome
+                        )
+                        future_to_gene[future] = gene_id
                     
-                    # Calculate the genomic position of this window
-                    # Adjust for the padding offset
-                    window_genomic_start = requested_start + window_start
-                    
-                    # The central window spans from context_size to context_size+window_size
-                    window_center_genomic_start = window_genomic_start + context_size
-                    window_center_genomic_end = window_center_genomic_start + window_size
-                    
-                    # Find splice sites in this window's central region
-                    sites_in_window = df_gene[
-                        (df_gene['position'] >= window_center_genomic_start) & 
-                        (df_gene['position'] < window_center_genomic_end)
-                    ]
-                    
-                    # Skip windows with no splice sites
-                    if len(sites_in_window) == 0:
-                        n_skipped_windows += 1
-                        continue
-                    
-                    # Extract pre-computed one-hot encoding
-                    ohe_seq = gene_ohe[window_start:window_start + total_window]
-                    
-                    # Initialize label array for this window (0=no site, 1=donor, 2=acceptor)
-                    labels = np.zeros(window_size, dtype=np.int8)
-                    
-                    # Initialize usage arrays for this window
-                    usage_alpha = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
-                    usage_beta = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
-                    usage_sse = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
-                    
-                    n_donor_sites = 0
-                    n_acceptor_sites = 0
-                    
-                    # Mark positions and add usage stats for each site
-                    for _, site_row in sites_in_window.iterrows():
-                        site_pos = site_row['position']
-                        site_type = site_row['site_type']
-                        
-                        # Calculate position within the window (0 to window_size-1)
-                        window_pos = site_pos - window_center_genomic_start
-                        
-                        if 0 <= window_pos < window_size:
-                            lookup_key = (genome_id, chrom, site_pos, strand)
-                            splice_site = splice_site_index.get(lookup_key)
+                    # Collect results with progress bar
+                    for future in tqdm(as_completed(future_to_gene), 
+                                     total=len(gene_tasks),
+                                     desc=f"  {genome_id} genes",
+                                     unit="gene",
+                                     mininterval=0.5):
+                        try:
+                            sequences, labels_list, usage_dict, metadata_rows = future.result(timeout=120)
                             
-                            if splice_site is not None:
-                                # Set label: 1 for donor, 2 for acceptor
-                                labels[window_pos] = site_type
-                                
-                                if site_type == 1:
-                                    n_donor_sites += 1
-                                elif site_type == 2:
-                                    n_acceptor_sites += 1
-                                
-                                # Fill usage stats for this position
-                                for condition_key, usage_stats in splice_site.site_usage.items():
-                                    if condition_key in condition_to_idx:
-                                        cond_idx = condition_to_idx[condition_key]
-                                        usage_alpha[window_pos, cond_idx] = usage_stats['alpha']
-                                        usage_beta[window_pos, cond_idx] = usage_stats['beta']
-                                        usage_sse[window_pos, cond_idx] = usage_stats['sse']
-                    
-                    # Store this window's data
-                    all_sequences.append(ohe_seq)
-                    all_labels.append(labels)
-                    all_usage['alpha'].append(usage_alpha)
-                    all_usage['beta'].append(usage_beta)
-                    all_usage['sse'].append(usage_sse)
-                    
-                    # Create metadata for this window
-                    metadata_row = {
-                        'genome_id': genome_id,
-                        'chromosome': chrom,
-                        'gene_id': gene_id,
-                        'strand': strand,
-                        'window_start': window_center_genomic_start,
-                        'window_end': window_center_genomic_end,
-                        'n_donor_sites': n_donor_sites,
-                        'n_acceptor_sites': n_acceptor_sites
-                    }
-                    all_metadata_rows.append(metadata_row)
+                            all_sequences.extend(sequences)
+                            all_labels.extend(labels_list)
+                            all_usage['alpha'].extend(usage_dict['alpha'])
+                            all_usage['beta'].extend(usage_dict['beta'])
+                            all_usage['sse'].extend(usage_dict['sse'])
+                            all_metadata_rows.extend(metadata_rows)
+                        except Exception as e:
+                            gene_id = future_to_gene[future]
+                            print(f"\n  Warning: Failed to process gene {gene_id}: {e}")
+            else:
+                # Sequential processing with progress bar
+                for genome_id, gene_id, df_gene in tqdm(gene_tasks, 
+                                                       desc=f"  {genome_id} genes",
+                                                       unit="gene"):
+                    try:
+                        sequences, labels_list, usage_dict, metadata_rows = self._process_gene_windows(
+                            genome_id, gene_id, df_gene,
+                            splice_site_index, condition_to_idx, n_conditions,
+                            window_size, context_size, total_window,
+                            genome_cache
+                        )
+                        
+                        all_sequences.extend(sequences)
+                        all_labels.extend(labels_list)
+                        all_usage['alpha'].extend(usage_dict['alpha'])
+                        all_usage['beta'].extend(usage_dict['beta'])
+                        all_usage['sse'].extend(usage_dict['sse'])
+                        all_metadata_rows.extend(metadata_rows)
+                    except Exception as e:
+                        print(f"Warning: Failed to process gene {gene_id}: {e}")
         
         print("Converting to numpy arrays...")
-        print(f"Skipped {n_skipped_windows}/{n_total_windows} windows with no splice sites ({100*n_skipped_windows/n_total_windows:.1f}%)")
         
         # Convert lists to arrays
-        sequences = np.array(all_sequences, dtype=np.float32)  # (n_samples, total_window, 4)
-        labels = np.array(all_labels, dtype=np.int8)  # (n_samples, window_size)
+        sequences = np.array(all_sequences, dtype=np.float32)
+        labels = np.array(all_labels, dtype=np.int8)
         
         usage_arrays = {
-            'alpha': np.array(all_usage['alpha'], dtype=np.float32),  # (n_samples, window_size, n_conditions)
+            'alpha': np.array(all_usage['alpha'], dtype=np.float32),
             'beta': np.array(all_usage['beta'], dtype=np.float32),
             'sse': np.array(all_usage['sse'], dtype=np.float32)
         }

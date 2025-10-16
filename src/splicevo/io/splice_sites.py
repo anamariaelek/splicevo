@@ -5,6 +5,9 @@ from typing import Dict, Tuple, Optional, Union, List
 from dataclasses import dataclass, field
 from pathlib import Path
 from grelu.io.genome import CustomGenome
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import multiprocessing as mp
 
 
 @dataclass
@@ -63,22 +66,47 @@ class SpliceSite:
         )
     
     @classmethod
-    def from_positions_batch(cls,
-                           positions_data: List[Dict]) -> List['SpliceSite']:
+    def from_positions_batch(cls, 
+                            positions_data: List[Dict],
+                            n_workers: Optional[int] = None,
+                            use_processes: bool = False) -> List['SpliceSite']:
         """
         Create multiple SpliceSite instances with provided sequences.
 
         Args:
             positions_data: List of dicts with keys: genome_id, chromosome, transcript_id,
                           gene_id, position, site_type, strand, site_usage
+            n_workers: Number of parallel workers. If None, uses CPU count
+            use_processes: If True, use ProcessPoolExecutor (for CPU-bound), 
+                         otherwise ThreadPoolExecutor (for I/O-bound)
             
         Returns:
             List of SpliceSite instances
         """
-        results = []
-        for data in positions_data:
+        if n_workers is None:
+            n_workers = mp.cpu_count()
+        
+        # For small batches, parallel overhead isn't worth it
+        if len(positions_data) < 100:
+            results = []
+            for data in tqdm(positions_data, desc="Creating splice sites", unit="site"):
+                site_usage = data.get('site_usage', {})
+                results.append(cls(
+                    genome_id=data['genome_id'],
+                    chromosome=data['chromosome'],
+                    transcript_id=data['transcript_id'],
+                    gene_id=data['gene_id'],
+                    position=data['position'],
+                    site_type=data['site_type'],
+                    strand=data['strand'],
+                    site_usage=site_usage
+                ))
+            return results
+        
+        # Helper function for parallel execution
+        def create_site(data):
             site_usage = data.get('site_usage', {})
-            results.append(cls(
+            return cls(
                 genome_id=data['genome_id'],
                 chromosome=data['chromosome'],
                 transcript_id=data['transcript_id'],
@@ -87,7 +115,20 @@ class SpliceSite:
                 site_type=data['site_type'],
                 strand=data['strand'],
                 site_usage=site_usage
+            )
+        
+        # Choose executor based on workload type
+        ExecutorClass = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
+        
+        with ExecutorClass(max_workers=n_workers) as executor:
+            # Use tqdm with concurrent futures
+            results = list(tqdm(
+                executor.map(create_site, positions_data),
+                total=len(positions_data),
+                desc="Creating splice sites",
+                unit="site"
             ))
+        
         return results
     
     def get_site_type_name(self) -> str:
