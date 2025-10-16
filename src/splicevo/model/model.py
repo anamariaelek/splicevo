@@ -81,7 +81,6 @@ class EncoderModule(nn.Module):
                  dilation_strategy: str = 'exponential',
                  num_classes: int = 3,
                  n_conditions: int = 5,
-                 dropout: float = 0.1,
                  add_output_heads: bool = True,
                  context_len: int = 4500):
         """
@@ -93,7 +92,6 @@ class EncoderModule(nn.Module):
             dilation_strategy: Strategy for dilation rates
             num_classes: Number of splice site classes (3: none, donor, acceptor)
             n_conditions: Number of tissue/timepoint conditions for usage prediction
-            dropout: Dropout rate
             add_output_heads: Whether to add classification and usage prediction heads
             context_len: Number of positions on each end to treat as context (removed from output)
         """
@@ -123,12 +121,10 @@ class EncoderModule(nn.Module):
         
         # Optional output heads
         if add_output_heads:
-            # Decoder 1: Splice site classification head
-            # Minimal: just a linear projection from encoder features
+            # Splice site classification head: linear projection
             self.splice_classifier = nn.Linear(embed_dim, num_classes)
             
-            # Decoder 2: Usage prediction head
-            # Minimal: just a linear projection from encoder features
+            # Usage prediction head: linear projection
             self.usage_predictor = nn.Linear(embed_dim, n_conditions * 3)
     
     def _get_dilations(self, num_blocks: int, strategy: str):
@@ -210,10 +206,10 @@ class EncoderModule(nn.Module):
             return central_features
         
         # Apply output heads to central region only
-        # Decoder 1: Classify splice sites
+        # Output 1: Classify splice sites
         splice_logits = self.splice_classifier(central_features)
         
-        # Decoder 2: Predict usage statistics
+        # Output 2: Predict usage statistics
         usage_flat = self.usage_predictor(central_features)
         
         # Reshape usage predictions: (batch, central_len, n_conditions, 3)
@@ -241,7 +237,6 @@ class SplicevoModel(nn.Module):
                  dilation_strategy: str = 'exponential',
                  num_classes: int = 3,
                  n_conditions: int = 5,
-                 dropout: float = 0.1,
                  context_len: int = 4500):
         """
         Initialize model with encoder and dual decoders.
@@ -252,7 +247,6 @@ class SplicevoModel(nn.Module):
             dilation_strategy: Dilation strategy for residual blocks
             num_classes: Number of splice site classes (3: none, donor, acceptor)
             n_conditions: Number of tissue/timepoint conditions for usage prediction
-            dropout: Dropout rate
             context_len: Number of positions on each end to treat as context
                         For input of length L, predictions are made for positions
                         [context_len : L - context_len]
@@ -268,7 +262,6 @@ class SplicevoModel(nn.Module):
             dilation_strategy=dilation_strategy,
             num_classes=num_classes,
             n_conditions=n_conditions,
-            dropout=dropout,
             add_output_heads=True,
             context_len=context_len
         )
@@ -292,14 +285,13 @@ class SplicevoModel(nn.Module):
         """
         return self.encoder(sequences, return_features=return_features)
     
-    def predict(self, sequences, splice_threshold: float = 0.5):
+    def predict(self, sequences):
         """
         Predict splice sites and usage statistics for central region.
         
         Args:
             sequences: One-hot encoded DNA sequences of shape (batch_size, seq_len, 4)
                       Format: [context_len | central_region | context_len]
-            splice_threshold: Probability threshold for splice site prediction
             
         Returns:
             Dictionary with predictions for central region:

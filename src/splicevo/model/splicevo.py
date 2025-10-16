@@ -1,6 +1,6 @@
 import torch
 import pandas as pd
-from .model import SimpleModel
+from .model import SplicevoModel
 from ..training import SpliceTrainer, SpliceDataset
 from torch.utils.data import DataLoader
 
@@ -22,7 +22,7 @@ class Splicevo:
         
         # Initialize model
         if model is None:
-            self.model = SimpleModel(
+            self.model = SplicevoModel(
                 embed_dim=self.config.get('embed_dim', 256),
                 num_resblocks=self.config.get('num_resblocks', 4),
                 dilation_strategy=self.config.get('dilation_strategy', 'exponential'),

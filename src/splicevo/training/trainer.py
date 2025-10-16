@@ -43,8 +43,8 @@ class SpliceTrainer:
             device: Device to train on ('cuda' or 'cpu')
             learning_rate: Initial learning rate
             weight_decay: L2 regularization weight
-            splice_weight: Weight for splice classification loss
-            usage_weight: Weight for usage prediction loss
+            splice_weight: Weight for splice classification loss contribution to total loss
+            usage_weight: Weight for usage prediction loss contribution to total loss
             class_weights: Weights for each splice site class (for imbalanced data)
             checkpoint_dir: Directory to save checkpoints
         """
@@ -84,7 +84,7 @@ class SpliceTrainer:
         self.writer = None
         if self.use_tensorboard:
             from torch.utils.tensorboard import SummaryWriter
-            self.writer = SummaryWriter(log_dir=self.checkpoint_dir / 'logs')
+            self.writer = SummaryWriter(log_dir=self.checkpoint_dir / 'tensorboard')
             
         # Training state
         self.current_epoch = 0
@@ -124,15 +124,12 @@ class SpliceTrainer:
                 splice_labels.view(-1)
             )
             
-            # Compute usage prediction loss (only at actual splice sites)
+            # Compute usage prediction loss only at actual splice sites
             splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)
-            # Shape: (batch, seq_len, 1, 1)
-            
-            usage_predictions = output['usage_predictions']
-            
-            # Mask out non-splice-site positions and NaN values
             valid_mask = splice_mask & ~torch.isnan(usage_targets)
-            
+
+            usage_predictions = output['usage_predictions']
+
             if valid_mask.sum() > 0:
                 usage_loss = self.usage_criterion(
                     usage_predictions[valid_mask],
@@ -230,6 +227,7 @@ class SpliceTrainer:
                     self.usage_weight * usage_loss
                 )
                 
+                # Accumulate losses
                 total_loss += loss.item()
                 total_splice_loss += splice_loss.item()
                 total_usage_loss += usage_loss.item()
