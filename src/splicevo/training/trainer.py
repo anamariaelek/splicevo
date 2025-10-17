@@ -8,7 +8,8 @@ from typing import Dict, Optional, Callable
 import numpy as np
 from pathlib import Path
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 
 
 class SpliceTrainer:
@@ -17,6 +18,7 @@ class SpliceTrainer:
     
     Handles training, validation, checkpointing, and logging for models
     with dual decoders (splice site classification + usage prediction).
+    Supports memory-mapped datasets for efficient large-scale training.
     """
     
     def __init__(
@@ -31,7 +33,9 @@ class SpliceTrainer:
         usage_weight: float = 0.5,
         class_weights: Optional[torch.Tensor] = None,
         checkpoint_dir: Optional[str] = None,
-        use_tensorboard: bool = True
+        use_tensorboard: bool = True,
+        pin_memory: bool = True,
+        non_blocking: bool = True
     ):
         """
         Initialize trainer.
@@ -47,12 +51,16 @@ class SpliceTrainer:
             usage_weight: Weight for usage prediction loss contribution to total loss
             class_weights: Weights for each splice site class (for imbalanced data)
             checkpoint_dir: Directory to save checkpoints
+            pin_memory: Pin memory for faster CPU-GPU transfer (for memmap data)
+            non_blocking: Use non-blocking transfers for better performance
         """
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
         self.use_tensorboard = use_tensorboard and (checkpoint_dir is not None)
+        self.pin_memory = pin_memory
+        self.non_blocking = non_blocking
         
         # Loss functions
         if class_weights is not None:
@@ -99,6 +107,11 @@ class SpliceTrainer:
             'val_usage_loss': [],
             'learning_rate': []
         }
+        
+        # Time tracking
+        self.epoch_start_time = None
+        self.first_epoch_duration = None
+        self.training_start_time = None
     
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch."""
@@ -110,9 +123,10 @@ class SpliceTrainer:
         n_batches = 0
         
         for batch in self.train_loader:
-            sequences = batch['sequences'].to(self.device)
-            splice_labels = batch['splice_labels'].to(self.device)
-            usage_targets = batch['usage_targets'].to(self.device)
+            # Efficient transfer to device (non-blocking for memmap data)
+            sequences = batch['sequences'].to(self.device, non_blocking=self.non_blocking)
+            splice_labels = batch['splice_labels'].to(self.device, non_blocking=self.non_blocking)
+            usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
             
             # Forward pass
             output = self.model(sequences)
@@ -196,9 +210,10 @@ class SpliceTrainer:
         
         with torch.no_grad():
             for batch in self.val_loader:
-                sequences = batch['sequences'].to(self.device)
-                splice_labels = batch['splice_labels'].to(self.device)
-                usage_targets = batch['usage_targets'].to(self.device)
+                # Efficient transfer to device
+                sequences = batch['sequences'].to(self.device, non_blocking=self.non_blocking)
+                splice_labels = batch['splice_labels'].to(self.device, non_blocking=self.non_blocking)
+                usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
                 
                 # Forward pass
                 output = self.model(sequences)
@@ -256,15 +271,30 @@ class SpliceTrainer:
             early_stopping_patience: Stop if no improvement for N epochs
         """
         epochs_without_improvement = 0
+        self.training_start_time = time.time()
         
         for epoch in range(n_epochs):
             self.current_epoch = epoch
+            self.epoch_start_time = time.time()
             
             # Train
             train_metrics = self.train_epoch()
             
             # Validate
             val_metrics = self.validate()
+            
+            # Calculate epoch duration
+            epoch_duration = time.time() - self.epoch_start_time
+            
+            # Store first epoch duration for estimation
+            if epoch == 0:
+                self.first_epoch_duration = epoch_duration
+                if verbose:
+                    estimated_total = self.first_epoch_duration * n_epochs
+                    estimated_end = datetime.now() + timedelta(seconds=estimated_total)
+                    print(f"\nFirst epoch completed in {epoch_duration:.1f}s")
+                    print(f"Estimated total training time: {timedelta(seconds=int(estimated_total))}")
+                    print(f"Estimated completion: {estimated_end.strftime('%Y-%m-%d %H:%M:%S')}\n")
             
             # Update history
             self.history['train_loss'].append(train_metrics['loss'])
@@ -282,6 +312,7 @@ class SpliceTrainer:
                 self.writer.add_scalar('Train/Loss_Epoch', train_metrics['loss'], epoch)
                 self.writer.add_scalar('Train/Splice_Loss_Epoch', train_metrics['splice_loss'], epoch)
                 self.writer.add_scalar('Train/Usage_Loss_Epoch', train_metrics['usage_loss'], epoch)
+                self.writer.add_scalar('Train/Epoch_Duration', epoch_duration, epoch)
                 
                 if val_metrics:
                     self.writer.add_scalar('Val/Loss_Epoch', val_metrics['loss'], epoch)
@@ -304,9 +335,11 @@ class SpliceTrainer:
                     'val': val_metrics['usage_loss'] if val_metrics else 0.0
                 }, epoch)
             
-            # Print progress
+            # Print progress with timing
             if verbose:
-                msg = f"Epoch {epoch+1}/{n_epochs} - "
+                elapsed_total = time.time() - self.training_start_time
+                
+                msg = f"Epoch {epoch+1}/{n_epochs} ({epoch_duration:.1f}s) - "
                 msg += f"Train Loss: {train_metrics['loss']:.4f} "
                 msg += f"(Splice: {train_metrics['splice_loss']:.4f}, "
                 msg += f"Usage: {train_metrics['usage_loss']:.4f})"
@@ -315,6 +348,14 @@ class SpliceTrainer:
                     msg += f" - Val Loss: {val_metrics['loss']:.4f} "
                     msg += f"(Splice: {val_metrics['splice_loss']:.4f}, "
                     msg += f"Usage: {val_metrics['usage_loss']:.4f})"
+                
+                # Add ETA based on average epoch time
+                if epoch > 0:
+                    avg_epoch_time = elapsed_total / (epoch + 1)
+                    remaining_epochs = n_epochs - epoch - 1
+                    eta_seconds = avg_epoch_time * remaining_epochs
+                    eta = datetime.now() + timedelta(seconds=eta_seconds)
+                    msg += f" - ETA: {eta.strftime('%H:%M:%S')}"
                 
                 print(msg)
             
@@ -339,6 +380,16 @@ class SpliceTrainer:
             # Save periodic checkpoint
             if self.checkpoint_dir and (epoch + 1) % 10 == 0:
                 self.save_checkpoint(f'checkpoint_epoch_{epoch+1}.pt')
+        
+        # Final summary
+        if verbose and self.training_start_time:
+            total_time = time.time() - self.training_start_time
+            avg_epoch_time = total_time / (epoch + 1)
+            print(f"\nTraining Summary:")
+            print(f"  Total epochs: {epoch + 1}")
+            print(f"  Total time: {timedelta(seconds=int(total_time))}")
+            print(f"  Avg epoch time: {avg_epoch_time:.1f}s")
+            print(f"  Best val loss: {self.best_val_loss:.4f}")
         
         # Close TensorBoard writer
         if self.writer is not None:
