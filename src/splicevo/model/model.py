@@ -391,67 +391,89 @@ class SplicevoModel(nn.Module):
         Args:
             sequences: One-hot encoded DNA sequences of shape (batch_size, seq_len, 4)
                       or (seq_len, 4) for single sequence
+                      Can be numpy array or torch tensor (will be kept on CPU initially)
                       Format: [context_len | central_region | context_len]
             batch_size: Batch size for processing (default: 32)
             
         Returns:
-            Dictionary with predictions for central region:
+            Dictionary with numpy arrays for central region:
                 - 'splice_predictions': Predicted classes (batch_size, central_len)
-                - 'splice_probabilities': Class probabilities (batch_size, central_len, num_classes)
+                - 'splice_probs': Class probabilities (batch_size, central_len, num_classes)
+                - 'splice_logits': Raw logits (batch_size, central_len, num_classes)
                 - 'usage_predictions': Usage statistics (batch_size, central_len, n_conditions, 3)
                   where last dimension is [alpha, beta, sse]
         """
+        import numpy as np
+        
         self.eval()
+        
+        # Convert to tensor if needed, but keep on CPU
+        if isinstance(sequences, np.ndarray):
+            sequences = torch.from_numpy(sequences).float()
         
         # Handle single sequence input
         single_input = False
-        if sequences.dim() == 2:
+        if sequences.ndim == 2:
             sequences = sequences.unsqueeze(0)
             single_input = True
         
         num_sequences = sequences.shape[0]
         device = next(self.parameters()).device
-        sequences = sequences.to(device)
         
-        # Initialize lists to collect results
+        # Initialize lists to collect results (as numpy arrays)
+        all_splice_logits = []
+        all_splice_probs = []
         all_splice_predictions = []
-        all_splice_probabilities = []
         all_usage_predictions = []
         
         with torch.no_grad():
-            # Process in batches
+            # Process in batches - only transfer one batch at a time to GPU
             for i in range(0, num_sequences, batch_size):
-                batch_sequences = sequences[i:i + batch_size]
+                # Get batch (still on CPU)
+                batch_end = min(i + batch_size, num_sequences)
+                batch_sequences = sequences[i:batch_end]
+                
+                # Transfer only this batch to device
+                batch_sequences = batch_sequences.to(device)
                 
                 # Forward pass
                 output = self.forward(batch_sequences)
                 
                 # Process splice site predictions
                 splice_logits = output['splice_logits']
-                splice_probabilities = F.softmax(splice_logits, dim=-1)
+                splice_probs = F.softmax(splice_logits, dim=-1)
                 splice_predictions = splice_logits.argmax(dim=-1)
                 
                 # Usage predictions are already in the correct format
                 usage_predictions = output['usage_predictions']
                 
-                # Collect results
-                all_splice_predictions.append(splice_predictions.cpu())
-                all_splice_probabilities.append(splice_probabilities.cpu())
-                all_usage_predictions.append(usage_predictions.cpu())
+                # Move results back to CPU and convert to numpy immediately
+                # This frees GPU memory for the next batch
+                all_splice_logits.append(splice_logits.cpu().numpy())
+                all_splice_probs.append(splice_probs.cpu().numpy())
+                all_splice_predictions.append(splice_predictions.cpu().numpy())
+                all_usage_predictions.append(usage_predictions.cpu().numpy())
+                
+                # Clear GPU cache after each batch
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
         
-        # Concatenate all batches
-        splice_predictions = torch.cat(all_splice_predictions, dim=0)
-        splice_probabilities = torch.cat(all_splice_probabilities, dim=0)
-        usage_predictions = torch.cat(all_usage_predictions, dim=0)
+        # Concatenate all batches (numpy arrays)
+        splice_logits = np.concatenate(all_splice_logits, axis=0)
+        splice_probs = np.concatenate(all_splice_probs, axis=0)
+        splice_predictions = np.concatenate(all_splice_predictions, axis=0)
+        usage_predictions = np.concatenate(all_usage_predictions, axis=0)
         
         # If single input, remove batch dimension
         if single_input:
-            splice_predictions = splice_predictions.squeeze(0)
-            splice_probabilities = splice_probabilities.squeeze(0)
-            usage_predictions = usage_predictions.squeeze(0)
+            splice_logits = splice_logits[0]
+            splice_probs = splice_probs[0]
+            splice_predictions = splice_predictions[0]
+            usage_predictions = usage_predictions[0]
         
         return {
+            'splice_logits': splice_logits,
+            'splice_probs': splice_probs,
             'splice_predictions': splice_predictions,
-            'splice_probabilities': splice_probabilities,
             'usage_predictions': usage_predictions
         }

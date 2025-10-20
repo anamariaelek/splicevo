@@ -1,0 +1,51 @@
+# Default training configuration for Splicevo model
+
+# Device configuration
+device: cuda  # 'cuda' or 'cpu'
+cpu_threads: 8
+cudnn_benchmark: true
+gpu_memory_fraction: 0.7  # Fraction of GPU memory to use
+
+# Data configuration
+data:
+  path: /home/elek/projects/splicing/results/data_processing_subset/processed_data_train.npz
+  train_split: 0.8  # Fraction of data for training
+  normalization_method: per_sample_cpm  # 'per_sample_cpm' or 'global'
+
+# Model architecture (SplicevoModel parameters)
+model:
+  embed_dim: 128
+  num_resblocks: 8
+  dilation_strategy: alternating
+  alternate: 2
+  num_classes: 3
+  context_len: 4500
+  dropout: 0.5
+
+# Training configuration
+training:
+  # Optimizer
+  learning_rate: 1.0e-5
+  weight_decay: 1.0e-3
+  
+  # Loss weights
+  splice_weight: 0.5
+  usage_weight: 0.5
+  
+  # Class balancing
+  use_class_weights: true
+  
+  # Training loop
+  n_epochs: 100
+  early_stopping_patience: 5
+  
+  # DataLoader
+  dataloader:
+    batch_size: 128
+    num_workers: 32
+    prefetch_factor: 4
+
+# Output configuration
+output:
+  checkpoint_dir: /home/elek/projects/splicing/results/models/checkpoints
+  use_tensorboard: true

@@ -259,7 +259,8 @@ class SpliceTrainer:
         n_epochs: int,
         verbose: bool = True,
         save_best: bool = True,
-        early_stopping_patience: Optional[int] = None
+        early_stopping_patience: Optional[int] = None,
+        resume_from: Optional[str] = None
     ):
         """
         Train the model for multiple epochs.
@@ -269,11 +270,30 @@ class SpliceTrainer:
             verbose: Whether to print progress
             save_best: Whether to save best model checkpoint
             early_stopping_patience: Stop if no improvement for N epochs
+            resume_from: Path to checkpoint file to resume from (or 'auto' to find latest)
         """
+        # Resume from checkpoint if specified
+        start_epoch = 0
+        if resume_from:
+            if resume_from == 'auto':
+                # Find latest checkpoint
+                resume_from = self._find_latest_checkpoint()
+            
+            if resume_from and Path(resume_from).exists():
+                if verbose:
+                    print(f"\nResuming from checkpoint: {resume_from}")
+                self.load_checkpoint(resume_from, verbose=verbose)
+                start_epoch = self.current_epoch + 1
+                if verbose:
+                    print(f"Resuming from epoch {start_epoch}")
+                    print(f"Best validation loss so far: {self.best_val_loss:.4f}\n")
+            elif resume_from != 'auto':
+                print(f"Warning: Checkpoint {resume_from} not found, starting from scratch")
+        
         epochs_without_improvement = 0
         self.training_start_time = time.time()
         
-        for epoch in range(n_epochs):
+        for epoch in range(start_epoch, n_epochs):
             self.current_epoch = epoch
             self.epoch_start_time = time.time()
             
@@ -395,6 +415,25 @@ class SpliceTrainer:
         if self.writer is not None:
             self.writer.close()
     
+    def _find_latest_checkpoint(self) -> Optional[str]:
+        """Find the most recent checkpoint file."""
+        if self.checkpoint_dir is None:
+            return None
+        
+        # Look for periodic checkpoints
+        checkpoints = list(self.checkpoint_dir.glob('checkpoint_epoch_*.pt'))
+        if checkpoints:
+            # Sort by epoch number
+            checkpoints.sort(key=lambda x: int(x.stem.split('_')[-1]))
+            return str(checkpoints[-1])
+        
+        # Fall back to best model if no periodic checkpoints
+        best_model = self.checkpoint_dir / 'best_model.pt'
+        if best_model.exists():
+            return str(best_model)
+        
+        return None
+    
     def save_checkpoint(self, filename: str):
         """Save model checkpoint."""
         if self.checkpoint_dir is None:
@@ -402,25 +441,41 @@ class SpliceTrainer:
         
         checkpoint = {
             'epoch': self.current_epoch,
+            'global_step': self.global_step,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'best_val_loss': self.best_val_loss,
-            'history': self.history
+            'history': self.history,
+            'training_time': time.time() - self.training_start_time if self.training_start_time else 0
         }
         
         torch.save(checkpoint, self.checkpoint_dir / filename)
     
-    def load_checkpoint(self, filename: str):
+    def load_checkpoint(self, filename: str, verbose: bool = True):
         """Load model checkpoint."""
-        if self.checkpoint_dir is None:
-            raise ValueError("checkpoint_dir not set")
+        if isinstance(filename, str) and not Path(filename).is_absolute():
+            if self.checkpoint_dir is None:
+                raise ValueError("checkpoint_dir not set")
+            checkpoint_path = self.checkpoint_dir / filename
+        else:
+            checkpoint_path = Path(filename)
         
-        checkpoint = torch.load(self.checkpoint_dir / filename, map_location=self.device)
+        if verbose:
+            print(f"Loading checkpoint from {checkpoint_path}...")
+        
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.current_epoch = checkpoint['epoch']
+        self.global_step = checkpoint.get('global_step', 0)
         self.best_val_loss = checkpoint['best_val_loss']
         self.history = checkpoint['history']
+        
+        if verbose:
+            print(f"  Loaded epoch {self.current_epoch}")
+            print(f"  Global step: {self.global_step}")
+            print(f"  Best val loss: {self.best_val_loss:.4f}")
+            print(f"  Training history: {len(self.history['train_loss'])} epochs")
