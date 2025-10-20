@@ -134,8 +134,8 @@ class SpliceTrainer:
             # Compute splice classification loss
             splice_logits = output['splice_logits']
             splice_loss = self.splice_criterion(
-                splice_logits.view(-1, splice_logits.size(-1)),
-                splice_labels.view(-1)
+                splice_logits.reshape(-1, splice_logits.size(-1)),
+                splice_labels.reshape(-1)
             )
             
             # Compute usage prediction loss only at actual splice sites
@@ -221,8 +221,8 @@ class SpliceTrainer:
                 # Compute losses (same as training)
                 splice_logits = output['splice_logits']
                 splice_loss = self.splice_criterion(
-                    splice_logits.view(-1, splice_logits.size(-1)),
-                    splice_labels.view(-1)
+                    splice_logits.reshape(-1, splice_logits.size(-1)),
+                    splice_labels.reshape(-1)
                 )
                 
                 splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)

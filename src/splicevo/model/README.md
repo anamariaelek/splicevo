@@ -10,64 +10,31 @@ The model architecture consists of an encoder module that processes the input se
 
 ### EncoderModule
 
-The `EncoderModule` class constructs an encoder with a series of residual blocks (`ResBlock`) with two dilated 1D convolutional layers and batch normalization.
+The `EncoderModule` class constructs an encoder with a series of residual blocks (`ResBlock`) with two dilated 1D convolutional layers and batch normalization. 
 
-```python
+#### ResBlock
+
+```
 Input (batch, channels, seq_len)
     ↓
-Conv1d(kernel=9, dilation=d) + BatchNorm + ReLU
+Batch Normalization
     ↓
-Conv1d(kernel=3, dilation=1) + BatchNorm
+ReLU activation
+    ↓
+Conv1d(kernel=15, dilation=d)
+    ↓
+Batch Normalization
+    ↓
+ReLU activation
+    ↓
+Conv1d(kernel=3, dilation=1)
     ↓
 Add residual connection
     ↓
-ReLU
-    ↓
-Output (batch, channels, seq_len)
+ReLU activation
 ```
 
-Each `ResBlock` can potentially use different dilation rates in the first convolutional layer - this allows the model to capture features at multiple scales.  
+This is inspired by ResNet design, but it uses a pre-activation design (BatchNorm → ReLU → Conv, as opposed to Conv → BatchNorm → ReLU), as in SpliceTransformer. It has been shown that this approach can lead to better gradient flow and may improve training stability. It performs better on our task, as indicated by faster convergence speed and lower validation loss.
 
-```python
-from splicevo.model import EncoderModule
+Each `ResBlock` can potentially use different dilation rates in the first convolutional layer - this allows the model to capture features at multiple scales. We use kernel size 15 to have a receptive field large enough to capture relevant sequence motifs. For dilation, we reuse strategy from SpliceTransformer, which employs increasing dilation rates in 16 stacked  `ResBlock`s, to capture long-range dependencies effectively: `[1, 1, 1, 1, 4, 4, 4, 4, 10, 10, 10, 10, 20, 20, 20, 20]`. With kernel size $k$ and dilation $d$, the effective receptive field is $d \times (k - 1) + 1$. We use $k=15$ and $d \in [1, 20]$, resulting in receptive fields from 15 to 281 positions.
 
-# 1. No dilation (standard residual network)
-# Dilations: [1, 1, 1, 1]
-encoder = EncoderModule(
-    embed_dim=256,
-    num_resblocks=4,
-    dilation_strategy='none'
-)
-
-# 2. Exponential dilation - fast growth, good for long-range dependencies
-# Dilations: [1, 2, 4, 8, 16, 32]
-encoder = EncoderModule(
-    embed_dim=256,
-    num_resblocks=6,
-    dilation_strategy='exponential'
-)
-
-# 3. Linear dilation - steady growth
-# Dilations: [1, 2, 3, 4]
-encoder = EncoderModule(
-    embed_dim=256,
-    num_resblocks=4,
-    dilation_strategy='linear'
-)
-
-# 4. Alternating dilation - good for hierarchical features 
-# Dilations: [1, 1, 2, 2, 4, 4, 8, 8]
-encoder = EncoderModule(
-    embed_dim=256,
-    num_resblocks=8,
-    dilation_strategy='alternating'
-)
-
-# 5. Custom dilation - user-defined list of dilations
-# e.g. SpliceTransformer: [1, 1, 1, 1, 4, 4, 4, 4, 10, 10, 10, 10, 25, 25, 25, 25]
-encoder = EncoderModule(
-    embed_dim=256,
-    num_resblocks=16,
-    dilation_strategy=[1, 1, 1, 1, 4, 4, 4, 4, 10, 10, 10, 10, 25, 25, 25, 25]
-)
-```
