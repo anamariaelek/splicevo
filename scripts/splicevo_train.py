@@ -25,17 +25,10 @@ from torch.utils.data import DataLoader
 
 
 def load_config(config_path: str) -> dict:
-    """Load configuration from JSON or YAML file."""
+    """Load configuration from YAML file."""
     config_path = Path(config_path)
-    
-    if config_path.suffix in ['.yaml', '.yml']:
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-    elif config_path.suffix == '.json':
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-    else:
-        raise ValueError(f"Unsupported config format: {config_path.suffix}")
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
     
     return config
 
@@ -65,36 +58,133 @@ def setup_device(config: dict) -> str:
     return device
 
 
-def load_and_normalize_data(config: dict, log_fn=print):
-    """Load data and apply normalization."""
-    data_path = config['data']['path']
-    normalization_method = config['data'].get('normalization_method', 'per_sample_cpm')
-    
-    log_fn(f"Loading data from {data_path}...")
+def create_mmap_datasets(data_path, out_dir, log_fn=print):
+    """Create memory-mapped datasets for large data."""
+
     data = np.load(data_path)
     
     sequences = data['sequences']
-    labels = data['splice_labels'] if 'splice_labels' in data else data['labels']
-    
-    # Load usage arrays
+    labels = data['labels']
     usage_arrays = {
         'alpha': data['usage_alpha'],
         'beta': data['usage_beta'],
         'sse': data['usage_sse']
     }
     
+    # Create memmap directory
+    log_fn("Creating memory-mapped files")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save as memmap
+    seq_mmap = np.memmap(
+        out_dir / 'sequences.mmap',
+        dtype=np.float32,
+        mode='w+',
+        shape=sequences.shape
+    )
+    seq_mmap[:] = sequences[:]
+    seq_mmap.flush()
+    
+    labels_mmap = np.memmap(
+        out_dir / 'labels.mmap',
+        dtype=np.int64,
+        mode='w+',
+        shape=labels.shape
+    )
+    labels_mmap[:] = labels[:]
+    labels_mmap.flush()
+    
+    for key in ['alpha', 'beta', 'sse']:
+        usage_mmap = np.memmap(
+            out_dir / f'usage_{key}.mmap',
+            dtype=np.float32,
+            mode='w+',
+            shape=usage_arrays[key].shape
+        )
+        usage_mmap[:] = usage_arrays[key][:]
+        usage_mmap.flush()
+    
+    # Save metadata
+    metadata = {
+        'sequences_shape': sequences.shape,
+        'labels_shape': labels.shape,
+        'usage_shape': usage_arrays['alpha'].shape
+    }
+    with open(out_dir / 'metadata.json', 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    log_fn(f"Memory-mapped files saved to: {out_dir}")
+
+
+def load_and_normalize_data(config: dict, log_fn=print):
+    """Load data and apply normalization."""
+
+    data_path = Path(config['data']['path'])
+    normalization_method = config['data']['normalization_method']
+    use_mmap = config['data']['use_mmap']
+
+    sequences = labels = None
+    usage_arrays = None
+    normalized_usage = None
+    usage_stats = None
+
+    if use_mmap:
+        # Resolve mmap directory from config path
+        if data_path.is_dir():
+            mmap_dir = data_path
+        elif data_path.suffix == '.npz':
+            mmap_dir = data_path.parent / data_path.stem
+        elif data_path.name == 'metadata.json':
+            mmap_dir = data_path.parent
+        else:
+            mmap_dir = data_path
+
+        seq_file = mmap_dir / 'sequences.mmap'
+        lbl_file = mmap_dir / 'labels.mmap'
+        usage_files = {k: mmap_dir / f'usage_{k}.mmap' for k in ('alpha', 'beta', 'sse')}
+
+        # Check if memmap files exist, if not create them
+        if not (seq_file.exists() and lbl_file.exists() and all(p.exists() for p in usage_files.values())):
+            log_fn(f"Memmap files not found in {mmap_dir}")
+            create_mmap_datasets(data_path, mmap_dir, log_fn)
+        
+        # Check again and load memmap files
+        if seq_file.exists() and lbl_file.exists() and all(p.exists() for p in usage_files.values()):
+            log_fn(f"Loading data with memory mapping from: {mmap_dir}")
+            meta_path = mmap_dir / 'metadata.json'
+            if not meta_path.exists():
+                raise FileNotFoundError(f"Missing metadata.json in {mmap_dir}")
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+            sequences = np.memmap(seq_file, dtype=np.float32, mode='r', shape=tuple(meta['sequences_shape']))
+            labels = np.memmap(lbl_file, dtype=np.int64, mode='r', shape=tuple(meta['labels_shape']))
+            usage_arrays = {
+                k: np.memmap(usage_files[k], dtype=np.float32, mode='r', shape=tuple(meta['usage_shape']))
+                for k in ('alpha', 'beta', 'sse')
+            }
+        else:
+            raise FileNotFoundError(f"Memmap files not found in {mmap_dir}.")
+
+    if not use_mmap:
+        log_fn(f"Loading data from {data_path}...")
+        with np.load(data_path) as data:
+            sequences = data['sequences']
+            labels = data['labels']
+            usage_arrays = {
+                'alpha': data['usage_alpha'],
+                'beta': data['usage_beta'],
+                'sse': data['usage_sse'],
+            }
+    
+    log_fn(f"Normalizing usage arrays (method: {normalization_method})...")
+    normalized_usage, usage_stats = normalize_usage_arrays(usage_arrays, method=normalization_method)
+
     log_fn(f"Loaded {len(sequences)} samples")
     log_fn(f"  Sequences shape: {sequences.shape}")
     log_fn(f"  Labels shape: {labels.shape}")
-    log_fn(f"  Usage alpha shape: {usage_arrays['alpha'].shape}")
-    
-    # Normalize usage arrays
-    log_fn(f"\nNormalizing usage arrays (method: {normalization_method})...")
-    normalized_usage, usage_stats = normalize_usage_arrays(
-        usage_arrays,
-        method=normalization_method
-    )
-    
+    log_fn(f"  Usage arrays shapes: " +
+           ", ".join(f"{k}: {v.shape}" for k, v in normalized_usage.items()))
+
     return sequences, labels, normalized_usage, usage_stats
 
 
@@ -330,7 +420,9 @@ def main():
         usage_weight=training_config.get('usage_weight', 0.5),
         class_weights=class_weights,
         checkpoint_dir=str(checkpoint_dir),
-        use_tensorboard=config['output'].get('use_tensorboard', True)
+        use_tensorboard=config['output'].get('use_tensorboard', True),
+        use_amp=training_config.get('use_amp', True),
+        gradient_accumulation_steps=training_config.get('gradient_accumulation_steps', 1)
     )
     
     # Train

@@ -133,7 +133,7 @@ class EncoderModule(nn.Module):
         # Bottleneck fusion to reduce memory
         # Concatenated channels: num_scales * embed_dim
         # Bottleneck: reduce to embed_dim, then back to embed_dim
-        bottleneck_dim = embed_dim  # Could also use embed_dim // 2 for more compression
+        bottleneck_dim = embed_dim 
         self.fusion_reduce = nn.Conv1d(num_scales * embed_dim, bottleneck_dim, kernel_size=1)
         self.fusion_activation = nn.ReLU(inplace=True)
         self.fusion_expand = nn.Conv1d(bottleneck_dim, embed_dim, kernel_size=1)

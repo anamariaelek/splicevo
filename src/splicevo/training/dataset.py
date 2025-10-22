@@ -42,8 +42,9 @@ class SpliceDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a single sample."""
         # For memmap, convert to regular array for this sample
-        seq = np.array(self.sequences[idx]) if self.use_memmap else self.sequences[idx]
-        labels = np.array(self.splice_labels[idx]) if self.use_memmap else self.splice_labels[idx]
+        # Use .copy() to ensure arrays are writable
+        seq = np.array(self.sequences[idx], copy=True) if self.use_memmap else self.sequences[idx].copy()
+        labels = np.array(self.splice_labels[idx], copy=True) if self.use_memmap else self.splice_labels[idx].copy()
         
         # Handle dictionary of usage arrays
         if isinstance(self.usage_targets, dict):
@@ -52,12 +53,14 @@ class SpliceDataset(Dataset):
             for key in ['alpha', 'beta', 'sse']:
                 usage_arr = self.usage_targets[key][idx]
                 if self.use_memmap:
-                    usage_arr = np.array(usage_arr)
+                    usage_arr = np.array(usage_arr, copy=True)
+                else:
+                    usage_arr = usage_arr.copy()
                 usage_list.append(usage_arr)
             usage = np.stack(usage_list, axis=-1)  # (L, C) -> stack -> (L, 3, C) or similar
         else:
             # Legacy single array support
-            usage = np.array(self.usage_targets[idx]) if self.use_memmap else self.usage_targets[idx]
+            usage = np.array(self.usage_targets[idx], copy=True) if self.use_memmap else self.usage_targets[idx].copy()
         
         return {
             'sequences': torch.from_numpy(seq).float(),

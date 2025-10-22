@@ -35,7 +35,9 @@ class SpliceTrainer:
         checkpoint_dir: Optional[str] = None,
         use_tensorboard: bool = True,
         pin_memory: bool = True,
-        non_blocking: bool = True
+        non_blocking: bool = True,
+        use_amp: bool = True,
+        gradient_accumulation_steps: int = 1
     ):
         """
         Initialize trainer.
@@ -53,6 +55,8 @@ class SpliceTrainer:
             checkpoint_dir: Directory to save checkpoints
             pin_memory: Pin memory for faster CPU-GPU transfer (for memmap data)
             non_blocking: Use non-blocking transfers for better performance
+            use_amp: Use automatic mixed precision training (reduces memory usage)
+            gradient_accumulation_steps: Number of steps to accumulate gradients before update
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -61,6 +65,11 @@ class SpliceTrainer:
         self.use_tensorboard = use_tensorboard and (checkpoint_dir is not None)
         self.pin_memory = pin_memory
         self.non_blocking = non_blocking
+        self.use_amp = use_amp and (device == 'cuda')
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        
+        # Mixed precision training (use new torch.amp API)
+        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
         
         # Loss functions
         if class_weights is not None:
@@ -78,9 +87,12 @@ class SpliceTrainer:
             lr=learning_rate,
             weight_decay=weight_decay
         )
+        
+        # Adjust scheduler for gradient accumulation
+        total_steps = len(train_loader) * 100 // gradient_accumulation_steps
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            T_max=len(train_loader) * 100  # Assume max 100 epochs
+            T_max=total_steps
         )
         
         # Checkpointing
@@ -122,73 +134,98 @@ class SpliceTrainer:
         total_usage_loss = 0
         n_batches = 0
         
-        for batch in self.train_loader:
+        # Reset gradients at the start
+        self.optimizer.zero_grad()
+        
+        for batch_idx, batch in enumerate(self.train_loader):
             # Efficient transfer to device (non-blocking for memmap data)
             sequences = batch['sequences'].to(self.device, non_blocking=self.non_blocking)
             splice_labels = batch['splice_labels'].to(self.device, non_blocking=self.non_blocking)
             usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
             
-            # Forward pass
-            output = self.model(sequences)
-            
-            # Compute splice classification loss
-            splice_logits = output['splice_logits']
-            splice_loss = self.splice_criterion(
-                splice_logits.reshape(-1, splice_logits.size(-1)),
-                splice_labels.reshape(-1)
-            )
-            
-            # Compute usage prediction loss only at actual splice sites
-            splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)
-            valid_mask = splice_mask & ~torch.isnan(usage_targets)
-
-            usage_predictions = output['usage_predictions']
-
-            if valid_mask.sum() > 0:
-                usage_loss = self.usage_criterion(
-                    usage_predictions[valid_mask],
-                    usage_targets[valid_mask]
-                )
-            else:
-                usage_loss = torch.tensor(0.0, device=self.device)
-            
-            # Combined loss
-            loss = (
-                self.splice_weight * splice_loss +
-                self.usage_weight * usage_loss
-            )
-            
-            # Backward pass
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
-            self.scheduler.step()
-            
-            # Log to TensorBoard (per batch)
-            if self.writer is not None:
-                self.writer.add_scalar('Train/Loss_Batch', loss.item(), self.global_step)
-                self.writer.add_scalar('Train/Splice_Loss_Batch', splice_loss.item(), self.global_step)
-                self.writer.add_scalar('Train/Usage_Loss_Batch', usage_loss.item(), self.global_step)
-                self.writer.add_scalar('Train/Learning_Rate', self.optimizer.param_groups[0]['lr'], self.global_step)
+            # Forward pass with mixed precision (use new torch.amp API)
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                output = self.model(sequences)
                 
-                # Log gradient norms every N steps
-                if self.global_step % 100 == 0:
-                    total_norm = 0.0
-                    for p in self.model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    total_norm = total_norm ** 0.5
-                    self.writer.add_scalar('Train/Gradient_Norm', total_norm, self.global_step)
+                # Compute splice classification loss
+                splice_logits = output['splice_logits']
+                splice_loss = self.splice_criterion(
+                    splice_logits.reshape(-1, splice_logits.size(-1)),
+                    splice_labels.reshape(-1)
+                )
+                
+                # Compute usage prediction loss only at actual splice sites
+                splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)
+                valid_mask = splice_mask & ~torch.isnan(usage_targets)
+
+                usage_predictions = output['usage_predictions']
+
+                if valid_mask.sum() > 0:
+                    usage_loss = self.usage_criterion(
+                        usage_predictions[valid_mask],
+                        usage_targets[valid_mask]
+                    )
+                else:
+                    usage_loss = torch.tensor(0.0, device=self.device)
+                
+                # Combined loss (scale by accumulation steps)
+                loss = (
+                    self.splice_weight * splice_loss +
+                    self.usage_weight * usage_loss
+                ) / self.gradient_accumulation_steps
             
-            self.global_step += 1
+            # Backward pass with gradient scaling
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
-            # Accumulate losses
-            total_loss += loss.item()
+            # Update weights every gradient_accumulation_steps
+            if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                if self.use_amp:
+                    # Unscale gradients and clip
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    # Optimizer step
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.optimizer.step()
+                
+                self.scheduler.step()
+                self.optimizer.zero_grad()
+                
+                # Log to TensorBoard (per update step, not per batch)
+                if self.writer is not None:
+                    # Multiply loss back for logging
+                    actual_loss = loss.item() * self.gradient_accumulation_steps
+                    self.writer.add_scalar('Train/Loss_Batch', actual_loss, self.global_step)
+                    self.writer.add_scalar('Train/Splice_Loss_Batch', splice_loss.item(), self.global_step)
+                    self.writer.add_scalar('Train/Usage_Loss_Batch', usage_loss.item(), self.global_step)
+                    self.writer.add_scalar('Train/Learning_Rate', self.optimizer.param_groups[0]['lr'], self.global_step)
+                    
+                    # Log gradient norms every N steps
+                    if self.global_step % 100 == 0:
+                        total_norm = 0.0
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2)
+                                total_norm += param_norm.item() ** 2
+                        total_norm = total_norm ** 0.5
+                        self.writer.add_scalar('Train/Gradient_Norm', total_norm, self.global_step)
+                
+                self.global_step += 1
+            
+            # Accumulate losses (multiply back for accurate tracking)
+            total_loss += loss.item() * self.gradient_accumulation_steps
             total_splice_loss += splice_loss.item()
             total_usage_loss += usage_loss.item()
             n_batches += 1
+            
+            # Clear CUDA cache periodically
+            if self.device == 'cuda' and batch_idx % 50 == 0:
+                torch.cuda.empty_cache()
         
         return {
             'loss': total_loss / n_batches,
@@ -209,44 +246,49 @@ class SpliceTrainer:
         n_batches = 0
         
         with torch.no_grad():
-            for batch in self.val_loader:
+            for batch_idx, batch in enumerate(self.val_loader):
                 # Efficient transfer to device
                 sequences = batch['sequences'].to(self.device, non_blocking=self.non_blocking)
                 splice_labels = batch['splice_labels'].to(self.device, non_blocking=self.non_blocking)
                 usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
                 
-                # Forward pass
-                output = self.model(sequences)
-                
-                # Compute losses (same as training)
-                splice_logits = output['splice_logits']
-                splice_loss = self.splice_criterion(
-                    splice_logits.reshape(-1, splice_logits.size(-1)),
-                    splice_labels.reshape(-1)
-                )
-                
-                splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)
-                usage_predictions = output['usage_predictions']
-                valid_mask = splice_mask & ~torch.isnan(usage_targets)
-                
-                if valid_mask.sum() > 0:
-                    usage_loss = self.usage_criterion(
-                        usage_predictions[valid_mask],
-                        usage_targets[valid_mask]
+                # Forward pass with mixed precision (use new torch.amp API)
+                with torch.amp.autocast('cuda', enabled=self.use_amp):
+                    output = self.model(sequences)
+                    
+                    # Compute losses (same as training)
+                    splice_logits = output['splice_logits']
+                    splice_loss = self.splice_criterion(
+                        splice_logits.reshape(-1, splice_logits.size(-1)),
+                        splice_labels.reshape(-1)
                     )
-                else:
-                    usage_loss = torch.tensor(0.0, device=self.device)
-                
-                loss = (
-                    self.splice_weight * splice_loss +
-                    self.usage_weight * usage_loss
-                )
+                    
+                    splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)
+                    usage_predictions = output['usage_predictions']
+                    valid_mask = splice_mask & ~torch.isnan(usage_targets)
+                    
+                    if valid_mask.sum() > 0:
+                        usage_loss = self.usage_criterion(
+                            usage_predictions[valid_mask],
+                            usage_targets[valid_mask]
+                        )
+                    else:
+                        usage_loss = torch.tensor(0.0, device=self.device)
+                    
+                    loss = (
+                        self.splice_weight * splice_loss +
+                        self.usage_weight * usage_loss
+                    )
                 
                 # Accumulate losses
                 total_loss += loss.item()
                 total_splice_loss += splice_loss.item()
                 total_usage_loss += usage_loss.item()
                 n_batches += 1
+                
+                # Clear CUDA cache periodically
+                if self.device == 'cuda' and batch_idx % 50 == 0:
+                    torch.cuda.empty_cache()
         
         return {
             'loss': total_loss / n_batches,
