@@ -193,7 +193,7 @@ class MultiGenomeDataLoader:
             positive_count += len(batch_positives)
         
         print(f"Collected {len(all_positions)} positions ({positive_count} positive)")
-        return all_positions, positive_count
+        return all_positions
     
     def load_genome_data(self, 
                         genome_id: str, 
@@ -214,8 +214,8 @@ class MultiGenomeDataLoader:
         genome_data = self.genomes[genome_id]
         
         # Load genome and annotations
-        print(f"Loading genome {genome_id}...")
-        genome = genome_data.load_genome()
+        #print(f"Loading genome {genome_id}...")
+        #genome = genome_data.load_genome()
         
         print(f"Processing GTF annotations for {genome_id}...")
         gtf_processor = GTFProcessor(str(genome_data.gtf_path))
@@ -225,9 +225,7 @@ class MultiGenomeDataLoader:
             transcripts = transcripts[:max_transcripts]
         
         # Collect all positions first (fast)
-        positions_data, positive_count = self._collect_all_positions(
-            transcripts, genome_id
-        )
+        positions_data = self._collect_all_positions(transcripts, genome_id)
         
         if not positions_data:
             print("No splice sites found")
@@ -581,6 +579,7 @@ class MultiGenomeDataLoader:
         # Add padding with 'N' if needed
         if left_pad > 0:
             seq = 'N' * left_pad + seq
+        
         if right_pad > 0:
             seq = seq + 'N' * right_pad
         
@@ -658,7 +657,7 @@ class MultiGenomeDataLoader:
             usage_dict['alpha'].append(usage_alpha)
             usage_dict['beta'].append(usage_beta)
             usage_dict['sse'].append(usage_sse)
-            
+
             # Create metadata for this window
             metadata_row = {
                 'genome_id': genome_id,
@@ -820,6 +819,11 @@ class MultiGenomeDataLoader:
             'beta': np.array(all_usage['beta'], dtype=np.float32),
             'sse': np.array(all_usage['sse'], dtype=np.float32)
         }
+        
+        for key in usage_arrays:
+            n_nan = np.isnan(usage_arrays[key]).sum()
+            n_nonzero = np.count_nonzero(usage_arrays[key])
+            print(f"  {key}: {n_nan} NaN values, {n_nonzero} non-zero values")
         
         metadata = pd.DataFrame(all_metadata_rows)
         

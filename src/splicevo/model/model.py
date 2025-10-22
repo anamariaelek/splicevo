@@ -177,7 +177,6 @@ class EncoderModule(nn.Module):
         #     step = (11 - 5) / (num_blocks - 1)
         #     return [max(5, int(11 - i * step)) for i in range(num_blocks)]
         
-
     def _get_dilations(self, num_blocks: int, strategy: str, custom_dilations: Optional[list] = None, alternate: Optional[int] = 4):
         """
         Get dilation rates for each residual block.
@@ -358,6 +357,7 @@ class SplicevoModel(nn.Module):
             embed_dim=embed_dim,
             num_resblocks=num_resblocks,
             dilation_strategy=dilation_strategy,
+            alternate=alternate,
             num_classes=num_classes,
             n_conditions=n_conditions,
             add_output_heads=True,

@@ -90,7 +90,7 @@ class SpliceSite:
         if len(positions_data) < 100:
             results = []
             for data in tqdm(positions_data, desc="Creating splice sites", unit="site"):
-                site_usage = data.get('site_usage', {})
+                site_usage = data['site_usage'] if 'site_usage' in data else {}
                 results.append(cls(
                     genome_id=data['genome_id'],
                     chromosome=data['chromosome'],
@@ -101,11 +101,12 @@ class SpliceSite:
                     strand=data['strand'],
                     site_usage=site_usage
                 ))
+        
             return results
         
         # Helper function for parallel execution
         def create_site(data):
-            site_usage = data.get('site_usage', {})
+            site_usage = data['site_usage'] if 'site_usage' in data else {}
             return cls(
                 genome_id=data['genome_id'],
                 chromosome=data['chromosome'],
