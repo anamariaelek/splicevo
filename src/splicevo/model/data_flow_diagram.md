@@ -288,7 +288,6 @@ Memory: ~960 KB (16 * 1000 * 5 * 3 * 4 bytes)
 output = {
     'splice_logits': (16, 1000, 3),        # Classification logits
     'usage_predictions': (16, 1000, 5, 3), # Beta distribution parameters
-    
     # Optional (if return_features=True):
     'encoder_features': (16, 10000, 128),  # Full sequence features
     'central_features': (16, 1000, 128),   # Central region features
@@ -298,7 +297,7 @@ output = {
 
 ---
 
-## 9. Prediction Mode Output (via .predict())
+## 9. Prediction Mode Output
 
 ### After softmax on splice_logits
 ```
@@ -328,63 +327,20 @@ predictions = {
 
 ---
 
-## Memory Summary
-
-**Peak memory usage (during forward pass with batch_size=16):**
-
-1. Input: ~2.6 MB
-2. Embedding: ~82 MB
-3. ResBlock processing: ~82 MB (activations reused)
-4. Skip concatenation: **~410 MB (peak!)**
-5. After bottleneck fusion: ~82 MB
-6. Central region: ~8.2 MB
-7. Outputs: ~1.1 MB
-
-**Total peak: ~410 MB** (during skip concatenation)
-**After fusion: ~82 MB** (5x compression achieved)
-
-**Scaling to batch_size=128:**
-- Peak memory: ~3.28 GB (8x larger)
-- With mixed precision (FP16/BF16): ~1.64 GB at peak
-- Requires significant GPU memory management
-
----
-
 ## Receptive Field Growth
 
 The receptive field grows with each residual block:
 
-| Block | Dilation | Receptive Field | What it captures |
-|-------|----------|-----------------|------------------|
-| Input conv | - | 15 bp | Immediate neighbors |
-| ResBlock 0 | 1 | 27 bp | Local sequence context |
-| ResBlock 1 | 1 | 39 bp | Extended local context |
-| ResBlock 2 | 2 | 60 bp | Nearby motifs |
-| ResBlock 3 | 2 | 81 bp | Splice site consensus regions |
-| ResBlock 4 | 4 | 120 bp | Exon/intron boundaries |
-| ResBlock 5 | 4 | 159 bp | Branch point regions |
-| ResBlock 6 | 8 | 234 bp | Distant regulatory elements |
-| ResBlock 7 | 8 | **309 bp** | Long-range context |
-
-**Final receptive field: 309 nucleotides**
-
-This means each output position can "see" ±154 positions around it, sufficient to capture:
-- Canonical splice site motifs (GT-AG, ~2-20 bp)
-- Branch points (20-50 bp upstream of acceptors)
-- Polypyrimidine tracts
-- Exonic/intronic splicing enhancers/silencers (ESE/ESS/ISE/ISS)
+| Block | Dilation | Receptive Field | 
+|-------|----------|-----------------|
+| Input conv | - | 15 bp |
+| ResBlock 0 | 1 | 27 bp |
+| ResBlock 1 | 1 | 39 bp | 
+| ResBlock 2 | 2 | 60 bp | 
+| ResBlock 3 | 2 | 81 bp | 
+| ResBlock 4 | 4 | 120 bp | 
+| ResBlock 5 | 4 | 159 bp | 
+| ResBlock 6 | 8 | 234 bp | 
+| ResBlock 7 | 8 | **309 bp** |
 
 ---
-
-## Key Design Decisions
-
-1. **Multi-scale skip connections**: Capture features at different dilation scales
-2. **Alternating dilation pattern (alternate=2)**: Pairs of blocks at each dilation [1,1,2,2,4,4,8,8] provide stable feature extraction at multiple scales
-3. **Bottleneck fusion**: Compress 5 scales from 640 → 128 channels (5x memory reduction)
-4. **Context removal**: Only predict on central region, use flanking sequence as context
-5. **Separate heads**: Independent 1x1 convolutions for classification and regression
-6. **Pre-activation ResBlocks**: Better gradient flow and feature reuse
-7. **Dropout (0.5)**: Strong regularization to prevent overfitting
-8. **Smaller embed_dim (128)**: Reduces memory footprint compared to larger models
-9. **Large receptive field (309bp)**: Captures both local motifs and distant regulatory signals
-10. **1x1 convolutions for output**: Maintains position independence in predictions
