@@ -301,7 +301,7 @@ def save_training_config(config: dict, checkpoint_dir: Path, usage_stats: dict):
         'normalization_stats': usage_stats
     }
     
-    config_path = checkpoint_dir / f'training_config_{timestamp}.json'
+    config_path = checkpoint_dir / 'training_config.json'
     with open(config_path, 'w') as f:
         json.dump(full_config, f, indent=2)
     

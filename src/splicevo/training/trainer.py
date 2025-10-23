@@ -68,7 +68,7 @@ class SpliceTrainer:
         self.use_amp = use_amp and (device == 'cuda')
         self.gradient_accumulation_steps = gradient_accumulation_steps
         
-        # Mixed precision training (use new torch.amp API)
+        # Mixed precision training
         self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
         
         # Loss functions
@@ -143,7 +143,7 @@ class SpliceTrainer:
             splice_labels = batch['splice_labels'].to(self.device, non_blocking=self.non_blocking)
             usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
             
-            # Forward pass with mixed precision (use new torch.amp API)
+            # Forward pass with mixed precision
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 output = self.model(sequences)
                 
@@ -154,16 +154,17 @@ class SpliceTrainer:
                     splice_labels.reshape(-1)
                 )
                 
-                # Compute usage prediction loss only at actual splice sites
-                splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)
-                valid_mask = splice_mask & ~torch.isnan(usage_targets)
-
+                # Mask for valid splice positions
+                splice_mask = (splice_labels > 0)  # shape: [batch, positions]
+                usage_targets = torch.nan_to_num(usage_targets, nan=0.0)
                 usage_predictions = output['usage_predictions']
-
-                if valid_mask.sum() > 0:
+                if splice_mask.sum() > 0:
+                    mask_flat = splice_mask.reshape(-1)  # [batch*positions]
+                    usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-2], usage_targets.shape[-1])  # [batch*positions, n_conditions, 3]
+                    usage_predictions_flat = usage_predictions.reshape(-1, usage_predictions.shape[-2], usage_predictions.shape[-1])  # [batch*positions, n_conditions, 3]
                     usage_loss = self.usage_criterion(
-                        usage_predictions[valid_mask],
-                        usage_targets[valid_mask]
+                        usage_predictions_flat[mask_flat],
+                        usage_targets_flat[mask_flat]
                     )
                 else:
                     usage_loss = torch.tensor(0.0, device=self.device)

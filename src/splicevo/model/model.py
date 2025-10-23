@@ -60,6 +60,7 @@ class EncoderModule(nn.Module):
                  embed_dim: int = 256, 
                  num_resblocks: int = 4,
                  dilation_strategy: str = 'exponential',
+                 alternate: Optional[int] = 4,
                  num_classes: int = 3,
                  n_conditions: int = 5,
                  add_output_heads: bool = True,
@@ -95,7 +96,7 @@ class EncoderModule(nn.Module):
         self.input_relu = nn.ReLU(inplace=True)
         
         # Calculate dilation rates based on strategy
-        dilations = self._get_dilations(num_resblocks, dilation_strategy)
+        dilations = self._get_dilations(num_resblocks, dilation_strategy, alternate=alternate)
 
         # Calculate kernel sizes 
         kernel_sizes = self._get_kernel_sizes(num_resblocks)

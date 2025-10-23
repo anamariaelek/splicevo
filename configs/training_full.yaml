@@ -1,4 +1,4 @@
-# Default training configuration for Splicevo model
+# Updated training configuration for Splicevo model
 
 # Device configuration
 device: cuda # "cuda" or "cpu"
@@ -8,49 +8,49 @@ gpu_memory_fraction: 0.5
 
 # Data configuration
 data:
-  path: /home/elek/projects/splicing/results/data_processing_subset/processed_data_train.npz
-  use_mmap: false 
+  path: /home/elek/projects/splicing/results/data_processing/processed_data_train.npz
+  use_mmap: true
   train_split: 0.8
-  normalization_method: per_sample_cpm  # 'per_sample_cpm' or 'global'
+  normalization_method: per_sample_cpm   # 'per_sample_cpm' or 'global'
 
 # Model architecture
 model:
   embed_dim: 128
-  num_resblocks: 8
+  num_resblocks: 16  # Increased from 8 (more layers)
   dilation_strategy: alternating
-  alternate: 2
+  alternate: 4  # Increased from 2 (more blocks per dilation level)
   num_classes: 3
   context_len: 4500
-  dropout: 0.5
- 
+  dropout: 0.4  # Reduced from 0.5 (less regularization)
+
 # Training configuration
 training:
   # Optimizer
   learning_rate: 1.0e-5
-  weight_decay: 1.0e-3
+  weight_decay: 1.0e-3 
   
   # Loss weights
   splice_weight: 0.5
   usage_weight: 0.5
-  
+
   # Class balancing
   use_class_weights: true
   
   # Training loop
   n_epochs: 100
   early_stopping_patience: 5
-    
+  
   # Memory optimization
   use_amp: true
   gradient_accumulation_steps: 4
   
   # DataLoader
   dataloader:
-    batch_size: 128
+    batch_size: 64
     num_workers: 32
     prefetch_factor: 4
 
 # Output configuration
 output:
-  checkpoint_dir: /home/elek/projects/splicing/results/models/checkpoints
+  checkpoint_dir: /home/elek/projects/splicing/results/models/resnet
   use_tensorboard: true
