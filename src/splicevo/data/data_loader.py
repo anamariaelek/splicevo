@@ -676,6 +676,7 @@ class MultiGenomeDataLoader:
     def to_arrays(self,
                   window_size: int = 1000,
                   context_size: int = 4500,
+                  alpha_threshold: Optional[int] = None,
                   n_workers: Optional[int] = None,
                   use_parallel: bool = True) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
         """
@@ -813,13 +814,19 @@ class MultiGenomeDataLoader:
         # Convert lists to arrays
         sequences = np.array(all_sequences, dtype=np.float32)
         labels = np.array(all_labels, dtype=np.int8)
-        
+
         usage_arrays = {
             'alpha': np.array(all_usage['alpha'], dtype=np.float32),
             'beta': np.array(all_usage['beta'], dtype=np.float32),
             'sse': np.array(all_usage['sse'], dtype=np.float32)
         }
         
+        # Replace low values of alpha with 0
+        if alpha_threshold is not None:
+            usage_arrays['alpha'][usage_arrays['alpha'] < alpha_threshold] = 0
+            usage_arrays['beta'][usage_arrays['alpha'] < alpha_threshold] = 0
+            usage_arrays['sse'][usage_arrays['alpha'] < alpha_threshold] = 0
+
         for key in usage_arrays:
             n_nan = np.isnan(usage_arrays[key]).sum()
             n_nonzero = np.count_nonzero(usage_arrays[key])

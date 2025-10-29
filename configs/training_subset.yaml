@@ -8,9 +8,9 @@ gpu_memory_fraction: 0.5
 
 # Data configuration
 data:
-  path: /home/elek/projects/splicing/results/data_processing_subset/processed_data_train.npz
+  path: /home/elek/projects/splicing/results/data_processing_filtered/processed_data_subset.npz
   use_mmap: true 
-  train_split: 0.8
+  train_split: 0.7
   normalization_method: per_sample_cpm  # 'per_sample_cpm' or 'global'
 
 # Model architecture
@@ -52,5 +52,5 @@ training:
 
 # Output configuration
 output:
-  checkpoint_dir: /home/elek/projects/splicing/results/models/small_resnet
+  checkpoint_dir: /home/elek/projects/splicing/results/models/subset_filtered
   use_tensorboard: true

@@ -1,54 +1,54 @@
 Device: cpu
 
-Loading 256 samples from /home/elek/projects/splicing/results/data_processing_subset/processed_data_train.npz...
+Loading 100 samples from /home/elek/projects/splicing/results/data_processing/processed_data_test.npz...
   Step 1: Per-sample CPM normalization...
   Step 2: Log1p + standardization (using all data)...
-    → log_mean=12.784, log_std=2.677
-    → Valid values: 552 / 1,024,000 (0.1%)
+    → log_mean=10.881, log_std=4.619
+    → Valid values: 9,624 / 6,200,000 (0.2%)
   Step 1: Per-sample CPM normalization...
   Step 2: Log1p + standardization (using all data)...
-    → log_mean=11.414, log_std=4.713
-    → Valid values: 552 / 1,024,000 (0.1%)
+    → log_mean=10.312, log_std=5.026
+    → Valid values: 9,624 / 6,200,000 (0.2%)
 
 Original usage array stats:
-  usage_alpha: min=0.000, max=1125.000, mean=46.321, std=81.515
-    - 25th percentile: 4.000
-    - 50th percentile: 16.000
-    - 75th percentile: 54.250
-  usage_beta: min=0.000, max=165.000, mean=12.350, std=23.911
-    - 25th percentile: 1.750
-    - 50th percentile: 4.000
-    - 75th percentile: 11.000
-  usage_sse: min=0.000, max=1.000, mean=0.687, std=0.338
-    - 25th percentile: 0.476
-    - 50th percentile: 0.837
-    - 75th percentile: 0.966
+  usage_alpha: min=0.000, max=2481.000, mean=48.091, std=107.639
+    - 25th percentile: 1.000
+    - 50th percentile: 9.000
+    - 75th percentile: 42.000
+  usage_beta: min=0.000, max=989.000, mean=10.995, std=40.770
+    - 25th percentile: 1.000
+    - 50th percentile: 3.000
+    - 75th percentile: 8.000
+  usage_sse: min=0.000, max=1.000, mean=0.636, std=0.376
+    - 25th percentile: 0.312
+    - 50th percentile: 0.806
+    - 75th percentile: 0.959
 
 Normalized usage array stats:
-  usage_alpha: min=-4.775, max=0.385, mean=-0.000, std=1.000
-    - 25th percentile: 0.051
-    - 50th percentile: 0.385
-    - 75th percentile: 0.385
-  usage_beta: min=-2.422, max=0.510, mean=-0.000, std=1.000
-    - 25th percentile: 0.215
-    - 50th percentile: 0.440
-    - 75th percentile: 0.510
-  usage_sse: min=0.000, max=1.000, mean=0.687, std=0.338
-    - 25th percentile: 0.476
-    - 50th percentile: 0.837
-    - 75th percentile: 0.966
+  usage_alpha: min=-2.356, max=0.635, mean=-0.000, std=1.000
+    - 25th percentile: 0.209
+    - 50th percentile: 0.416
+    - 75th percentile: 0.515
+  usage_beta: min=-2.052, max=0.697, mean=0.000, std=1.000
+    - 25th percentile: 0.169
+    - 50th percentile: 0.442
+    - 75th percentile: 0.590
+  usage_sse: min=0.000, max=1.000, mean=0.636, std=0.376
+    - 25th percentile: 0.312
+    - 50th percentile: 0.806
+    - 75th percentile: 0.959
 Data shapes:
-  sequences: (256, 10000, 4)
-  labels: (256, 1000)
-  usage_alpha: (256, 1000, 4)
-  usage_beta: (256, 1000, 4)
-  usage_sse: (256, 1000, 4)
+  sequences: (100, 10000, 4)
+  labels: (100, 1000)
+  usage_alpha: (100, 1000, 62)
+  usage_beta: (100, 1000, 62)
+  usage_sse: (100, 1000, 62)
 
 DataLoader created:
   batch_size: 32
-  n_batches: 8
+  n_batches: 4
 
-Model created with 1,835,919 parameters
+Model created with 1,858,365 parameters
 Batch 0 keys:
   - sequences
   - splice_labels
@@ -58,40 +58,60 @@ Batch 0 keys:
 BATCH 0
 ============================================================
 Sequences shape: torch.Size([32, 10000, 4])
-  - dtype: torch.float32
-  - range: [0.000, 1.000]
-  - mean: 0.250
 
 Labels shape: torch.Size([32, 1000])
   - dtype: torch.int64
   - unique values: [0, 1, 2]
   - class distribution:
-    Class 0:  31932 ( 99.8%)
-    Class 1:     35 (  0.1%)
+    Class 0:  31927 ( 99.8%)
+    Class 1:     40 (  0.1%)
     Class 2:     33 (  0.1%)
 
 Usage arrays:
-  alpha: torch.Size([32, 4, 3])
-    - all values are NaN
-  beta: torch.Size([32, 4, 3])
-    - all values are NaN
-  sse: torch.Size([32, 4, 3])
-    - all values are NaN
+  usage type: torch.FloatTensor
+  usage shape: torch.Size([32, 1000, 62, 3])
+  alpha: torch.Size([32, 1000, 62])
+    - num valid data points (non-NaN): 3316
+    - min: -2.356
+    - max: 0.635
+    - mean: 0.070
+    - std: 0.907
+    - 25th percentile: 0.236
+    - 50th percentile: 0.402
+    - 75th percentile: 0.513
+  beta: torch.Size([32, 1000, 62])
+    - num valid data points (non-NaN): 3316
+    - min: -2.052
+    - max: 0.697
+    - mean: 0.058
+    - std: 0.931
+    - 25th percentile: 0.179
+    - 50th percentile: 0.453
+    - 75th percentile: 0.564
+  sse: torch.Size([32, 1000, 62])
+    - num valid data points (non-NaN): 3316
+    - min: 0.000
+    - max: 1.000
+    - mean: 0.663
+    - std: 0.367
+    - 25th percentile: 0.400
+    - 50th percentile: 0.840
+    - 75th percentile: 0.962
 
 ============================================================
 TRAINING STEP
 ============================================================
 
 Losses:
-  splice_loss: 1.440194
-  usage_loss_alpha: nan
-  usage_loss_beta: nan
-  usage_loss_sse: nan
-  usage_loss (avg): nan
-  total_loss: nan
+  splice_loss: 0.983172
+  usage_loss_alpha: 1.254747
+  usage_loss_beta: 1.338979
+  usage_loss_sse: 1.127238
+  usage_loss (avg): 1.240322
+  total_loss: 1.603333
 
 Backward pass...
-  gradient norms: min=nan, max=nan, mean=nan
+  gradient norms: min=0.000000, max=8.580789, mean=0.639174
   optimizer step complete
 Batch 1 keys:
   - sequences
@@ -102,40 +122,60 @@ Batch 1 keys:
 BATCH 1
 ============================================================
 Sequences shape: torch.Size([32, 10000, 4])
-  - dtype: torch.float32
-  - range: [0.000, 1.000]
-  - mean: 0.250
 
 Labels shape: torch.Size([32, 1000])
   - dtype: torch.int64
   - unique values: [0, 1, 2]
   - class distribution:
-    Class 0:  31943 ( 99.8%)
-    Class 1:     30 (  0.1%)
-    Class 2:     27 (  0.1%)
+    Class 0:  31924 ( 99.8%)
+    Class 1:     38 (  0.1%)
+    Class 2:     38 (  0.1%)
 
 Usage arrays:
-  alpha: torch.Size([32, 4, 3])
-    - all values are NaN
-  beta: torch.Size([32, 4, 3])
-    - all values are NaN
-  sse: torch.Size([32, 4, 3])
-    - all values are NaN
+  usage type: torch.FloatTensor
+  usage shape: torch.Size([32, 1000, 62, 3])
+  alpha: torch.Size([32, 1000, 62])
+    - num valid data points (non-NaN): 2809
+    - min: -2.356
+    - max: 0.635
+    - mean: -0.157
+    - std: 1.151
+    - 25th percentile: 0.105
+    - 50th percentile: 0.398
+    - 75th percentile: 0.534
+  beta: torch.Size([32, 1000, 62])
+    - num valid data points (non-NaN): 2809
+    - min: -2.052
+    - max: 0.697
+    - mean: -0.064
+    - std: 1.066
+    - 25th percentile: 0.220
+    - 50th percentile: 0.421
+    - 75th percentile: 0.595
+  sse: torch.Size([32, 1000, 62])
+    - num valid data points (non-NaN): 2809
+    - min: 0.000
+    - max: 1.000
+    - mean: 0.554
+    - std: 0.378
+    - 25th percentile: 0.154
+    - 50th percentile: 0.645
+    - 75th percentile: 0.923
 
 ============================================================
 TRAINING STEP
 ============================================================
 
 Losses:
-  splice_loss: nan
-  usage_loss_alpha: nan
-  usage_loss_beta: nan
-  usage_loss_sse: nan
-  usage_loss (avg): nan
-  total_loss: nan
+  splice_loss: 0.924857
+  usage_loss_alpha: 1.454686
+  usage_loss_beta: 1.377173
+  usage_loss_sse: 0.920951
+  usage_loss (avg): 1.250937
+  total_loss: 1.550325
 
 Backward pass...
-  gradient norms: min=nan, max=nan, mean=nan
+  gradient norms: min=0.000000, max=8.247949, mean=0.613136
   optimizer step complete
 Batch 2 keys:
   - sequences
@@ -146,84 +186,60 @@ Batch 2 keys:
 BATCH 2
 ============================================================
 Sequences shape: torch.Size([32, 10000, 4])
-  - dtype: torch.float32
-  - range: [0.000, 1.000]
-  - mean: 0.250
 
 Labels shape: torch.Size([32, 1000])
   - dtype: torch.int64
   - unique values: [0, 1, 2]
   - class distribution:
     Class 0:  31931 ( 99.8%)
-    Class 1:     34 (  0.1%)
-    Class 2:     35 (  0.1%)
+    Class 1:     38 (  0.1%)
+    Class 2:     31 (  0.1%)
 
 Usage arrays:
-  alpha: torch.Size([32, 4, 3])
-    - all values are NaN
-  beta: torch.Size([32, 4, 3])
-    - all values are NaN
-  sse: torch.Size([32, 4, 3])
-    - all values are NaN
+  usage type: torch.FloatTensor
+  usage shape: torch.Size([32, 1000, 62, 3])
+  alpha: torch.Size([32, 1000, 62])
+    - num valid data points (non-NaN): 2783
+    - min: -2.356
+    - max: 0.635
+    - mean: 0.042
+    - std: 0.985
+    - 25th percentile: 0.249
+    - 50th percentile: 0.469
+    - 75th percentile: 0.541
+  beta: torch.Size([32, 1000, 62])
+    - num valid data points (non-NaN): 2783
+    - min: -2.052
+    - max: 0.697
+    - mean: 0.020
+    - std: 1.004
+    - 25th percentile: 0.101
+    - 50th percentile: 0.502
+    - 75th percentile: 0.628
+  sse: torch.Size([32, 1000, 62])
+    - num valid data points (non-NaN): 2783
+    - min: 0.000
+    - max: 1.000
+    - mean: 0.647
+    - std: 0.390
+    - 25th percentile: 0.220
+    - 50th percentile: 0.857
+    - 75th percentile: 0.965
 
 ============================================================
 TRAINING STEP
 ============================================================
 
 Losses:
-  splice_loss: nan
-  usage_loss_alpha: nan
-  usage_loss_beta: nan
-  usage_loss_sse: nan
-  usage_loss (avg): nan
-  total_loss: nan
+  splice_loss: 0.881180
+  usage_loss_alpha: 1.283349
+  usage_loss_beta: 1.369433
+  usage_loss_sse: 1.082360
+  usage_loss (avg): 1.245047
+  total_loss: 1.503704
 
 Backward pass...
-  gradient norms: min=nan, max=nan, mean=nan
-  optimizer step complete
-Batch 3 keys:
-  - sequences
-  - splice_labels
-  - usage_targets
-
-============================================================
-BATCH 3
-============================================================
-Sequences shape: torch.Size([32, 10000, 4])
-  - dtype: torch.float32
-  - range: [0.000, 1.000]
-  - mean: 0.250
-
-Labels shape: torch.Size([32, 1000])
-  - dtype: torch.int64
-  - unique values: [0, 1, 2]
-  - class distribution:
-    Class 0:  31911 ( 99.7%)
-    Class 1:     44 (  0.1%)
-    Class 2:     45 (  0.1%)
-
-Usage arrays:
-  alpha: torch.Size([32, 4, 3])
-    - all values are NaN
-  beta: torch.Size([32, 4, 3])
-    - all values are NaN
-  sse: torch.Size([32, 4, 3])
-    - all values are NaN
-
-============================================================
-TRAINING STEP
-============================================================
-
-Losses:
-  splice_loss: nan
-  usage_loss_alpha: nan
-  usage_loss_beta: nan
-  usage_loss_sse: nan
-  usage_loss (avg): nan
-  total_loss: nan
-
-Backward pass...
-  gradient norms: min=nan, max=nan, mean=nan
+  gradient norms: min=0.000000, max=8.052278, mean=0.601761
   optimizer step complete
 
 ============================================================

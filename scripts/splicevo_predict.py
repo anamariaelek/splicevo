@@ -25,9 +25,9 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cuda') -> tuple:
     checkpoint_dir = Path(checkpoint_path).parent
     
     # Look for training config files
-    config_files = list(checkpoint_dir.glob('training_config_*.json'))
+    config_files = list(checkpoint_dir.glob('training_config*.json'))
     if not config_files:
-        config_files = list(checkpoint_dir.glob('config_*.json'))
+        config_files = list(checkpoint_dir.glob('config*.json'))
     
     model_config = None
     if config_files:
@@ -93,7 +93,7 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cuda') -> tuple:
         print(f"  {key}: {value}")
     
     model = SplicevoModel(**model_params)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     model.to(device)
     model.eval()
     
@@ -264,7 +264,7 @@ def main():
     print(f"  Splice probs shape: {predictions['splice_probs'].shape}")
     print(f"  Splice predictions shape: {predictions['splice_predictions'].shape}")
     print(f"  Usage predictions shape: {predictions['usage_predictions'].shape}")
-    
+
     # Extract alpha, beta, sse from usage predictions
     # Shape: (n_samples, seq_len, n_conditions, 3) where last dim is [alpha, beta, sse]
     usage_preds = predictions['usage_predictions']
