@@ -176,14 +176,48 @@ def load_and_normalize_data(config: dict, log_fn=print):
                 'sse': data['usage_sse'],
             }
     
-    log_fn(f"Normalizing usage arrays (method: {normalization_method})...")
-    normalized_usage, usage_stats = normalize_usage_arrays(usage_arrays, method=normalization_method)
+    # Try to load usage arrays, but allow missing
+    try:
+        if use_mmap:
+            # ...existing code for mmap...
+            usage_arrays = {
+                k: np.memmap(usage_files[k], dtype=np.float32, mode='r', shape=tuple(meta['usage_shape']))
+                for k in ('alpha', 'beta', 'sse')
+            }
+        else:
+            with np.load(data_path) as data:
+                sequences = data['sequences']
+                labels = data['labels']
+                usage_arrays = {
+                    'alpha': data['usage_alpha'],
+                    'beta': data['usage_beta'],
+                    'sse': data['usage_sse'],
+                }
+    except Exception:
+        usage_arrays = None
+
+    # Normalize if usage arrays are present and not all zeros
+    if usage_arrays is None or all(np.all(arr == 0) for arr in usage_arrays.values()):
+        log_fn("No valid usage arrays found, training without usage prediction.")
+        normalized_usage = None
+        usage_stats = None
+    else:
+        if normalization_method == 'none':
+            log_fn("Skipping normalization of usage arrays (method: none)")
+            normalized_usage = {k: usage_arrays[k] for k in usage_arrays}
+            usage_stats = {k: None for k in usage_arrays}
+        else:
+            log_fn(f"Normalizing usage arrays (method: {normalization_method})...")
+            normalized_usage, usage_stats = normalize_usage_arrays(usage_arrays, method=normalization_method)
 
     log_fn(f"Loaded {len(sequences)} samples")
     log_fn(f"  Sequences shape: {sequences.shape}")
     log_fn(f"  Labels shape: {labels.shape}")
-    log_fn(f"  Usage arrays shapes: " +
-           ", ".join(f"{k}: {v.shape}" for k, v in normalized_usage.items()))
+    if normalized_usage is not None:
+        log_fn(f"  Usage arrays shapes: " +
+               ", ".join(f"{k}: {v.shape}" for k, v in normalized_usage.items()))
+    else:
+        log_fn("  No usage arrays present.")
 
     return sequences, labels, normalized_usage, usage_stats
 
@@ -196,16 +230,23 @@ def create_datasets(sequences, labels, normalized_usage, config: dict, log_fn=pr
     
     log_fn(f"\nSplitting data: {n_train} train, {n_samples - n_train} val")
     
+    if normalized_usage is not None:
+        train_usage = {k: v[:n_train] for k, v in normalized_usage.items()}
+        val_usage = {k: v[n_train:] for k, v in normalized_usage.items()}
+    else:
+        train_usage = None
+        val_usage = None
+
     train_dataset = SpliceDataset(
         sequences[:n_train],
         labels[:n_train],
-        {k: v[:n_train] for k, v in normalized_usage.items()}
+        train_usage
     )
     
     val_dataset = SpliceDataset(
         sequences[n_train:],
         labels[n_train:],
-        {k: v[n_train:] for k, v in normalized_usage.items()}
+        val_usage
     )
     
     return train_dataset, val_dataset
@@ -238,8 +279,9 @@ def compute_class_weights(labels, config: dict, log_fn=print):
 def create_model(config: dict, n_conditions: int, log_fn=print):
     """Create model from config."""
     model_config = config['model']
-    
-    # Use config parameters directly as they match SplicevoModel arguments
+    # If n_conditions is None or 0, disable usage prediction
+    if n_conditions is None or n_conditions == 0:
+        n_conditions = 0
     model_params = {
         'embed_dim': model_config.get('embed_dim', 128),
         'num_resblocks': model_config.get('num_resblocks', 8),
@@ -250,7 +292,6 @@ def create_model(config: dict, n_conditions: int, log_fn=print):
         'context_len': model_config.get('context_len', 4500),
         'dropout': model_config.get('dropout', 0.5)
     }
-    
     model = SplicevoModel(**model_params)
     
     n_params = sum(p.numel() for p in model.parameters())
@@ -388,7 +429,10 @@ def main():
     
     # Create model
     model_start = time.time()
-    n_conditions = normalized_usage['alpha'].shape[2]
+    if normalized_usage is not None:
+        n_conditions = normalized_usage['alpha'].shape[2]
+    else:
+        n_conditions = 0
     model = create_model(config, n_conditions, log_print)
     model_time = time.time() - model_start
     
@@ -417,7 +461,7 @@ def main():
         learning_rate=training_config['learning_rate'],
         weight_decay=training_config['weight_decay'],
         splice_weight=training_config.get('splice_weight', 1.0),
-        usage_weight=training_config.get('usage_weight', 0.5),
+        usage_weight=training_config.get('usage_weight', 0.5) if n_conditions > 0 else 0.0,
         class_weights=class_weights,
         checkpoint_dir=str(checkpoint_dir),
         use_tensorboard=config['output'].get('use_tensorboard', True),

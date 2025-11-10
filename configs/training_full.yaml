@@ -16,12 +16,12 @@ data:
 # Model architecture
 model:
   embed_dim: 128
-  num_resblocks: 16  # Increased from 8 (more layers)
+  num_resblocks: 16
   dilation_strategy: alternating
-  alternate: 4  # Increased from 2 (more blocks per dilation level)
+  alternate: 4 
   num_classes: 3
-  context_len: 4500
-  dropout: 0.4  # Reduced from 0.5 (less regularization)
+  context_len: 450
+  dropout: 0.4
 
 # Training configuration
 training:
@@ -30,8 +30,8 @@ training:
   weight_decay: 1.0e-3 
   
   # Loss weights
-  splice_weight: 0.5
-  usage_weight: 0.5
+  splice_weight: 0.9
+  usage_weight: 0.1
 
   # Class balancing
   use_class_weights: true
@@ -52,5 +52,5 @@ training:
 
 # Output configuration
 output:
-  checkpoint_dir: /home/elek/projects/splicing/results/models/resnet
+  checkpoint_dir: /home/elek/projects/splicing/results/models/brain
   use_tensorboard: true
