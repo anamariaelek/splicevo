@@ -7,6 +7,7 @@ from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
+import json
 
 from ..io.genome import GenomeData
 from ..io.gene_annotation import GTFProcessor, Transcript
@@ -678,26 +679,21 @@ class MultiGenomeDataLoader:
                   context_size: int = 4500,
                   alpha_threshold: Optional[int] = None,
                   n_workers: Optional[int] = None,
-                  use_parallel: bool = True) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
+                  use_parallel: bool = True,
+                  save_memmap: Optional[Union[str, Path]] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
         """
         Convert loaded data to arrays for ML training.
         
         Args:
             window_size: Size of the window containing splice sites
             context_size: Size of context on each side of the window
+            alpha_threshold: Minimum alpha value (set lower values to 0)
             n_workers: Number of parallel workers (None for CPU count)
             use_parallel: Whether to use parallel processing for genes
+            save_memmap: Optional path to save arrays as memmap files
         
         Returns:
             Tuple of (sequences, labels, usage_arrays, metadata_df)
-            - sequences: One-hot encoded DNA sequences of shape (n_samples, total_window, 4)
-              where total_window = context_size + window_size + context_size
-            - labels: Array of shape (n_samples, window_size) with values:
-              0 = no splice site, 1 = donor site, 2 = acceptor site
-            - usage_arrays: Dictionary with keys 'alpha', 'beta', 'sse', each containing
-              arrays of shape (n_samples, window_size, n_conditions)
-              Usage values are only meaningful where labels > 0
-            - metadata_df: DataFrame with window metadata
         """
         if not self.loaded_data:
             raise ValueError("No data loaded. Call load_all_genomes_data() first.")
@@ -716,16 +712,114 @@ class MultiGenomeDataLoader:
         # Get all splice sites info
         df = self.get_dataframe()
 
-        all_sequences = []
-        all_labels = []
-        all_usage = {'alpha': [], 'beta': [], 'sse': []}
-        all_metadata_rows = []
-        
         n_conditions = len(self.usage_conditions)
         condition_to_idx = {cond['condition_key']: idx for idx, cond in enumerate(self.usage_conditions)}
         
         loaded_genomes = df['genome_id'].unique()
         total_window = context_size + window_size + context_size
+
+        # PHASE 1: Count total windows needed (fast, low memory)
+        if save_memmap:
+            print("Phase 1: Counting windows to pre-allocate memmap arrays...")
+            total_windows = 0
+            
+            for genome_id in loaded_genomes:
+                df_genome = df[df['genome_id'] == genome_id]
+                genes = df_genome['gene_id'].unique()
+                
+                genome = self.genomes[genome_id].load_genome()
+                
+                for gene_id in tqdm(genes, desc=f"  Counting {genome_id} windows", unit="gene"):
+                    df_gene = df_genome[df_genome['gene_id'] == gene_id]
+                    
+                    # Count windows for this gene
+                    min_pos = df_gene['position'].min()
+                    max_pos = df_gene['position'].max()
+                    requested_start = min_pos - context_size
+                    requested_end = max_pos + context_size
+                    
+                    gene_length = requested_end - requested_start
+                    n_windows_in_gene = max(0, (gene_length - total_window) // window_size + 1)
+                    
+                    # Count only windows that have splice sites
+                    for window_idx in range(n_windows_in_gene):
+                        window_start = requested_start + window_idx * window_size
+                        window_center_start = window_start + context_size
+                        window_center_end = window_center_start + window_size
+                        
+                        sites_in_window = df_gene[
+                            (df_gene['position'] >= window_center_start) & 
+                            (df_gene['position'] < window_center_end)
+                        ]
+                        
+                        if len(sites_in_window) > 0:
+                            total_windows += 1
+                
+                del genome  # Free memory
+            
+            print(f"Total windows to create: {total_windows}")
+            
+            # Pre-allocate memmap arrays
+            save_memmap = Path(save_memmap)
+            save_memmap.mkdir(parents=True, exist_ok=True)
+            
+            seq_shape = (total_windows, total_window, 4)
+            label_shape = (total_windows, window_size)
+            usage_shape = (total_windows, window_size, n_conditions)
+            
+            print(f"Pre-allocating memmap arrays in {save_memmap}")
+            sequences = np.memmap(
+                save_memmap / 'sequences.mmap',
+                dtype=np.float32,
+                mode='w+',
+                shape=seq_shape
+            )
+            
+            labels = np.memmap(
+                save_memmap / 'labels.mmap',
+                dtype=np.int8,
+                mode='w+',
+                shape=label_shape
+            )
+            
+            usage_arrays = {
+                'alpha': np.memmap(
+                    save_memmap / 'usage_alpha.mmap',
+                    dtype=np.float32,
+                    mode='w+',
+                    shape=usage_shape
+                ),
+                'beta': np.memmap(
+                    save_memmap / 'usage_beta.mmap',
+                    dtype=np.float32,
+                    mode='w+',
+                    shape=usage_shape
+                ),
+                'sse': np.memmap(
+                    save_memmap / 'usage_sse.mmap',
+                    dtype=np.float32,
+                    mode='w+',
+                    shape=usage_shape
+                )
+            }
+            
+            # Initialize usage arrays with NaN
+            for key in ['alpha', 'beta', 'sse']:
+                usage_arrays[key][:] = np.nan
+                usage_arrays[key].flush()
+            
+            # PHASE 2: Fill memmap arrays incrementally
+            print("\nPhase 2: Processing genes and writing to memmap...")
+            current_idx = 0
+            all_metadata_rows = []
+            
+        else:
+            # Non-memmap path: collect in memory
+            print("Collecting windows from all genes...")
+            all_sequences = []
+            all_labels = []
+            all_usage = {'alpha': [], 'beta': [], 'sse': []}
+            all_metadata_rows = []
 
         for genome_id in loaded_genomes:
             print(f"Processing genome {genome_id}...")
@@ -734,8 +828,8 @@ class MultiGenomeDataLoader:
             
             print(f"  Processing {len(genes)} genes...")
             
-            # Pre-load genome once for this genome_id to avoid repeated loading
-            print(f"  Pre-loading genome for parallel processing...")
+            # Pre-load genome once
+            print(f"  Pre-loading genome...")
             genome_cache = {genome_id: self.genomes[genome_id].load_genome()}
 
             # Prepare gene data for parallel processing
@@ -744,89 +838,153 @@ class MultiGenomeDataLoader:
                 df_gene = df_genome[df_genome['gene_id'] == gene_id]
                 gene_tasks.append((genome_id, gene_id, df_gene))
             
-            # Process genes in parallel or sequentially
+            # Process genes
             if use_parallel and len(gene_tasks) > 10:
                 print(f"  Using {n_workers} parallel workers...")
                 
                 from concurrent.futures import ThreadPoolExecutor
                 
                 with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                    # Submit all tasks
                     future_to_gene = {}
                     for genome_id, gene_id, df_gene in gene_tasks:
                         future = executor.submit(
                             self._process_gene_windows,
-                            genome_id,
-                            gene_id,
-                            df_gene,
-                            splice_site_index,
-                            condition_to_idx,
-                            n_conditions,
-                            window_size,
-                            context_size,
-                            total_window,
-                            genome_cache  # Pass pre-loaded genome
+                            genome_id, gene_id, df_gene,
+                            splice_site_index, condition_to_idx, n_conditions,
+                            window_size, context_size, total_window,
+                            genome_cache
                         )
                         future_to_gene[future] = gene_id
                     
-                    # Collect results with progress bar
                     for future in tqdm(as_completed(future_to_gene), 
                                      total=len(gene_tasks),
                                      desc=f"  {genome_id} genes",
                                      unit="gene",
                                      mininterval=0.5):
                         try:
-                            sequences, labels_list, usage_dict, metadata_rows = future.result(timeout=120)
+                            seq_list, lbl_list, usage_dict, metadata_rows = future.result(timeout=120)
                             
-                            all_sequences.extend(sequences)
-                            all_labels.extend(labels_list)
-                            all_usage['alpha'].extend(usage_dict['alpha'])
-                            all_usage['beta'].extend(usage_dict['beta'])
-                            all_usage['sse'].extend(usage_dict['sse'])
-                            all_metadata_rows.extend(metadata_rows)
+                            if save_memmap:
+                                # Write incrementally to memmap
+                                n_windows = len(seq_list)
+                                if n_windows > 0:
+                                    end_idx = current_idx + n_windows
+                                    sequences[current_idx:end_idx] = np.array(seq_list, dtype=np.float32)
+                                    labels[current_idx:end_idx] = np.array(lbl_list, dtype=np.int8)
+                                    
+                                    for key in ['alpha', 'beta', 'sse']:
+                                        usage_arrays[key][current_idx:end_idx] = np.array(usage_dict[key], dtype=np.float32)
+                                    
+                                    all_metadata_rows.extend(metadata_rows)
+                                    current_idx = end_idx
+                                    
+                                    # Periodic flush (every 100 windows)
+                                    if current_idx % 100 < n_windows:
+                                        sequences.flush()
+                                        labels.flush()
+                                        for key in usage_arrays:
+                                            usage_arrays[key].flush()
+                            else:
+                                # Collect in memory
+                                all_sequences.extend(seq_list)
+                                all_labels.extend(lbl_list)
+                                all_usage['alpha'].extend(usage_dict['alpha'])
+                                all_usage['beta'].extend(usage_dict['beta'])
+                                all_usage['sse'].extend(usage_dict['sse'])
+                                all_metadata_rows.extend(metadata_rows)
+                                
                         except Exception as e:
                             gene_id = future_to_gene[future]
                             print(f"\n  Warning: Failed to process gene {gene_id}: {e}")
             else:
-                # Sequential processing with progress bar
+                # Sequential processing
                 for genome_id, gene_id, df_gene in tqdm(gene_tasks, 
                                                        desc=f"  {genome_id} genes",
                                                        unit="gene"):
                     try:
-                        sequences, labels_list, usage_dict, metadata_rows = self._process_gene_windows(
+                        seq_list, lbl_list, usage_dict, metadata_rows = self._process_gene_windows(
                             genome_id, gene_id, df_gene,
                             splice_site_index, condition_to_idx, n_conditions,
                             window_size, context_size, total_window,
                             genome_cache
                         )
                         
-                        all_sequences.extend(sequences)
-                        all_labels.extend(labels_list)
-                        all_usage['alpha'].extend(usage_dict['alpha'])
-                        all_usage['beta'].extend(usage_dict['beta'])
-                        all_usage['sse'].extend(usage_dict['sse'])
-                        all_metadata_rows.extend(metadata_rows)
+                        if save_memmap:
+                            # Write incrementally to memmap
+                            n_windows = len(seq_list)
+                            if n_windows > 0:
+                                end_idx = current_idx + n_windows
+                                sequences[current_idx:end_idx] = np.array(seq_list, dtype=np.float32)
+                                labels[current_idx:end_idx] = np.array(lbl_list, dtype=np.int8)
+                                
+                                for key in ['alpha', 'beta', 'sse']:
+                                    usage_arrays[key][current_idx:end_idx] = np.array(usage_dict[key], dtype=np.float32)
+                                
+                                all_metadata_rows.extend(metadata_rows)
+                                current_idx = end_idx
+                        else:
+                            # Collect in memory
+                            all_sequences.extend(seq_list)
+                            all_labels.extend(lbl_list)
+                            all_usage['alpha'].extend(usage_dict['alpha'])
+                            all_usage['beta'].extend(usage_dict['beta'])
+                            all_usage['sse'].extend(usage_dict['sse'])
+                            all_metadata_rows.extend(metadata_rows)
+                            
                     except Exception as e:
                         print(f"Warning: Failed to process gene {gene_id}: {e}")
         
-        print("Converting to numpy arrays...")
+        # Finalize arrays
+        if save_memmap:
+            # Final flush
+            print("Flushing memmap arrays...")
+            sequences.flush()
+            labels.flush()
+            for key in usage_arrays:
+                usage_arrays[key].flush()
+            
+            n_samples = current_idx
+            
+            # Save metadata
+            metadata_dict = {
+                'sequences_shape': list(sequences.shape),
+                'labels_shape': list(labels.shape),
+                'usage_shape': list(usage_arrays['alpha'].shape),
+                'sequences_dtype': 'float32',
+                'labels_dtype': 'int8',
+                'usage_dtype': 'float32',
+                'window_size': window_size,
+                'context_size': context_size,
+                'n_conditions': n_conditions
+            }
+            
+            with open(save_memmap / 'metadata.json', 'w') as f:
+                json.dump(metadata_dict, f, indent=2)
+            
+            print(f"Memory-mapped files saved to: {save_memmap}")
+            
+        else:
+            # Create regular numpy arrays
+            print("Converting to numpy arrays...")
+            sequences = np.array(all_sequences, dtype=np.float32)
+            labels = np.array(all_labels, dtype=np.int8)
+            usage_arrays = {
+                'alpha': np.array(all_usage['alpha'], dtype=np.float32),
+                'beta': np.array(all_usage['beta'], dtype=np.float32),
+                'sse': np.array(all_usage['sse'], dtype=np.float32)
+            }
+            n_samples = len(sequences)
         
-        # Convert lists to arrays
-        sequences = np.array(all_sequences, dtype=np.float32)
-        labels = np.array(all_labels, dtype=np.int8)
-
-        usage_arrays = {
-            'alpha': np.array(all_usage['alpha'], dtype=np.float32),
-            'beta': np.array(all_usage['beta'], dtype=np.float32),
-            'sse': np.array(all_usage['sse'], dtype=np.float32)
-        }
-        
-        # Replace low values of alpha with 0
+        # Apply alpha threshold if specified
         if alpha_threshold is not None:
-            usage_arrays['alpha'][usage_arrays['alpha'] < alpha_threshold] = 0
-            usage_arrays['beta'][usage_arrays['alpha'] < alpha_threshold] = 0
-            usage_arrays['sse'][usage_arrays['alpha'] < alpha_threshold] = 0
+            print(f"Applying alpha threshold: {alpha_threshold}")
+            mask = usage_arrays['alpha'] < alpha_threshold
+            for key in ['alpha', 'beta', 'sse']:
+                usage_arrays[key][mask] = 0
+                if save_memmap:
+                    usage_arrays[key].flush()
 
+        # Print statistics
         for key in usage_arrays:
             n_nan = np.isnan(usage_arrays[key]).sum()
             n_nonzero = np.count_nonzero(usage_arrays[key])
@@ -835,7 +993,6 @@ class MultiGenomeDataLoader:
         metadata = pd.DataFrame(all_metadata_rows)
         
         # Validation
-        n_samples = len(sequences)
         assert labels.shape[0] == n_samples, "Labels shape mismatch"
         assert usage_arrays['alpha'].shape[0] == n_samples, "Usage arrays shape mismatch"
         assert len(metadata) == n_samples, "Metadata mismatch"

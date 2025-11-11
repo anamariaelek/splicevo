@@ -38,7 +38,7 @@ if group == "train":
 elif group == "test":
     human_chromosomes = ['1', '3', '5']
 elif group == "subset":
-    human_chromosomes = ['2', '4']
+    human_chromosomes = ['20', '21']
 
 human_start = time.time()
 print("  (chrs " + ", ".join(human_chromosomes) + ")")
@@ -63,7 +63,7 @@ step3_start = time.time()
 # Add human usage files if they exist
 print("  Adding human usage files...")
 human_usage_start = time.time()
-for tissue in ["Brain"]: #, "Cerebellum", "Heart", "Kidney", "Liver", "Ovary", "Testis"]:
+for tissue in ["Brain", "Cerebellum", "Heart", "Kidney", "Liver", "Ovary", "Testis"]:
     for timepoint_int in range(1, 16):
         try:
             timepoint = str(timepoint_int)
@@ -106,18 +106,21 @@ print()
 print("Step 5: Converting to arrays with windowing...")
 step5_start = time.time()
 
+# Create output directory for memmap files
+memmap_dir = os.path.join(output_dir, f"memmap_{group}")
+
 sequences, labels, usage_arrays, metadata = loader.to_arrays(
     window_size=1000,
     context_size=4500,
     alpha_threshold=5,
-    n_workers=n_cpus
+    n_workers=n_cpus,
+    save_memmap=memmap_dir  # Save directly as memmap
 )
 
 step5_time = time.time() - step5_start
 print(f"✓ Data converted to arrays in {step5_time:.2f} seconds")
 print(f"  Shape of sequences: {sequences.shape}")
 print(f"  Shape of labels: {labels.shape}")
-print(f"    Labels format: [:, :, 0] = donor sites, [:, :, 1] = acceptor sites")
 print(f"  Shape of usage_arrays['alpha']: {usage_arrays['alpha'].shape}")
 print(f"  Shape of usage_arrays['beta']: {usage_arrays['beta'].shape}")
 print(f"  Shape of usage_arrays['sse']: {usage_arrays['sse'].shape}")
@@ -132,15 +135,7 @@ print()
 print("Step 6: Saving processed data...")
 save_start = time.time()
 
-np.savez_compressed(
-    os.path.join(output_dir, f"processed_data_{group}.npz"),
-    sequences=sequences, 
-    labels=labels,
-    usage_alpha=usage_arrays['alpha'],
-    usage_beta=usage_arrays['beta'],
-    usage_sse=usage_arrays['sse']
-)
-
+# Arrays are already saved as memmap, just save metadata
 metadata.to_csv(os.path.join(output_dir, f"metadata_{group}.csv.gz"), index=False, compression='gzip')
 
 # Save usage info

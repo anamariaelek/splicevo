@@ -95,18 +95,25 @@ loader.get_summary()
 # Convert to arrays for ML
 sequences, labels, usage_arrays, metadata = loader.to_arrays(
     window_size=1000,
+    context_size=4500,
+    save_memmap='./memmap_data'  # Save directly to memmap files
+)
+
+# Or save as regular .npz file
+sequences, labels, usage_arrays, metadata = loader.to_arrays(
+    window_size=1000,
     context_size=4500
 )
+np.savez_compressed('splicevo_data.npz', 
+                   sequences=sequences, 
+                   labels=labels, 
+                   usage_alpha=usage_arrays['alpha'],
+                   usage_beta=usage_arrays['beta'],
+                   usage_sse=usage_arrays['sse'])
+metadata.to_csv('splicevo_metadata.csv', index=False)
 
 # Get usage information
 usage_info = loader.get_usage_array_info(usage_arrays=usage_arrays)
 print(f"Available conditions: {[c['display_name'] for c in usage_info['conditions']]}")
 print(f"Coverage per condition: {usage_info['condition_coverage']}")
-
-# Save arrays to disk as .npz compressed file
-import numpy as np
-np.savez_compressed('splicevo_data.npz', sequences=sequences, labels=labels, usage_arrays=usage_arrays)
-metadata.to_csv('splicevo_metadata.csv', index=False)
-
 ```
-    
