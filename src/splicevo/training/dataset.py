@@ -42,22 +42,33 @@ class SpliceDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a single sample."""
         # For memmap, convert to regular array for this sample
-        # Use .copy() to ensure arrays are writable
         seq = np.array(self.sequences[idx], copy=True) if self.use_memmap else self.sequences[idx].copy()
         labels = np.array(self.splice_labels[idx], copy=True) if self.use_memmap else self.splice_labels[idx].copy()
         
         # Handle dictionary of usage arrays
-        if isinstance(self.usage_targets, dict):
-            # Stack the usage arrays along the last dimension
-            usage_list = []
-            for key in ['alpha', 'beta', 'sse']:
-                usage_arr = self.usage_targets[key][idx]
-                if self.use_memmap:
-                    usage_arr = np.array(usage_arr, copy=True)
-                else:
-                    usage_arr = usage_arr.copy()
-                usage_list.append(usage_arr)
-            usage = np.stack(usage_list, axis=-1)  # (L, C) -> stack -> (L, 3, C) or similar
+        if isinstance(self.usage_targets, dict) and self.usage_targets:
+            # Determine which keys are available
+            available_keys = [k for k in ['alpha', 'beta', 'sse'] if k in self.usage_targets]
+            
+            if available_keys:
+                # Stack available arrays along the last dimension
+                usage_list = []
+                for key in available_keys:
+                    usage_arr = self.usage_targets[key][idx]
+                    if self.use_memmap:
+                        usage_arr = np.array(usage_arr, copy=True)
+                    else:
+                        usage_arr = usage_arr.copy()
+                    usage_list.append(usage_arr)
+                
+                # Stack to get (L, C, n_types) where n_types = len(available_keys)
+                usage = np.stack(usage_list, axis=-1)
+            else:
+                # No usage arrays available
+                usage = np.zeros((labels.shape[0], 1, 0), dtype=np.float32)
+        elif self.usage_targets is None:
+            # No usage targets at all
+            usage = np.zeros((labels.shape[0], 1, 0), dtype=np.float32)
         else:
             # Legacy single array support
             usage = np.array(self.usage_targets[idx], copy=True) if self.use_memmap else self.usage_targets[idx].copy()

@@ -1,5 +1,7 @@
 """Training script using configuration file."""
 
+from html import parser
+from typing import Dict, Optional
 import torch
 import numpy as np
 from pathlib import Path
@@ -31,7 +33,6 @@ def load_config(config_path: str) -> dict:
         config = yaml.safe_load(f)
     
     return config
-
 
 def setup_device(config: dict) -> str:
     """Setup compute device with optional resource limits."""
@@ -122,6 +123,9 @@ def load_and_normalize_data(config: dict, log_fn=print):
     data_path = Path(config['data']['path'])
     normalization_method = config['data']['normalization_method']
     use_mmap = config['data']['use_mmap']
+    
+    # Optional: specify which usage arrays to load
+    usage_types_to_load = config['data'].get('usage_types', ['alpha', 'beta', 'sse'])  # Default: all
 
     sequences = labels = None
     usage_arrays = None
@@ -141,71 +145,91 @@ def load_and_normalize_data(config: dict, log_fn=print):
 
         seq_file = mmap_dir / 'sequences.mmap'
         lbl_file = mmap_dir / 'labels.mmap'
-        usage_files = {k: mmap_dir / f'usage_{k}.mmap' for k in ('alpha', 'beta', 'sse')}
+        
+        # Check which usage files exist
+        usage_files = {
+            'alpha': mmap_dir / 'usage_alpha.mmap',
+            'beta': mmap_dir / 'usage_beta.mmap',
+            'sse': mmap_dir / 'usage_sse.mmap'
+        }
+        
+        available_usage = {k: v for k, v in usage_files.items() 
+                          if v.exists() and k in usage_types_to_load}
 
-        # Check if memmap files exist, if not create them
-        if not (seq_file.exists() and lbl_file.exists() and all(p.exists() for p in usage_files.values())):
+        # Check if memmap files exist
+        if not (seq_file.exists() and lbl_file.exists()):
             log_fn(f"Memmap files not found in {mmap_dir}")
             create_mmap_datasets(data_path, mmap_dir, log_fn)
         
-        # Check again and load memmap files
-        if seq_file.exists() and lbl_file.exists() and all(p.exists() for p in usage_files.values()):
+        # Load memmap files
+        if seq_file.exists() and lbl_file.exists():
             log_fn(f"Loading data with memory mapping from: {mmap_dir}")
             meta_path = mmap_dir / 'metadata.json'
             if not meta_path.exists():
                 raise FileNotFoundError(f"Missing metadata.json in {mmap_dir}")
             with open(meta_path, 'r') as f:
                 meta = json.load(f)
-            sequences = np.memmap(seq_file, dtype=np.float32, mode='r', shape=tuple(meta['sequences_shape']))
-            labels = np.memmap(lbl_file, dtype=np.int64, mode='r', shape=tuple(meta['labels_shape']))
-            usage_arrays = {
-                k: np.memmap(usage_files[k], dtype=np.float32, mode='r', shape=tuple(meta['usage_shape']))
-                for k in ('alpha', 'beta', 'sse')
-            }
+            
+            # Parse dtypes from metadata
+            seq_dtype = np.dtype(meta.get('sequences_dtype', 'float32'))
+            lbl_dtype = np.dtype(meta.get('labels_dtype', 'int8'))
+            usage_dtype = np.dtype(meta.get('usage_dtype', 'float32'))
+            
+            sequences = np.memmap(seq_file, dtype=seq_dtype, mode='r', shape=tuple(meta['sequences_shape']))
+            labels = np.memmap(lbl_file, dtype=lbl_dtype, mode='r', shape=tuple(meta['labels_shape']))
+            
+            # Load available usage arrays
+            if available_usage:
+                log_fn(f"Loading usage arrays: {list(available_usage.keys())}")
+                usage_arrays = {}
+                for key, filepath in available_usage.items():
+                    usage_arrays[key] = np.memmap(
+                        filepath, 
+                        dtype=usage_dtype, 
+                        mode='r', 
+                        shape=tuple(meta['usage_shape'])
+                    )
+                    log_fn(f"  Loaded {key}: {usage_arrays[key].shape}")
+            else:
+                log_fn("No usage array files found or requested. Usage prediction will be disabled.")
+                usage_arrays = None
         else:
             raise FileNotFoundError(f"Memmap files not found in {mmap_dir}.")
 
-    if not use_mmap:
+    else:
+        # Non-memmap loading
         log_fn(f"Loading data from {data_path}...")
         with np.load(data_path) as data:
             sequences = data['sequences']
             labels = data['labels']
-            usage_arrays = {
-                'alpha': data['usage_alpha'],
-                'beta': data['usage_beta'],
-                'sse': data['usage_sse'],
-            }
+            
+            # Load only requested usage arrays
+            usage_types_to_load = config['data'].get('usage_types', ['alpha', 'beta', 'sse'])
+            usage_arrays = {}
+            for key in usage_types_to_load:
+                usage_key = f'usage_{key}'
+                if usage_key in data:
+                    usage_arrays[key] = data[usage_key]
+                    log_fn(f"  Loaded {key} from {usage_key}")
+            
+            if not usage_arrays:
+                usage_arrays = None
     
-    # Try to load usage arrays, but allow missing
-    try:
-        if use_mmap:
-            # ...existing code for mmap...
-            usage_arrays = {
-                k: np.memmap(usage_files[k], dtype=np.float32, mode='r', shape=tuple(meta['usage_shape']))
-                for k in ('alpha', 'beta', 'sse')
-            }
-        else:
-            with np.load(data_path) as data:
-                sequences = data['sequences']
-                labels = data['labels']
-                usage_arrays = {
-                    'alpha': data['usage_alpha'],
-                    'beta': data['usage_beta'],
-                    'sse': data['usage_sse'],
-                }
-    except Exception:
-        usage_arrays = None
-
     # Normalize if usage arrays are present and not all zeros
-    if usage_arrays is None or all(np.all(arr == 0) for arr in usage_arrays.values()):
-        log_fn("No valid usage arrays found, training without usage prediction.")
+    if usage_arrays is None:
+        log_fn("No usage arrays loaded, training without usage prediction.")
+        normalized_usage = None
+        usage_stats = None
+    elif all(np.all(arr == 0) for arr in usage_arrays.values()):
+        log_fn("All usage arrays are zero, training without usage prediction.")
         normalized_usage = None
         usage_stats = None
     else:
         if normalization_method == 'none':
             log_fn("Skipping normalization of usage arrays (method: none)")
             normalized_usage = {k: usage_arrays[k] for k in usage_arrays}
-            usage_stats = {k: None for k in usage_arrays}
+            usage_stats = {key: {'transform': 'identity'} for key in usage_arrays}
+            usage_stats['method'] = 'none'
         else:
             log_fn(f"Normalizing usage arrays (method: {normalization_method})...")
             normalized_usage, usage_stats = normalize_usage_arrays(usage_arrays, method=normalization_method)
@@ -214,8 +238,9 @@ def load_and_normalize_data(config: dict, log_fn=print):
     log_fn(f"  Sequences shape: {sequences.shape}")
     log_fn(f"  Labels shape: {labels.shape}")
     if normalized_usage is not None:
-        log_fn(f"  Usage arrays shapes: " +
-               ", ".join(f"{k}: {v.shape}" for k, v in normalized_usage.items()))
+        log_fn(f"  Usage arrays loaded: {list(normalized_usage.keys())}")
+        for k, v in normalized_usage.items():
+            log_fn(f"    {k}: {v.shape}")
     else:
         log_fn("  No usage arrays present.")
 
@@ -276,12 +301,20 @@ def compute_class_weights(labels, config: dict, log_fn=print):
     return class_weights
 
 
-def create_model(config: dict, n_conditions: int, log_fn=print):
-    """Create model from config."""
+def create_model(config: dict, normalized_usage: Optional[Dict], log_fn=print):
+    """Create model from config and return model with usage info."""
     model_config = config['model']
-    # If n_conditions is None or 0, disable usage prediction
-    if n_conditions is None or n_conditions == 0:
+    
+    # Determine number of usage prediction outputs based on loaded data
+    if normalized_usage is not None and normalized_usage:
+        # Get number of conditions and types from first available array
+        first_key = next(iter(normalized_usage.keys()))
+        n_conditions = normalized_usage[first_key].shape[2]
+        n_usage_types = len(normalized_usage)  # How many of alpha/beta/sse we have
+    else:
         n_conditions = 0
+        n_usage_types = 0
+    
     model_params = {
         'embed_dim': model_config.get('embed_dim', 128),
         'num_resblocks': model_config.get('num_resblocks', 8),
@@ -289,6 +322,7 @@ def create_model(config: dict, n_conditions: int, log_fn=print):
         'alternate': model_config.get('alternate', 2),
         'num_classes': model_config.get('num_classes', 3),
         'n_conditions': n_conditions,
+        'n_usage_types': n_usage_types,  # NEW: pass number of usage types
         'context_len': model_config.get('context_len', 4500),
         'dropout': model_config.get('dropout', 0.5)
     }
@@ -301,8 +335,11 @@ def create_model(config: dict, n_conditions: int, log_fn=print):
     log_fn(f"  dilation_strategy: {model_params['dilation_strategy']}")
     log_fn(f"  num_classes: {model_params['num_classes']}")
     log_fn(f"  n_conditions: {model_params['n_conditions']}")
+    if n_usage_types > 0:
+        log_fn(f"  usage types: {n_usage_types} ({list(normalized_usage.keys())})")
     
-    return model
+    # Return model and n_conditions for trainer setup
+    return model, n_conditions
 
 
 def create_dataloaders(train_dataset, val_dataset, config: dict, device: str):
@@ -332,14 +369,15 @@ def create_dataloaders(train_dataset, val_dataset, config: dict, device: str):
     return train_loader, val_loader
 
 
-def save_training_config(config: dict, checkpoint_dir: Path, usage_stats: dict):
-    """Save complete training configuration."""
+def save_training_config(config: dict, checkpoint_dir: Path, usage_stats: dict, condition_info: Optional[Dict] = None):
+    """Save complete training configuration including condition mapping."""
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
     full_config = {
         'timestamp': timestamp,
         'config': config,
-        'normalization_stats': usage_stats
+        'normalization_stats': usage_stats,
+        'condition_info': condition_info  # NEW: save tissue/timepoint mapping
     }
     
     config_path = checkpoint_dir / 'training_config.json'
@@ -353,12 +391,16 @@ def main():
     parser = argparse.ArgumentParser(description='Train splice site model with config file')
     parser.add_argument('--config', type=str, required=True,
                         help='Path to configuration file (JSON or YAML)')
+    parser.add_argument('--data', type=str, default=None,
+                        help='Override data path from config')
     parser.add_argument('--checkpoint-dir', type=str, default=None,
                         help='Override checkpoint directory from config')
     parser.add_argument('--device', type=str, default=None,
                         help='Override device from config')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from checkpoint (path to .pt file, or "auto" to find latest)')
+    parser.add_argument("--quiet", action='store_true', 
+                        help="Suppress console output (log to file only)")
     
     args = parser.parse_args()
     
@@ -366,7 +408,6 @@ def main():
     script_start_time = time.time()
     
     # Load configuration
-    print(f"Loading configuration from {args.config}...")
     config = load_config(args.config)
     
     # Override with command line args
@@ -374,6 +415,8 @@ def main():
         config['output']['checkpoint_dir'] = args.checkpoint_dir
     if args.device:
         config['device'] = args.device
+    if args.data:
+        config['data']['path'] = args.data
     
     # Setup output directory
     checkpoint_dir = Path(config['output']['checkpoint_dir'])
@@ -382,12 +425,27 @@ def main():
     # Setup logging
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = checkpoint_dir / f'training_log_{timestamp}.txt'
-    
-    def log_print(msg):
-        """Print and write to log file."""
-        print(msg)
-        with open(log_file, 'a') as f:
-            f.write(msg + '\n')
+
+    # Redirect stdout and stderr to log file if quiet mode
+    if args.quiet:
+        # Open log file with line buffering
+        log_file_handle = open(log_file, 'a', buffering=1)
+        # Save original stdout/stderr
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        # Redirect
+        sys.stdout = log_file_handle
+        sys.stderr = log_file_handle
+        
+        def log_print(msg):
+            """Only write to file (stdout already redirected)."""
+            print(msg, flush=True)
+    else:
+        def log_print(msg):
+            """Print and write to log file."""
+            print(msg)
+            with open(log_file, 'a') as f:
+                f.write(msg + '\n')
     
     def format_time(seconds):
         """Format seconds as hours, minutes, seconds."""
@@ -411,10 +469,29 @@ def main():
     )
     data_time = time.time() - data_start
     
-    # Save normalization stats
-    stats_path = checkpoint_dir / 'normalization_stats.json'
-    save_normalization_stats(usage_stats, stats_path)
-    log_print(f"Saved normalization stats to: {stats_path}")
+    # Get condition information from data if available
+    condition_info = None
+    if 'usage_info' in config['data']:
+        # If user provided condition info in config
+        condition_info = config['data']['usage_info']
+    else:
+        # Try to load from usage_info file created during data processing
+        data_dir = Path(config['data']['path']).parent
+        usage_info_file = data_dir / 'usage_info_train.json'
+        if usage_info_file.exists():
+            log_print(f"Loading condition info from {usage_info_file}")
+            with open(usage_info_file, 'r') as f:
+                usage_info = json.load(f)
+                condition_info = usage_info.get('conditions', None)
+                log_print(f"Loaded {len(condition_info)} conditions")
+        else:
+            log_print("Warning: No condition info found. Predictions won't have tissue/timepoint labels.")
+    
+    # Save normalization stats if alpha and beta were normalized
+    if usage_stats:
+        stats_path = checkpoint_dir / 'normalization_stats.json'
+        save_normalization_stats(usage_stats, stats_path)
+        log_print(f"Saved normalization stats to: {stats_path}")
     
     # Create datasets
     dataset_start = time.time()
@@ -427,13 +504,9 @@ def main():
     train_labels = labels[:len(train_dataset)]
     class_weights = compute_class_weights(train_labels, config, log_print)
     
-    # Create model
+    # Create model (pass normalized_usage to determine n_conditions)
     model_start = time.time()
-    if normalized_usage is not None:
-        n_conditions = normalized_usage['alpha'].shape[2]
-    else:
-        n_conditions = 0
-    model = create_model(config, n_conditions, log_print)
+    model, n_conditions = create_model(config, normalized_usage, log_print)
     model_time = time.time() - model_start
     
     # Create dataloaders
@@ -446,7 +519,7 @@ def main():
     log_print(f"Batches per epoch: {len(train_loader)}")
     
     # Save full configuration
-    config_path = save_training_config(config, checkpoint_dir, usage_stats)
+    config_path = save_training_config(config, checkpoint_dir, usage_stats, condition_info)
     log_print(f"Saved training configuration to: {config_path}")
     
     # Create trainer
@@ -484,18 +557,28 @@ def main():
     train_time = time.time() - train_start
     
     total_time = time.time() - script_start_time
-    
-    log_print("="*60)
-    log_print(f"\nTraining completed!")
-    log_print(f"Best validation loss: {trainer.best_val_loss:.4f}")
-    log_print(f"Checkpoints saved to: {checkpoint_dir}")
+
+    log_print("=" * 60)
     log_print(f"\nTiming Summary:")
+    log_print("=" * 60)
     log_print(f"  Data loading:     {format_time(data_time):>12} ({100*data_time/total_time:5.1f}%)")
     log_print(f"  Dataset creation: {format_time(dataset_time):>12} ({100*dataset_time/total_time:5.1f}%)")
     log_print(f"  Model init:       {format_time(model_time):>12} ({100*model_time/total_time:5.1f}%)")
     log_print(f"  Training:         {format_time(train_time):>12} ({100*train_time/total_time:5.1f}%)")
-    log_print(f"  TOTAL TIME:       {format_time(total_time):>12}")
+    log_print("-" * 60)
+    log_print(f"  Total time:       {format_time(total_time):>12}")
     log_print(f"\nTraining ended at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_print("=" * 60)
+    log_print(f"\nTraining completed!")
+    log_print(f"Best validation loss: {trainer.best_val_loss:.4f}")
+    log_print(f"Checkpoints saved to: {checkpoint_dir}")
+    
+    # Restore stdout/stderr if quiet mode
+    if args.quiet:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        log_file_handle.close()
+        print(f"Training complete. Log saved to: {log_file}")
 
 
 if __name__ == '__main__':

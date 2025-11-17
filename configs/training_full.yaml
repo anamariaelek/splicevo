@@ -4,14 +4,20 @@
 device: cuda # "cuda" or "cpu"
 cpu_threads: 8
 cudnn_benchmark: true
-gpu_memory_fraction: 0.5
+gpu_memory_fraction: 0.6
 
 # Data configuration
 data:
-  path: /home/elek/projects/splicing/results/data_processing/processed_data_train.npz
+  path: /home/elek/projects/splicing/results/data_processing_brain/memmap_train
   use_mmap: true
   train_split: 0.8
   normalization_method: per_sample_cpm   # 'per_sample_cpm' or 'global'
+  usage_types: ['sse']  # any of 'sse', 'alpha', 'beta''
+
+# Output configuration
+output:
+  checkpoint_dir: /home/elek/projects/splicing/results/models/brain_sse
+  use_tensorboard: true
 
 # Model architecture
 model:
@@ -20,7 +26,7 @@ model:
   dilation_strategy: alternating
   alternate: 4 
   num_classes: 3
-  context_len: 450
+  context_len: 450  # this must match context_size in data creation (verify in metadata.json)
   dropout: 0.4
 
 # Training configuration
@@ -37,7 +43,7 @@ training:
   use_class_weights: true
   
   # Training loop
-  n_epochs: 100
+  n_epochs: 50
   early_stopping_patience: 5
   
   # Memory optimization
@@ -49,8 +55,3 @@ training:
     batch_size: 64
     num_workers: 32
     prefetch_factor: 4
-
-# Output configuration
-output:
-  checkpoint_dir: /home/elek/projects/splicing/results/models/brain
-  use_tensorboard: true

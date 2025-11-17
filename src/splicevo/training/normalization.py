@@ -2,9 +2,38 @@
 
 import numpy as np
 import torch
-from typing import Dict, Union, Tuple
+from typing import Dict, Union, Tuple, Optional
 import json
 from pathlib import Path
+
+
+def normalize_single_array(
+    arr: np.ndarray,
+    method: str = 'per_sample_cpm',
+    array_name: str = 'array'
+) -> Tuple[np.ndarray, Dict]:
+    """
+    Normalize a single usage array.
+    
+    Args:
+        arr: Array of shape (n_samples, seq_len, n_conditions)
+        method: Normalization method ('per_sample_cpm' or 'global')
+        array_name: Name for logging
+    
+    Returns:
+        normalized: Normalized array (same shape)
+        stats: Normalization statistics
+    """
+    print(f"  Normalizing {array_name} array...")
+    
+    if method == 'per_sample_cpm':
+        normalized, stats = _normalize_per_sample_cpm(arr)
+    elif method == 'global':
+        normalized, stats = _normalize_global(arr)
+    else:
+        raise ValueError(f"Unknown normalization method: {method}")
+    
+    return normalized, stats
 
 
 def normalize_usage_arrays(
@@ -12,15 +41,13 @@ def normalize_usage_arrays(
     method: str = 'per_sample_cpm'
 ) -> Tuple[Dict[str, np.ndarray], Dict]:
     """
-    Normalize usage arrays to remove library size effects and stabilize variance.
+    Normalize usage arrays.
     
-    This is the standard preprocessing step for training. It:
-    1. Normalizes per-sample (like CPM) to remove library size effects
-    2. Applies log1p transform to stabilize variance
-    3. Standardizes globally using ALL data statistics
+    Only normalizes 'alpha' and 'beta' (read counts).
+    Leaves 'sse' unchanged (already in [0,1] range).
     
     Args:
-        usage_arrays: Dict with 'alpha', 'beta', 'sse' arrays
+        usage_arrays: Dict with any of 'alpha', 'beta', 'sse' arrays
                      Shape: (n_samples, seq_len, n_conditions)
         method: Normalization method ('per_sample_cpm' or 'global')
     
@@ -28,48 +55,30 @@ def normalize_usage_arrays(
         normalized_arrays: Dict with normalized arrays (same keys/shapes)
         stats: Dict with normalization statistics (for denormalization)
     """
-    alpha = usage_arrays['alpha']
-    beta = usage_arrays['beta']
-    sse = usage_arrays['sse']
+    normalized_arrays = {}
+    stats = {'method': method}
     
-    if method == 'per_sample_cpm':
-        # Per-sample normalization (removes library size effects)
-        normalized_alpha, alpha_stats = _normalize_per_sample_cpm(alpha)
-        normalized_beta, beta_stats = _normalize_per_sample_cpm(beta)
-        
-        normalized_arrays = {
-            'alpha': normalized_alpha,
-            'beta': normalized_beta,
-            'sse': sse.astype(np.float32)  # Keep as-is (already in [0,1])
-        }
-        
-        stats = {
-            'alpha': alpha_stats,
-            'beta': beta_stats,
-            'sse': {'transform': 'identity'},
-            'method': method
-        }
-        
-    elif method == 'global':
-        # Simple global normalization (preserves sample differences)
-        normalized_alpha, alpha_stats = _normalize_global(alpha)
-        normalized_beta, beta_stats = _normalize_global(beta)
-        
-        normalized_arrays = {
-            'alpha': normalized_alpha,
-            'beta': normalized_beta,
-            'sse': sse.astype(np.float32)
-        }
-        
-        stats = {
-            'alpha': alpha_stats,
-            'beta': beta_stats,
-            'sse': {'transform': 'identity'},
-            'method': method
-        }
+    # Normalize alpha if present
+    if 'alpha' in usage_arrays:
+        normalized_arrays['alpha'], stats['alpha'] = normalize_single_array(
+            usage_arrays['alpha'], 
+            method=method,
+            array_name='alpha'
+        )
     
-    else:
-        raise ValueError(f"Unknown normalization method: {method}")
+    # Normalize beta if present
+    if 'beta' in usage_arrays:
+        normalized_arrays['beta'], stats['beta'] = normalize_single_array(
+            usage_arrays['beta'],
+            method=method,
+            array_name='beta'
+        )
+    
+    # Keep SSE as-is (no normalization needed)
+    if 'sse' in usage_arrays:
+        print(f"  Keeping SSE array unchanged (already in [0,1] range)")
+        normalized_arrays['sse'] = usage_arrays['sse'].astype(np.float32)
+        stats['sse'] = {'transform': 'identity'}
     
     return normalized_arrays, stats
 
@@ -187,8 +196,12 @@ def denormalize_usage(
         sample_idx: Sample index (required for per_sample_cpm method)
     
     Returns:
-        Denormalized values (original read counts)
+        Denormalized values (original read counts or SSE values)
     """
+    # Handle case where key doesn't exist in stats (wasn't normalized)
+    if key not in stats:
+        return normalized_values
+    
     transform = stats[key]['transform']
     
     if transform == 'identity':

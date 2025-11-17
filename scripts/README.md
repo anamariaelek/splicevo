@@ -6,39 +6,60 @@ export SPLICEVO_DIR=/home/elek/projects/splicevo
 
 # Where to save the results
 export OUT_DIR=/home/elek/projects/splicing/results/
-export CHECKPOINT_DIR="brain"
 ```
 
-Modify the script:  
+## 1. Process data
+
+Modify the script to specify  
 - paths to reference genome and annotation files  
 - train and test chromosomes  
 - paths to splice site usage files.  
 
-Prepare the data:
+This will load and process the data: 1) genomes and transcript annotations for selected species, with train/test chromosome split, and 2) all SpliSER usage values for tissues and timepoints, as inidicated in the config file.
+
 ```bash
 python ${SPLICEVO_DIR}/scripts/process_data.py \
     --group test \
-    --output_dir ${OUT_DIR}/data_processing \
+    --output_dir ${OUT_DIR}/data_processing_brain \
     --n_cpus 8 \
-    > ${SPLICEVO_DIR}/logs/splicevo_process_data_test.log 2>&1 &
+    --quiet &
 
 python ${SPLICEVO_DIR}/scripts/process_data.py \
     --group train \
-    --output_dir ${OUT_DIR}/data_processing \
+    --output_dir ${OUT_DIR}/data_processing_brain \
     --n_cpus 16 \
-    > ${SPLICEVO_DIR}/logs/splicevo_process_data_train.log 2>&1 &
+    --quiet &
 ```
 
-Modify the config file:
-- path to processed training  
-- output directory to save the model to.  
+The results will include the following files saved in the specified output directory:
 
-Train the model:
+```
+memmap_test
+memmap_train
+metadata_test.csv.gz
+metadata_train.csv.gz
+usage_info_test.json
+usage_info_train.json
+usage_summary_test.csv
+usage_summary_train.csv
+```
+
+## 2. Train Model
+
+Modify the config file to specify parameters of the model to train. Then train the model:
 
 ```bash
+# The data to train on
+DATA_DIR="${OUT_DIR}/data_processing_brain/memmap_train"
+
+# Where to save the model
+CHECKPOINT_DIR="${OUT_DIR}/models/brain_sse_"
+
 python ${SPLICEVO_DIR}/scripts/splicevo_train.py \
     --config ${SPLICEVO_DIR}/configs/training_full.yaml \
-    --checkpoint-dir ${OUT_DIR}/models/${CHECKPOINT_DIR}
+    --data ${DATA_DIR} \
+    --checkpoint-dir ${CHECKPOINT_DIR} \
+    --quiet &
 ```
 
 Resume training from latest checkpoint automatically:
@@ -54,21 +75,37 @@ Resume training from specific checkpoint:
 ```bash
 python ${SPLICEVO_DIR}/scripts/splicevo_train.py \ 
     --config ${SPLICEVO_DIR}/configs/training_default.yaml \ 
-    --resume ${OUT_DIR}/models/${CHECKPOINT_DIR}/checkpoint_epoch_20.pt
+    --resume ${CHECKPOINT_DIR}/checkpoint_epoch_20.pt
 ```
 
 Tensorboard visualization:
 
 ```bash
-tensorboard --logdir ${OUT_DIR}/models/${CHECKPOINT_DIR}/tensorboard/
+tensorboard --logdir ${CHECKPOINT_DIR}/tensorboard/
 ```
+
+## 3. Predict
 
 Predict using a trained model:
 
 ```bash
+# The data to predict for
+DATA_DIR="${OUT_DIR}/data_processing_brain/memmap_test"
+
+# Where the model checkpoint is located
+CHECKPOINT_DIR="${OUT_DIR}/models/brain_sse_"
+
+# Where to save the predictions
+PREDICTIONS_DIR="${OUT_DIR}/predictions_brain_sse_"
+
+# Predict from memmap directory and save as memmap
 python ${SPLICEVO_DIR}/scripts/splicevo_predict.py \
-    --checkpoint ${OUT_DIR}/models/${CHECKPOINT_DIR}/best_model.pt \
-    --test-data ${OUT_DIR}/data_processing/processed_data_test.npz \
-    --normalization-stats ${OUT_DIR}/models/${CHECKPOINT_DIR}/normalization_stats.json \
-    --output ${OUT_DIR}/predictions/test_predictions.npz
+    --checkpoint ${CHECKPOINT_DIR}/best_model.pt \
+    --normalization-stats ${CHECKPOINT_DIR}/normalization_stats.json \
+    --test-data ${DATA_DIR} \
+    --output ${PREDICTIONS_DIR} \
+    --use-memmap \
+    --save-memmap \
+    --batch-size 64 \
+    --quiet &
 ```

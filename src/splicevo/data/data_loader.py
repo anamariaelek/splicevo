@@ -283,11 +283,9 @@ class MultiGenomeDataLoader:
     def get_summary(self) -> pd.DataFrame:
         """Get summary statistics of loaded data."""
         df = self.get_dataframe()
-        summary = df.groupby(['genome_id', 'site_type']).agg({
-            'chromosome': 'nunique',
-            'strand': 'count'
-        })
-        
+        summary = df[['genome_id', 'chromosome', 'site_type', 'position']].drop_duplicates().groupby(
+            ['genome_id', 'chromosome', 'site_type']
+        ).agg({'position': 'count'}).reset_index().rename(columns={'position': 'n_sites'})
         return summary
 
     def add_usage_file(self, 
@@ -456,7 +454,7 @@ class MultiGenomeDataLoader:
 
         info = {
             'n_samples': usage_arrays['alpha'].shape[0],
-            'n_conditions': usage_arrays['alpha'].shape[1],
+            'n_conditions': usage_arrays['alpha'].shape[2],
             'conditions': self.usage_conditions,
             'condition_coverage': {}
         }

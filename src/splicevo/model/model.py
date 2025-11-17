@@ -63,6 +63,7 @@ class EncoderModule(nn.Module):
                  alternate: Optional[int] = 4,
                  num_classes: int = 3,
                  n_conditions: int = 5,
+                 n_usage_types: int = 3,
                  add_output_heads: bool = True,
                  context_len: int = 4500,
                  dropout: float = 0.0):
@@ -75,6 +76,7 @@ class EncoderModule(nn.Module):
             dilation_strategy: Strategy for dilation rates
             num_classes: Number of splice site classes (3: none, donor, acceptor)
             n_conditions: Number of tissue/timepoint conditions for usage prediction
+            n_usage_types: Number of usage prediction outputs (1-3 for sse, alpha+beta, or all)
             add_output_heads: Whether to add classification and usage prediction heads
             context_len: Number of positions on each end to treat as context (removed from output)
             dropout: Dropout rate (default: 0.0)
@@ -82,6 +84,7 @@ class EncoderModule(nn.Module):
         super().__init__()
         
         self.n_conditions = n_conditions
+        self.n_usage_types = n_usage_types
         self.add_output_heads = add_output_heads
         self.context_len = context_len
         
@@ -150,8 +153,8 @@ class EncoderModule(nn.Module):
             # Splice site classification head
             self.splice_classifier = nn.Conv1d(embed_dim, num_classes, kernel_size=1)
             
-            # Usage prediction head
-            self.usage_predictor = nn.Conv1d(embed_dim, n_conditions * 3, kernel_size=1)
+            # Usage prediction head - output only requested types
+            self.usage_predictor = nn.Conv1d(embed_dim, n_conditions * n_usage_types, kernel_size=1)
 
     def _get_kernel_sizes(self, num_blocks: int):
         """
@@ -300,15 +303,15 @@ class EncoderModule(nn.Module):
         splice_logits = self.splice_classifier(central_skip_conv)  # (batch, num_classes, central_len)
         
         # Output 2: Predict usage statistics
-        usage_flat = self.usage_predictor(central_skip_conv)  # (batch, n_conditions*3, central_len)
+        usage_flat = self.usage_predictor(central_skip_conv)  # (batch, n_conditions*n_usage_types, central_len)
         
-        # Transpose back: (batch, central_len, num_classes/n_conditions*3)
+        # Transpose back: (batch, central_len, num_classes/n_conditions*n_usage_types)
         splice_logits = splice_logits.transpose(1, 2)
         usage_flat = usage_flat.transpose(1, 2)
         
-        # Reshape usage predictions: (batch, central_len, n_conditions, 3)
+        # Reshape usage predictions: (batch, central_len, n_conditions, n_usage_types)
         batch_size, central_len, _ = usage_flat.shape
-        usage_predictions = usage_flat.view(batch_size, central_len, self.n_conditions, 3)
+        usage_predictions = usage_flat.view(batch_size, central_len, self.n_conditions, self.n_usage_types)
         
         output = {
             'splice_logits': splice_logits,
@@ -324,7 +327,7 @@ class EncoderModule(nn.Module):
 
 
 class SplicevoModel(nn.Module):
-    """Simplified model with encoder and dual decoders for splice site and usage prediction."""
+    """Simple model with encoder and dual decoders for splice site and usage prediction."""
     
     def __init__(self, 
                  embed_dim: int = 256, 
@@ -333,21 +336,14 @@ class SplicevoModel(nn.Module):
                  alternate: Optional[int] = 4,
                  num_classes: int = 3,
                  n_conditions: int = 5,
+                 n_usage_types: int = 3,
                  context_len: int = 4500,
                  dropout: float = 0.3):
         """
         Initialize model with encoder and dual decoders.
         
         Args:
-            embed_dim: Embedding dimension (channels)
-            num_resblocks: Number of residual blocks in encoder
-            dilation_strategy: Dilation strategy for residual blocks
-            num_classes: Number of splice site classes (3: none, donor, acceptor)
-            n_conditions: Number of tissue/timepoint conditions for usage prediction
-            context_len: Number of positions on each end to treat as context
-                        For input of length L, predictions are made for positions
-                        [context_len : L - context_len]
-            dropout: Dropout rate (default: 0.3)
+            n_usage_types: Number of usage prediction outputs (default: 3 for alpha, beta, sse)
         """
         super().__init__()
         
@@ -361,6 +357,7 @@ class SplicevoModel(nn.Module):
             alternate=alternate,
             num_classes=num_classes,
             n_conditions=n_conditions,
+            n_usage_types=n_usage_types,
             add_output_heads=True,
             context_len=context_len,
             dropout=dropout
@@ -392,17 +389,12 @@ class SplicevoModel(nn.Module):
         Args:
             sequences: One-hot encoded DNA sequences of shape (batch_size, seq_len, 4)
                       or (seq_len, 4) for single sequence
-                      Can be numpy array or torch tensor (will be kept on CPU initially)
+                      Can be numpy array, memmap, or torch tensor
                       Format: [context_len | central_region | context_len]
             batch_size: Batch size for processing (default: 32)
             
         Returns:
-            Dictionary with numpy arrays for central region:
-                - 'splice_predictions': Predicted classes (batch_size, central_len)
-                - 'splice_probs': Class probabilities (batch_size, central_len, num_classes)
-                - 'splice_logits': Raw logits (batch_size, central_len, num_classes)
-                - 'usage_predictions': Usage statistics (batch_size, central_len, n_conditions, 3)
-                  where last dimension is [alpha, beta, sse]
+            Dictionary with numpy arrays for central region
         """
         import numpy as np
         
@@ -410,15 +402,34 @@ class SplicevoModel(nn.Module):
         
         # Convert to tensor if needed, but keep on CPU
         if isinstance(sequences, np.ndarray):
-            sequences = torch.from_numpy(sequences).float()
+            # Check if it's a memmap (read-only)
+            if isinstance(sequences, np.memmap) or not sequences.flags.writeable:
+                # Don't use torch.from_numpy for memmap - it will warn
+                # Instead, we'll handle conversion per-batch
+                sequences_is_memmap = True
+                sequences_array = sequences  # Keep as memmap for now
+            else:
+                # Regular array - convert to tensor
+                sequences_is_memmap = False
+                sequences = torch.from_numpy(sequences).float()
+        else:
+            sequences_is_memmap = False
         
         # Handle single sequence input
         single_input = False
-        if sequences.ndim == 2:
+        if not sequences_is_memmap and sequences.ndim == 2:
             sequences = sequences.unsqueeze(0)
             single_input = True
+        elif sequences_is_memmap and sequences.ndim == 2:
+            sequences_array = sequences[np.newaxis, ...]  # Add batch dim
+            single_input = True
         
-        num_sequences = sequences.shape[0]
+        # Get number of sequences
+        if sequences_is_memmap:
+            num_sequences = sequences_array.shape[0]
+        else:
+            num_sequences = sequences.shape[0]
+        
         device = next(self.parameters()).device
         
         # Initialize lists to collect results (as numpy arrays)
@@ -430,11 +441,19 @@ class SplicevoModel(nn.Module):
         with torch.no_grad():
             # Process in batches - only transfer one batch at a time to GPU
             for i in range(0, num_sequences, batch_size):
-                # Get batch (still on CPU)
+                # Get batch
                 batch_end = min(i + batch_size, num_sequences)
-                batch_sequences = sequences[i:batch_end]
                 
-                # Transfer only this batch to device
+                if sequences_is_memmap:
+                    # Get batch from memmap and make a copy (writable)
+                    batch_sequences = np.array(sequences_array[i:batch_end], dtype=np.float32)
+                    # Now convert to tensor
+                    batch_sequences = torch.from_numpy(batch_sequences)
+                else:
+                    # Already a tensor on CPU
+                    batch_sequences = sequences[i:batch_end]
+                
+                # Transfer to device
                 batch_sequences = batch_sequences.to(device)
                 
                 # Forward pass
