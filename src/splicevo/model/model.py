@@ -313,6 +313,12 @@ class EncoderModule(nn.Module):
         batch_size, central_len, _ = usage_flat.shape
         usage_predictions = usage_flat.view(batch_size, central_len, self.n_conditions, self.n_usage_types)
         
+        # Apply sigmoid activation to SSE (first channel if n_usage_types >= 1)
+        # SSE should be in [0, 1] range
+        if self.n_usage_types >= 1:
+            usage_predictions = usage_predictions.clone()  # Make a copy to modify
+            usage_predictions[..., 0] = torch.sigmoid(usage_predictions[..., 0])
+        
         output = {
             'splice_logits': splice_logits,
             'usage_predictions': usage_predictions

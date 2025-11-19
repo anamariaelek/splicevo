@@ -85,7 +85,7 @@ def inspect_batch(batch, batch_idx):
     print(f"\nUsage arrays:")
     print(f"  usage type: {usage.type()}")
     print(f"  usage shape: {usage.shape}")
-    for i, key in enumerate(['alpha', 'beta', 'sse']):
+    for i, key in enumerate(['sse', 'alpha', 'beta']): 
         arr = usage[..., i]
         arr_no_nan = arr[~torch.isnan(arr)]
         print(f"  {key}: {arr.shape}")
@@ -148,7 +148,7 @@ def manual_training_step(model, batch, optimizer, criterion_splice, criterion_us
     usage_losses = {}
     if splice_mask.sum() > 0:
         mask_flat = splice_mask.reshape(-1)  # [batch*positions]
-        for i, key in enumerate(['alpha', 'beta', 'sse']):
+        for i, key in enumerate(['sse', 'alpha', 'beta']):  # SSE first
             usage_targets = usage[..., i]    # [batch, positions, n_conditions]
             usage_preds_i = usage_preds[..., i]  # [batch, positions, n_conditions]
 

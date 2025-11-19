@@ -480,7 +480,7 @@ def main():
             usage_sse = usage_preds[..., 0]
             usage_keys.append('sse')
             output_predictions['usage_sse'] = usage_sse
-            log_print(f"  SSE shape: {usage_sse.shape}")
+            log_print(f"  SSE shape: {usage_sse.shape} (sigmoid, range [0,1])")
         if n_usage_types >= 2:
             usage_alpha = usage_preds[..., 1]
             usage_keys.append('alpha')
