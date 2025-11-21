@@ -4,79 +4,63 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Optional, Union
 
 
 class SpliceDataset(Dataset):
-    """
-    Dataset for splice site prediction with memory-mapped support.
-    
-    Supports both in-memory and memory-mapped arrays for efficient
-    handling of large datasets.
-    """
+    """Dataset for splice site prediction with usage statistics."""
     
     def __init__(
         self,
         sequences: Union[np.ndarray, np.memmap],
         splice_labels: Union[np.ndarray, np.memmap],
-        usage_targets: Union[Dict[str, np.ndarray], Dict[str, np.memmap]],
-        use_memmap: bool = False
+        usage_sse: Optional[Union[np.ndarray, np.memmap]] = None
     ):
         """
         Initialize dataset.
         
         Args:
-            sequences: DNA sequences (B, L, 4) or path to memmap
-            splice_labels: Splice site labels (B, L)
-            usage_targets: Dict of usage values {'alpha': (B, L, C), 'beta': ..., 'sse': ...}
-            use_memmap: Whether arrays are memory-mapped
+            sequences: One-hot encoded sequences (n_samples, seq_len, 4)
+            splice_labels: Splice site labels (n_samples, seq_len)
+            usage_sse: SSE values (n_samples, seq_len, n_conditions) or None
         """
         self.sequences = sequences
         self.splice_labels = splice_labels
-        self.usage_targets = usage_targets
-        self.use_memmap = use_memmap
+        self.usage_sse = usage_sse
         
-    def __len__(self) -> int:
+        # Validate shapes
+        assert len(self.sequences) == len(self.splice_labels), \
+            "Sequences and labels must have same length"
+        
+        if self.usage_sse is not None:
+            assert len(self.sequences) == len(self.usage_sse), \
+                "Sequences and usage must have same length"
+    
+    def __len__(self):
         return len(self.sequences)
     
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """Get a single sample."""
-        # For memmap, convert to regular array for this sample
-        seq = np.array(self.sequences[idx], copy=True) if self.use_memmap else self.sequences[idx].copy()
-        labels = np.array(self.splice_labels[idx], copy=True) if self.use_memmap else self.splice_labels[idx].copy()
+    def __getitem__(self, idx):
+        """Get a single example."""
+        # Get sequences and labels (make copies to avoid memmap issues)
+        sequences = np.array(self.sequences[idx], dtype=np.float32)
+        splice_labels = np.array(self.splice_labels[idx], dtype=np.int64)
         
-        # Handle dictionary of usage arrays
-        if isinstance(self.usage_targets, dict) and self.usage_targets:
-            # Determine which keys are available
-            available_keys = [k for k in ['alpha', 'beta', 'sse'] if k in self.usage_targets]
-            
-            if available_keys:
-                # Stack available arrays along the last dimension
-                usage_list = []
-                for key in available_keys:
-                    usage_arr = self.usage_targets[key][idx]
-                    if self.use_memmap:
-                        usage_arr = np.array(usage_arr, copy=True)
-                    else:
-                        usage_arr = usage_arr.copy()
-                    usage_list.append(usage_arr)
-                
-                # Stack to get (L, C, n_types) where n_types = len(available_keys)
-                usage = np.stack(usage_list, axis=-1)
-            else:
-                # No usage arrays available
-                usage = np.zeros((labels.shape[0], 1, 0), dtype=np.float32)
-        elif self.usage_targets is None:
-            # No usage targets at all
-            usage = np.zeros((labels.shape[0], 1, 0), dtype=np.float32)
+        # Convert to tensors
+        sequences = torch.from_numpy(sequences)
+        splice_labels = torch.from_numpy(splice_labels)
+        
+        # Get usage targets if available
+        if self.usage_sse is not None:
+            usage_targets = np.array(self.usage_sse[idx], dtype=np.float32)
+            usage_targets = torch.from_numpy(usage_targets)
         else:
-            # Legacy single array support
-            usage = np.array(self.usage_targets[idx], copy=True) if self.use_memmap else self.usage_targets[idx].copy()
+            # Create dummy tensor if no usage data
+            usage_targets = torch.zeros((sequences.shape[0], 1), dtype=torch.float32)
         
         return {
-            'sequences': torch.from_numpy(seq).float(),
-            'splice_labels': torch.from_numpy(labels).long(),
-            'usage_targets': torch.from_numpy(usage).float()
+            'sequences': sequences,
+            'splice_labels': splice_labels,
+            'usage_targets': usage_targets
         }
     
     @classmethod
@@ -84,10 +68,10 @@ class SpliceDataset(Dataset):
         cls,
         sequences_path: Union[str, Path],
         splice_labels_path: Union[str, Path],
-        usage_targets_paths: Dict[str, Union[str, Path]],
+        usage_sse_path: Union[str, Path],
         sequences_shape: tuple,
         splice_labels_shape: tuple,
-        usage_targets_shape: tuple,
+        usage_sse_shape: tuple,
         dtype: np.dtype = np.float32
     ):
         """
@@ -96,10 +80,10 @@ class SpliceDataset(Dataset):
         Args:
             sequences_path: Path to sequences memmap file
             splice_labels_path: Path to splice labels memmap file
-            usage_targets_paths: Dict of paths to usage memmap files {'alpha': path, 'beta': path, 'sse': path}
+            usage_sse_path: Path to SSE memmap file
             sequences_shape: Shape of sequences array
             splice_labels_shape: Shape of splice labels array
-            usage_targets_shape: Shape of usage targets array
+            usage_sse_shape: Shape of usage SSE array
             dtype: Data type for arrays
             
         Returns:
@@ -107,9 +91,6 @@ class SpliceDataset(Dataset):
         """
         sequences = np.memmap(sequences_path, dtype=dtype, mode='r', shape=sequences_shape)
         splice_labels = np.memmap(splice_labels_path, dtype=np.int64, mode='r', shape=splice_labels_shape)
+        usage_sse = np.memmap(usage_sse_path, dtype=dtype, mode='r', shape=usage_sse_shape)
         
-        usage_targets = {}
-        for key, path in usage_targets_paths.items():
-            usage_targets[key] = np.memmap(path, dtype=dtype, mode='r', shape=usage_targets_shape)
-        
-        return cls(sequences, splice_labels, usage_targets, use_memmap=True)
+        return cls(sequences, splice_labels, usage_sse, use_memmap=True)

@@ -245,34 +245,51 @@ Description: splice_logits
 Memory: ~192 KB (16 * 1000 * 3 * 4 bytes)
 ```
 
-### Usage Prediction Head
+### Usage Prediction Head (Regression)
 
-**usage_predictor (1x1 conv: 128 → 15)**
+**usage_predictor (1x1 conv: 128 → 5)**
 ```
-Shape: (16, 15, 1000)
-Description: 5 conditions × 3 parameters = 15 outputs
-Outputs per position:
-  - Condition 0: [alpha, beta, sse]
-  - Condition 1: [alpha, beta, sse]
-  - Condition 2: [alpha, beta, sse]
-  - Condition 3: [alpha, beta, sse]
-  - Condition 4: [alpha, beta, sse]
+Shape: (16, 5, 1000)
+Description: SSE for 5 conditions
+Outputs per position: [cond0_sse, cond1_sse, cond2_sse, cond3_sse, cond4_sse]
 ```
 
 **After transpose**
 ```
-Shape: (16, 1000, 15)
-Description: Flattened usage predictions
+Shape: (16, 1000, 5)
+Description: SSE predictions
 ```
 
-**After reshape**
+**After sigmoid**
 ```
-Shape: (16, 1000, 5, 3)
-Description: usage_predictions
+Shape: (16, 1000, 5)
+Description: usage_predictions (SSE in [0,1] range)
 - Dim 0: batch (16 sequences)
 - Dim 1: position (1000 central positions)
 - Dim 2: condition (5 tissues/timepoints)
-- Dim 3: parameter [alpha, beta, sse] for Beta distribution
+Memory: ~320 KB (16 * 1000 * 5 * 4 bytes)
+```
+
+### Usage Classification Head (for Hybrid Loss)
+
+**usage_classifier (1x1 conv: 128 → 15)** [only if usage_loss_type='hybrid']
+```
+Shape: (16, 15, 1000)
+Description: 5 conditions × 3 classes = 15 outputs
+For each condition, predict 3 classes for SSE:
+  - is_zero (target < 0.05)
+  - is_one (target > 0.95)
+  - is_middle (0.05 <= target <= 0.95)
+```
+
+**After transpose and reshape**
+```
+Shape: (16, 1000, 5, 3)
+Description: usage_class_logits
+- Dim 0: batch (16 sequences)
+- Dim 1: position (1000 central positions)
+- Dim 2: condition (5 tissues/timepoints)
+- Dim 3: class [is_zero, is_one, is_middle]
 Memory: ~960 KB (16 * 1000 * 5 * 3 * 4 bytes)
 ```
 
@@ -281,70 +298,26 @@ Memory: ~960 KB (16 * 1000 * 5 * 3 * 4 bytes)
 ## 8. Final Output Dictionary
 
 ```python
+# Without hybrid loss:
 output = {
     'splice_logits': (16, 1000, 3),        # Classification logits
-    'usage_predictions': (16, 1000, 5, 3), # Beta distribution parameters
+    'usage_predictions': (16, 1000, 5),    # Regression: SSE in [0,1]
     # Optional (if return_features=True):
     'encoder_features': (16, 1900, 128),   # Full sequence features
     'central_features': (16, 1000, 128),   # Central region features
     'skip_features': (16, 1900, 128)       # Fused multi-scale skip (full)
 }
-```
 
----
-
-## 9. Prediction Mode Output
-
-### After softmax on splice_logits
-```
-splice_probabilities: (16, 1000, 3)
-Description: Probability distribution over classes
-Values: Each position sums to 1.0
-Example for position i:
-  [0.95, 0.03, 0.02] → 95% none, 3% donor, 2% acceptor
-```
-
-### After argmax
-```
-splice_predictions: (16, 1000)
-Description: Predicted class indices (0=none, 1=donor, 2=acceptor)
-Values: Integers in {0, 1, 2}
-Example: [0, 0, 0, 1, 0, 0, 2, 0, ...]
-```
-
-### Final prediction dictionary
-```python
-predictions = {
-    'splice_predictions': (16, 1000),      # Class indices
-    'splice_probabilities': (16, 1000, 3), # Class probabilities
-    'usage_predictions': (16, 1000, 5, 3)  # [alpha, beta, sse] per condition
+# With hybrid loss (usage_loss_type='hybrid'):
+output = {
+    'splice_logits': (16, 1000, 3),             # Classification logits
+    'usage_predictions': (16, 1000, 5),         # Regression: SSE in [0,1]
+    'usage_class_logits': (16, 1000, 5, 3),     # Classification: [is_zero, is_one, is_middle]
+    # Optional (if return_features=True):
+    'encoder_features': (16, 1900, 128),        # Full sequence features
+    'central_features': (16, 1000, 128),        # Central region features
+    'skip_features': (16, 1900, 128)            # Fused multi-scale skip (full)
 }
 ```
-
----
-
-## Receptive Field Growth
-
-The receptive field grows with each residual block:
-
-| Block | Dilation | Receptive Field | 
-|-------|----------|-----------------|
-| Input conv | - | 15 bp |
-| ResBlock 0 | 1 | 27 bp |
-| ResBlock 1 | 1 | 39 bp | 
-| ResBlock 2 | 1 | 51 bp | 
-| ResBlock 3 | 1 | 63 bp | 
-| ResBlock 4 | 2 | 84 bp | 
-| ResBlock 5 | 2 | 105 bp | 
-| ResBlock 6 | 2 | 126 bp | 
-| ResBlock 7 | 2 | 147 bp | 
-| ResBlock 8 | 4 | 186 bp | 
-| ResBlock 9 | 4 | 225 bp | 
-| ResBlock 10 | 4 | 264 bp | 
-| ResBlock 11 | 4 | 303 bp | 
-| ResBlock 12 | 8 | 374 bp | 
-| ResBlock 13 | 8 | 445 bp | 
-| ResBlock 14 | 8 | 516 bp | 
-| ResBlock 15 | 8 | **587 bp** |
 
 ---

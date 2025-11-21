@@ -66,11 +66,9 @@ def create_mmap_datasets(data_path, out_dir, log_fn=print):
     
     sequences = data['sequences']
     labels = data['labels']
-    usage_arrays = {
-        'alpha': data['usage_alpha'],
-        'beta': data['usage_beta'],
-        'sse': data['usage_sse']
-    }
+    
+    # Only load SSE for training (alpha/beta stay in data processing only)
+    usage_sse = data['usage_sse']
     
     # Create memmap directory
     log_fn("Creating memory-mapped files")
@@ -95,21 +93,21 @@ def create_mmap_datasets(data_path, out_dir, log_fn=print):
     labels_mmap[:] = labels[:]
     labels_mmap.flush()
     
-    for key in ['alpha', 'beta', 'sse']:
-        usage_mmap = np.memmap(
-            out_dir / f'usage_{key}.mmap',
-            dtype=np.float32,
-            mode='w+',
-            shape=usage_arrays[key].shape
-        )
-        usage_mmap[:] = usage_arrays[key][:]
-        usage_mmap.flush()
+    # Only save SSE
+    usage_mmap = np.memmap(
+        out_dir / 'usage_sse.mmap',
+        dtype=np.float32,
+        mode='w+',
+        shape=usage_sse.shape
+    )
+    usage_mmap[:] = usage_sse[:]
+    usage_mmap.flush()
     
     # Save metadata
     metadata = {
         'sequences_shape': sequences.shape,
         'labels_shape': labels.shape,
-        'usage_shape': usage_arrays['alpha'].shape
+        'usage_shape': usage_sse.shape
     }
     with open(out_dir / 'metadata.json', 'w') as f:
         json.dump(metadata, f, indent=2)
@@ -117,20 +115,14 @@ def create_mmap_datasets(data_path, out_dir, log_fn=print):
     log_fn(f"Memory-mapped files saved to: {out_dir}")
 
 
-def load_and_normalize_data(config: dict, log_fn=print):
-    """Load data and apply normalization."""
+def load_data(config: dict, log_fn=print):
+    """Load data."""
 
     data_path = Path(config['data']['path'])
-    normalization_method = config['data']['normalization_method']
     use_mmap = config['data']['use_mmap']
-    
-    # Optional: specify which usage arrays to load
-    usage_types_to_load = config['data'].get('usage_types', ['alpha', 'beta', 'sse'])  # Default: all
 
     sequences = labels = None
-    usage_arrays = None
-    normalized_usage = None
-    usage_stats = None
+    usage_sse = None
 
     if use_mmap:
         # Resolve mmap directory from config path
@@ -145,16 +137,7 @@ def load_and_normalize_data(config: dict, log_fn=print):
 
         seq_file = mmap_dir / 'sequences.mmap'
         lbl_file = mmap_dir / 'labels.mmap'
-        
-        # Check which usage files exist
-        usage_files = {
-            'alpha': mmap_dir / 'usage_alpha.mmap',
-            'beta': mmap_dir / 'usage_beta.mmap',
-            'sse': mmap_dir / 'usage_sse.mmap'
-        }
-        
-        available_usage = {k: v for k, v in usage_files.items() 
-                          if v.exists() and k in usage_types_to_load}
+        sse_file = mmap_dir / 'usage_sse.mmap'
 
         # Check if memmap files exist
         if not (seq_file.exists() and lbl_file.exists()):
@@ -178,21 +161,17 @@ def load_and_normalize_data(config: dict, log_fn=print):
             sequences = np.memmap(seq_file, dtype=seq_dtype, mode='r', shape=tuple(meta['sequences_shape']))
             labels = np.memmap(lbl_file, dtype=lbl_dtype, mode='r', shape=tuple(meta['labels_shape']))
             
-            # Load available usage arrays
-            if available_usage:
-                log_fn(f"Loading usage arrays: {list(available_usage.keys())}")
-                usage_arrays = {}
-                for key, filepath in available_usage.items():
-                    usage_arrays[key] = np.memmap(
-                        filepath, 
-                        dtype=usage_dtype, 
-                        mode='r', 
-                        shape=tuple(meta['usage_shape'])
-                    )
-                    log_fn(f"  Loaded {key}: {usage_arrays[key].shape}")
+            # Load SSE if it exists
+            if sse_file.exists():
+                usage_sse = np.memmap(
+                    sse_file, 
+                    dtype=usage_dtype, 
+                    mode='r', 
+                    shape=tuple(meta['usage_shape'])
+                )
             else:
-                log_fn("No usage array files found or requested. Usage prediction will be disabled.")
-                usage_arrays = None
+                log_fn("No SSE array file found. Usage prediction will be disabled.")
+                usage_sse = None
         else:
             raise FileNotFoundError(f"Memmap files not found in {mmap_dir}.")
 
@@ -203,51 +182,38 @@ def load_and_normalize_data(config: dict, log_fn=print):
             sequences = data['sequences']
             labels = data['labels']
             
-            # Load only requested usage arrays
-            usage_types_to_load = config['data'].get('usage_types', ['alpha', 'beta', 'sse'])
-            usage_arrays = {}
-            for key in usage_types_to_load:
-                usage_key = f'usage_{key}'
-                if usage_key in data:
-                    usage_arrays[key] = data[usage_key]
-                    log_fn(f"  Loaded {key} from {usage_key}")
-            
-            if not usage_arrays:
-                usage_arrays = None
+            # Load SSE if available
+            if 'usage_sse' in data:
+                usage_sse = data['usage_sse']
+            else:
+                usage_sse = None
     
-    # Normalize if usage arrays are present and not all zeros
-    if usage_arrays is None:
-        log_fn("No usage arrays loaded, training without usage prediction.")
-        normalized_usage = None
-        usage_stats = None
-    elif all(np.all(arr == 0) for arr in usage_arrays.values()):
-        log_fn("All usage arrays are zero, training without usage prediction.")
-        normalized_usage = None
-        usage_stats = None
+    # Check if SSE is available and log once
+    if usage_sse is None:
+        log_fn("No SSE array loaded, training without usage prediction.")
+    elif np.all(usage_sse == 0):
+        log_fn("SSE array is all zeros, training without usage prediction.")
+        usage_sse = None
     else:
-        if normalization_method == 'none':
-            log_fn("Skipping normalization of usage arrays (method: none)")
-            normalized_usage = {k: usage_arrays[k] for k in usage_arrays}
-            usage_stats = {key: {'transform': 'identity'} for key in usage_arrays}
-            usage_stats['method'] = 'none'
-        else:
-            log_fn(f"Normalizing usage arrays (method: {normalization_method})...")
-            normalized_usage, usage_stats = normalize_usage_arrays(usage_arrays, method=normalization_method)
+        # SSE is already in [0,1] range, no normalization needed
+        log_fn(f"Loaded SSE array:")
+        log_fn(f"  shape={usage_sse.shape}, dtype={usage_sse.dtype}")
+        sse_clean = usage_sse[~np.isnan(usage_sse)]
+        if len(sse_clean) > 0:
+            log_fn(f"  range=[{sse_clean.min():.3f}, {sse_clean.max():.3f}], mean={sse_clean.mean():.3f}")
 
     log_fn(f"Loaded {len(sequences)} samples")
     log_fn(f"  Sequences shape: {sequences.shape}")
     log_fn(f"  Labels shape: {labels.shape}")
-    if normalized_usage is not None:
-        log_fn(f"  Usage arrays loaded: {list(normalized_usage.keys())}")
-        for k, v in normalized_usage.items():
-            log_fn(f"    {k}: {v.shape}")
+    if usage_sse is not None:
+        log_fn(f"  SSE shape: {usage_sse.shape}")
     else:
-        log_fn("  No usage arrays present.")
+        log_fn("  No SSE array present.")
 
-    return sequences, labels, normalized_usage, usage_stats
+    return sequences, labels, usage_sse, None
 
 
-def create_datasets(sequences, labels, normalized_usage, config: dict, log_fn=print):
+def create_datasets(sequences, labels, usage_sse, config: dict, log_fn=print):
     """Create train/val datasets."""
     split_ratio = config['data'].get('train_split', 0.8)
     n_samples = len(sequences)
@@ -255,23 +221,23 @@ def create_datasets(sequences, labels, normalized_usage, config: dict, log_fn=pr
     
     log_fn(f"\nSplitting data: {n_train} train, {n_samples - n_train} val")
     
-    if normalized_usage is not None:
-        train_usage = {k: v[:n_train] for k, v in normalized_usage.items()}
-        val_usage = {k: v[n_train:] for k, v in normalized_usage.items()}
+    if usage_sse is not None:
+        train_sse = usage_sse[:n_train]
+        val_sse = usage_sse[n_train:]
     else:
-        train_usage = None
-        val_usage = None
+        train_sse = None
+        val_sse = None
 
     train_dataset = SpliceDataset(
         sequences[:n_train],
         labels[:n_train],
-        train_usage
+        train_sse
     )
     
     val_dataset = SpliceDataset(
         sequences[n_train:],
         labels[n_train:],
-        val_usage
+        val_sse
     )
     
     return train_dataset, val_dataset
@@ -301,19 +267,20 @@ def compute_class_weights(labels, config: dict, log_fn=print):
     return class_weights
 
 
-def create_model(config: dict, normalized_usage: Optional[Dict], log_fn=print):
+def create_model(config: dict, usage_sse: Optional[np.ndarray], log_fn=print):
     """Create model from config and return model with usage info."""
     model_config = config['model']
+    training_config = config['training']
     
-    # Determine number of usage prediction outputs based on loaded data
-    if normalized_usage is not None and normalized_usage:
-        # Get number of conditions and types from first available array
-        first_key = next(iter(normalized_usage.keys()))
-        n_conditions = normalized_usage[first_key].shape[2]
-        n_usage_types = len(normalized_usage)  # How many of alpha/beta/sse we have
+    # Determine number of conditions based on loaded data
+    if usage_sse is not None:
+        # Get number of conditions from SSE array
+        n_conditions = usage_sse.shape[2]
     else:
         n_conditions = 0
-        n_usage_types = 0
+    
+    # Get usage loss type from training config
+    usage_loss_type = training_config.get('usage_loss_type', 'weighted_mse')
     
     model_params = {
         'embed_dim': model_config.get('embed_dim', 128),
@@ -322,9 +289,9 @@ def create_model(config: dict, normalized_usage: Optional[Dict], log_fn=print):
         'alternate': model_config.get('alternate', 2),
         'num_classes': model_config.get('num_classes', 3),
         'n_conditions': n_conditions,
-        'n_usage_types': n_usage_types,  # NEW: pass number of usage types
         'context_len': model_config.get('context_len', 4500),
-        'dropout': model_config.get('dropout', 0.5)
+        'dropout': model_config.get('dropout', 0.5),
+        'usage_loss_type': usage_loss_type
     }
     model = SplicevoModel(**model_params)
     
@@ -335,8 +302,9 @@ def create_model(config: dict, normalized_usage: Optional[Dict], log_fn=print):
     log_fn(f"  dilation_strategy: {model_params['dilation_strategy']}")
     log_fn(f"  num_classes: {model_params['num_classes']}")
     log_fn(f"  n_conditions: {model_params['n_conditions']}")
-    if n_usage_types > 0:
-        log_fn(f"  usage types: {n_usage_types} ({list(normalized_usage.keys())})")
+    log_fn(f"  usage_loss_type: {usage_loss_type}")
+    if usage_loss_type == 'hybrid':
+        log_fn(f"    -> Classification head added for hybrid loss")
     
     # Return model and n_conditions for trainer setup
     return model, n_conditions
@@ -464,7 +432,7 @@ def main():
     
     # Load and normalize data
     data_start = time.time()
-    sequences, labels, normalized_usage, usage_stats = load_and_normalize_data(
+    sequences, labels, usage_sse, usage_stats = load_data(
         config, log_print
     )
     data_time = time.time() - data_start
@@ -488,15 +456,17 @@ def main():
             log_print("Warning: No condition info found. Predictions won't have tissue/timepoint labels.")
     
     # Save normalization stats if alpha and beta were normalized
-    if usage_stats:
+    if usage_stats is not None:
         stats_path = checkpoint_dir / 'normalization_stats.json'
         save_normalization_stats(usage_stats, stats_path)
         log_print(f"Saved normalization stats to: {stats_path}")
+    else:
+        log_print("No normalization applied (SSE already in [0,1] range)")
     
     # Create datasets
     dataset_start = time.time()
     train_dataset, val_dataset = create_datasets(
-        sequences, labels, normalized_usage, config, log_print
+        sequences, labels, usage_sse, config, log_print
     )
     dataset_time = time.time() - dataset_start
     
@@ -504,9 +474,9 @@ def main():
     train_labels = labels[:len(train_dataset)]
     class_weights = compute_class_weights(train_labels, config, log_print)
     
-    # Create model (pass normalized_usage to determine n_conditions)
+    # Create model (pass usage_sse to determine n_conditions)
     model_start = time.time()
-    model, n_conditions = create_model(config, normalized_usage, log_print)
+    model, n_conditions = create_model(config, usage_sse, log_print)
     model_time = time.time() - model_start
     
     # Create dataloaders
@@ -526,6 +496,48 @@ def main():
     log_print("\nInitializing trainer...")
     training_config = config['training']
     
+    # Get usage loss configuration
+    usage_loss_type = training_config.get('usage_loss_type', 'weighted_mse')
+    
+    if usage_loss_type == 'weighted_mse':
+        weighted_mse_extreme_low = training_config.get('weighted_mse_extreme_low', 0.05)
+        weighted_mse_extreme_high = training_config.get('weighted_mse_extreme_high', 0.95)
+        weighted_mse_extreme_weight = training_config.get('weighted_mse_extreme_weight', 10.0)
+        
+        log_print(f"Using weighted MSE loss for usage predictions:")
+        log_print(f"  extreme_low: {weighted_mse_extreme_low} (values < this are 'zero')")
+        log_print(f"  extreme_high: {weighted_mse_extreme_high} (values > this are 'one')")
+        log_print(f"  extreme_weight: {weighted_mse_extreme_weight}x")
+        
+        trainer_kwargs = {
+            'usage_loss_type': 'weighted_mse',
+            'weighted_mse_extreme_low': weighted_mse_extreme_low,
+            'weighted_mse_extreme_high': weighted_mse_extreme_high,
+            'weighted_mse_extreme_weight': weighted_mse_extreme_weight
+        }
+    elif usage_loss_type == 'hybrid':
+        hybrid_extreme_low = training_config.get('hybrid_extreme_low', 0.05)
+        hybrid_extreme_high = training_config.get('hybrid_extreme_high', 0.95)
+        hybrid_class_weight = training_config.get('hybrid_class_weight', 1.0)
+        hybrid_reg_weight = training_config.get('hybrid_reg_weight', 1.0)
+        
+        log_print(f"Using hybrid loss for usage predictions:")
+        log_print(f"  extreme_low: {hybrid_extreme_low} (classify as 'zero')")
+        log_print(f"  extreme_high: {hybrid_extreme_high} (classify as 'one')")
+        log_print(f"  class_weight: {hybrid_class_weight}")
+        log_print(f"  reg_weight: {hybrid_reg_weight}")
+        
+        trainer_kwargs = {
+            'usage_loss_type': 'hybrid',
+            'hybrid_extreme_low': hybrid_extreme_low,
+            'hybrid_extreme_high': hybrid_extreme_high,
+            'hybrid_class_weight': hybrid_class_weight,
+            'hybrid_reg_weight': hybrid_reg_weight
+        }
+    else:  # 'mse'
+        log_print("Using standard MSE loss for usage predictions")
+        trainer_kwargs = {'usage_loss_type': 'mse'}
+    
     trainer = SpliceTrainer(
         model=model,
         train_loader=train_loader,
@@ -539,7 +551,8 @@ def main():
         checkpoint_dir=str(checkpoint_dir),
         use_tensorboard=config['output'].get('use_tensorboard', True),
         use_amp=training_config.get('use_amp', True),
-        gradient_accumulation_steps=training_config.get('gradient_accumulation_steps', 1)
+        gradient_accumulation_steps=training_config.get('gradient_accumulation_steps', 1),
+        **trainer_kwargs
     )
     
     # Train

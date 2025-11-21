@@ -29,12 +29,27 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
     # Try to load training config from same directory
     config_path = checkpoint_path.parent / 'training_config.json'
     condition_info = None
+    usage_loss_type = 'weighted_mse'  # default
+    usage_types = ['sse', 'alpha', 'beta']  # default: all types
     
     if config_path.exists():
         log_fn(f"Loading model config from {config_path}...")
         with open(config_path, 'r') as f:
             training_config = json.load(f)
         model_config = training_config['config']['model']
+        
+        # Get usage loss type from training config
+        if 'training' in training_config['config']:
+            usage_loss_type = training_config['config']['training'].get('usage_loss_type', 'weighted_mse')
+        
+        # Get usage types from data config
+        if 'data' in training_config['config']:
+            usage_types = training_config['config']['data'].get('usage_types', ['sse', 'alpha', 'beta'])
+            log_fn(f"Usage types trained: {usage_types}")
+            usage_types = [utype for utype in usage_types if utype in ['sse', 'alpha', 'beta']]  # validate types
+            log_fn(f"  -> Using types: {usage_types}")
+        else:
+            log_fn("Warning: No usage_types found in config, using default [sse, alpha, beta]")
         
         # Load condition info if available
         if 'condition_info' in training_config:
@@ -47,43 +62,25 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
     else:
         log_fn("Warning: training_config.json not found, inferring from checkpoint...")
         model_config = {}
+        
+        # Try to infer usage_loss_type from checkpoint
+        # If usage_classifier exists, it was trained with hybrid loss
+        if 'encoder.usage_classifier.weight' in state_dict:
+            usage_loss_type = 'hybrid'
+            log_fn("Detected usage_classifier in checkpoint -> using hybrid loss mode")
     
     # Infer n_conditions from checkpoint state_dict
-    # Look at usage_predictor weight shape: (n_conditions * n_usage_types, embed_dim, 1)
     usage_predictor_weight = state_dict.get('encoder.usage_predictor.weight')
     if usage_predictor_weight is not None:
-        output_channels = usage_predictor_weight.shape[0]
-        embed_dim = usage_predictor_weight.shape[1]
-        
-        # Try to get n_usage_types from config, or infer it
-        n_usage_types = model_config.get('n_usage_types', None)
-        
-        if n_usage_types is None:
-            # If not in config, try to infer from normalization stats
-            norm_stats_path = checkpoint_path.parent / 'normalization_stats.json'
-            if norm_stats_path.exists():
-                with open(norm_stats_path, 'r') as f:
-                    norm_stats = json.load(f)
-                # Count how many usage types were normalized (excluding 'method' key)
-                n_usage_types = len([k for k in norm_stats.keys() if k != 'method'])
-                log_fn(f"Inferred n_usage_types from normalization stats: {n_usage_types}")
-            else:
-                # Default to 3 if we can't determine
-                n_usage_types = 3
-                log_fn(f"Warning: Could not infer n_usage_types, defaulting to {n_usage_types}")
-        
-        n_conditions = output_channels // n_usage_types
+        n_conditions = usage_predictor_weight.shape[0]  # Direct output channels = n_conditions
         
         log_fn(f"Inferred n_conditions from checkpoint: {n_conditions}")
         log_fn(f"  (usage_predictor shape: {usage_predictor_weight.shape})")
-        log_fn(f"  n_usage_types: {n_usage_types}")
         
         model_config['n_conditions'] = n_conditions
-        model_config['n_usage_types'] = n_usage_types
     else:
         log_fn("Warning: Could not find usage_predictor in checkpoint")
         model_config.setdefault('n_conditions', 0)
-        model_config.setdefault('n_usage_types', 0)
     
     # Set defaults for other model parameters
     model_config.setdefault('embed_dim', 128)
@@ -93,23 +90,27 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
     model_config.setdefault('num_classes', 3)
     model_config.setdefault('context_len', 4500)
     model_config.setdefault('dropout', 0.0)
+    model_config['usage_loss_type'] = usage_loss_type
     
     log_fn("\nModel configuration:")
     for key, value in model_config.items():
         log_fn(f"  {key}: {value}")
     
-    # Create model with inferred config
-    from splicevo.model import SplicevoModel
-    model = SplicevoModel(**model_config)
+    # Create model with inferred config (remove usage_types as it's not a model parameter)
+    model_config_for_init = {k: v for k, v in model_config.items() if k != 'usage_types'}
     
-    # Load state dict
+    from splicevo.model import SplicevoModel
+    model = SplicevoModel(**model_config_for_init)
+    
+    # Load state dict (strict=False to handle optional usage_classifier)
     model.load_state_dict(state_dict, strict=False)
     model.to(device)
     model.eval()
     
     log_fn(f"Model loaded successfully!")
+    log_fn(f"Usage types: {usage_types}")
     
-    return model, model_config, condition_info 
+    return model, model_config, condition_info
 
 
 def load_test_data(data_path: str, use_memmap: bool = False, log_fn=print) -> Dict[str, np.ndarray]:
@@ -163,7 +164,7 @@ def load_test_data(data_path: str, use_memmap: bool = False, log_fn=print) -> Di
             'usage_alpha': mmap_dir / 'usage_alpha.mmap',
             'usage_beta': mmap_dir / 'usage_beta.mmap',
             'usage_sse': mmap_dir / 'usage_sse.mmap'
-        }
+        };
         
         for key, filepath in usage_files.items():
             if filepath.exists():
@@ -349,8 +350,8 @@ def main():
                         help='Path to model checkpoint')
     parser.add_argument('--test-data', type=str, required=True,
                         help='Path to test data (.npz file or memmap directory)')
-    parser.add_argument('--normalization-stats', type=str, required=True,
-                        help='Path to normalization stats (.json file)')
+    parser.add_argument('--normalization-stats', type=str, required=False,
+                        help='Path to normalization stats (.json file) - not needed for SSE-only models')
     parser.add_argument('--output', type=str, required=True,
                         help='Path to save predictions (.npz file or directory for memmap)')
     parser.add_argument('--device', type=str, default='cuda',
@@ -460,46 +461,25 @@ def main():
         log_print(f"  Splice predictions shape: {predictions['splice_predictions'].shape}")
         log_print(f"  Usage predictions shape: {predictions['usage_predictions'].shape}")
 
-        # Extract usage components
-        usage_preds = predictions['usage_predictions']
-        n_usage_types = usage_preds.shape[-1]
+        # Extract SSE predictions
+        usage_preds = predictions['usage_predictions']  # (n_samples, central_len, n_conditions)
         
-        log_print(f"\nExtracted usage components ({n_usage_types} types):")
+        log_print(f"\nExtracted usage predictions:")
+        log_print(f"  SSE shape: {usage_preds.shape} (sigmoid, range [0,1])")
         
-        usage_keys = []
         output_predictions = {
             'splice_predictions': predictions['splice_predictions'],
             'splice_probs': predictions['splice_probs'],
+            'usage_sse': usage_preds
         }
         
         if args.save_logits:
             output_predictions['splice_logits'] = predictions['splice_logits']
-        
-        # Add usage predictions based on what was predicted
-        if n_usage_types >= 1:
-            usage_sse = usage_preds[..., 0]
-            usage_keys.append('sse')
-            output_predictions['usage_sse'] = usage_sse
-            log_print(f"  SSE shape: {usage_sse.shape} (sigmoid, range [0,1])")
-        if n_usage_types >= 2:
-            usage_alpha = usage_preds[..., 1]
-            usage_keys.append('alpha')
-            output_predictions['usage_alpha'] = usage_alpha
-            log_print(f"  Alpha shape: {usage_alpha.shape}")
-        if n_usage_types >= 3:
-            usage_beta = usage_preds[..., 2]
-            usage_keys.append('beta')
-            output_predictions['usage_beta'] = usage_beta
-            log_print(f"  Beta shape: {usage_beta.shape}")
 
         # Add ground truth if available
         ground_truth = {}
         if 'labels' in test_data:
             ground_truth['labels_true'] = np.array(test_data['labels'])
-        if 'usage_alpha' in test_data:
-            ground_truth['usage_alpha_true'] = np.array(test_data['usage_alpha'])
-        if 'usage_beta' in test_data:
-            ground_truth['usage_beta_true'] = np.array(test_data['usage_beta'])
         if 'usage_sse' in test_data:
             ground_truth['usage_sse_true'] = np.array(test_data['usage_sse'])
         
@@ -524,7 +504,7 @@ def main():
             total_size = sum(f.stat().st_size for f in output_dir.glob('*.mmap'))
             log_print(f"\nPrediction Summary:")
             log_print(f"  Total samples: {n_samples}")
-            log_print(f"  Usage types predicted: {usage_keys}")
+            log_print(f"  Usage type: SSE only")
             log_print(f"  Output directory: {output_dir}")
             log_print(f"  Total size: {total_size / 1024 / 1024:.1f} MB")
             
@@ -541,7 +521,7 @@ def main():
             
             log_print(f"\nPrediction Summary:")
             log_print(f"  Total samples: {n_samples}")
-            log_print(f"  Usage types predicted: {usage_keys}")
+            log_print(f"  Usage type: SSE only")
             log_print(f"  Output file: {args.output}")
         
         save_time = time.time() - save_start
@@ -562,6 +542,12 @@ def main():
         log_print("=" * 60)
     
         log_print("\nDone!")
+        
+    except Exception as e:
+        log_print(f"\nError occurred: {str(e)}")
+        import traceback
+        log_print(traceback.format_exc())
+        raise
         
     finally:
         # Restore stdout/stderr if quiet mode

@@ -11,8 +11,8 @@ data:
   path: /home/elek/projects/splicing/results/data_processing_brain/memmap_train
   use_mmap: true
   train_split: 0.8
-  normalization_method: per_sample_cpm   # 'per_sample_cpm' or 'global'
-  usage_types: ['sse']  # any of 'sse', 'alpha', 'beta''
+  normalization_method: none   # SSE needs no normalization (already [0,1])
+  usage_types: ['sse']  # Only SSE for model training
 
 # Output configuration
 output:
@@ -34,10 +34,24 @@ training:
   # Optimizer
   learning_rate: 1.0e-3
   weight_decay: 1.0e-3 
-  
-  # Loss weights
-  splice_weight: 0.9
-  usage_weight: 0.1
+
+  # Loss for splice site usage (SSE)
+  usage_loss_type: 'hybrid'  # "hybrid" or 'weighted_mse' or 'mse' or 'bce'
+
+  # Weighted MSE parameters
+  weighted_mse_extreme_low: 0.1        # Values < 0.1 are extreme (near zero)
+  weighted_mse_extreme_high: 0.9       # Values > 0.9 are extreme (near one)
+  weighted_mse_extreme_weight: 5.0     # Weight for errors in extreme values (weight for other values=1)
+
+  # Hybrid loss parameters
+  hybrid_extreme_low: 0.05      # Values < 0.05 classified as "zero"
+  hybrid_extreme_high: 0.95     # Values > 0.95 classified as "one"
+  hybrid_class_weight: 0.8      # Weight for classification component
+  hybrid_reg_weight: 0.2        # Weight for regression component
+
+  # How to combine splice site and usage loss
+  splice_weight: 0.1
+  usage_weight: 0.9
 
   # Class balancing
   use_class_weights: true
@@ -52,6 +66,6 @@ training:
   
   # DataLoader
   dataloader:
-    batch_size: 64
+    batch_size: 128
     num_workers: 32
     prefetch_factor: 4

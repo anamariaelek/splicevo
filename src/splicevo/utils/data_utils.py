@@ -130,13 +130,8 @@ def load_predictions(fn, keys=None):
         # Load selected arrays
         pred_preds = pred['splice_predictions'] if 'splice_predictions' in keys else None
         pred_probs = pred['splice_probs'] if 'splice_probs' in keys else None
-
-        pred_alpha = pred['usage_alpha'] if 'usage_alpha' in keys else None
-        pred_beta = pred['usage_beta'] if 'usage_beta' in keys else None
         pred_sse = pred['usage_sse'] if 'usage_sse' in keys else None
         true_labels = pred['labels_true'] if 'labels_true' in keys else None
-        true_alpha = pred['usage_alpha_true'] if 'usage_alpha_true' in keys else None
-        true_beta = pred['usage_beta_true'] if 'usage_beta_true' in keys else None
         true_sse = pred['usage_sse_true'] if 'usage_sse_true' in keys else None
 
     # If a directory with memmap files
@@ -144,12 +139,8 @@ def load_predictions(fn, keys=None):
         pred_dir = Path(fn)
         pred_preds_file = pred_dir / 'splice_predictions.mmap'
         pred_probs_file = pred_dir / 'splice_probs.mmap'
-        pred_alpha_file = pred_dir / 'usage_alpha.mmap'
-        pred_beta_file = pred_dir / 'usage_beta.mmap'
         pred_sse_file = pred_dir / 'usage_sse.mmap'
         true_labels_file = pred_dir / 'labels_true.mmap'
-        true_alpha_file = pred_dir / 'usage_alpha_true.mmap'
-        true_beta_file = pred_dir / 'usage_beta_true.mmap'
         true_sse_file = pred_dir / 'usage_sse_true.mmap'
 
         # If keys is None, set to all available keys
@@ -188,26 +179,6 @@ def load_predictions(fn, keys=None):
             print(f"Loaded splice probs shape: {pred_probs.shape}")
         else:
             pred_probs = None
-        if pred_alpha_file.exists() and 'usage_alpha' in (keys or []):
-            pred_alpha = np.memmap(
-                pred_alpha_file,
-                dtype=np.dtype(meta['usage_alpha']['dtype']),
-                mode='r',
-                shape=tuple(meta['usage_alpha']['shape'])
-            )
-            print(f"Loaded splice alpha shape: {pred_alpha.shape}")
-        else:
-            pred_alpha = None
-        if pred_beta_file.exists() and 'usage_beta' in (keys or []):
-            pred_beta = np.memmap(
-                pred_beta_file,
-                dtype=np.dtype(meta['usage_beta']['dtype']),
-                mode='r',
-                shape=tuple(meta['usage_beta']['shape'])
-            )
-            print(f"Loaded splice beta shape: {pred_beta.shape}")
-        else:
-            pred_beta = None
         if pred_sse_file.exists() and 'usage_sse' in (keys or []):
             pred_sse = np.memmap(
                 pred_sse_file,
@@ -228,26 +199,6 @@ def load_predictions(fn, keys=None):
             print(f"Loaded true labels shape: {true_labels.shape}")
         else:
             true_labels = None
-        if true_alpha_file.exists() and 'usage_alpha_true' in (keys or []):
-            true_alpha = np.memmap(
-                true_alpha_file,
-                dtype=np.dtype(meta['usage_alpha_true']['dtype']),
-                mode='r',
-                shape=tuple(meta['usage_alpha_true']['shape'])
-            )
-            print(f"Loaded true alpha shape: {true_alpha.shape}")
-        else:
-            true_alpha = None
-        if true_beta_file.exists() and 'usage_beta_true' in (keys or []):
-            true_beta = np.memmap(
-                true_beta_file,
-                dtype=np.dtype(meta['usage_beta_true']['dtype']),
-                mode='r',
-                shape=tuple(meta['usage_beta_true']['shape'])
-            )
-            print(f"Loaded true beta shape: {true_beta.shape}")
-        else:
-            true_beta = None
         if true_sse_file.exists() and 'usage_sse_true' in (keys or []):
             true_sse = np.memmap(
                 true_sse_file,
@@ -259,7 +210,7 @@ def load_predictions(fn, keys=None):
         else:
             true_sse = None
 
-    return pred_preds, pred_probs, pred_alpha, pred_beta, pred_sse, meta, true_labels, true_alpha, true_beta, true_sse
+    return pred_preds, pred_probs, pred_sse, meta, true_labels, true_sse
 
 def save_to_memmap(
     data: np.ndarray,

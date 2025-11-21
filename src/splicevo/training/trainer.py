@@ -11,6 +11,8 @@ import json
 from datetime import datetime, timedelta
 import time
 
+from .losses import WeightedMSELoss, HybridUsageLoss
+
 
 class SpliceTrainer:
     """
@@ -37,7 +39,15 @@ class SpliceTrainer:
         pin_memory: bool = True,
         non_blocking: bool = True,
         use_amp: bool = True,
-        gradient_accumulation_steps: int = 1
+        gradient_accumulation_steps: int = 1,
+        usage_loss_type: str = 'weighted_mse',
+        weighted_mse_extreme_low: float = 0.05,
+        weighted_mse_extreme_high: float = 0.95,
+        weighted_mse_extreme_weight: float = 10.0,
+        hybrid_extreme_low: float = 0.05,
+        hybrid_extreme_high: float = 0.95,
+        hybrid_class_weight: float = 1.0,
+        hybrid_reg_weight: float = 1.0
     ):
         """
         Initialize trainer.
@@ -57,6 +67,13 @@ class SpliceTrainer:
             non_blocking: Use non-blocking transfers for better performance
             use_amp: Use automatic mixed precision training (reduces memory usage)
             gradient_accumulation_steps: Number of steps to accumulate gradients before update
+            usage_loss_type: Type of usage loss ('mse', 'weighted_mse', 'hybrid')
+            weighted_mse_extreme_threshold: Threshold for extreme values (for weighted_mse)
+            weighted_mse_extreme_weight: Weight for extreme values (for weighted_mse)
+            hybrid_extreme_low: Low threshold for hybrid loss classification
+            hybrid_extreme_high: High threshold for hybrid loss classification
+            hybrid_class_weight: Weight for classification component in hybrid loss
+            hybrid_reg_weight: Weight for regression component in hybrid loss
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -67,6 +84,7 @@ class SpliceTrainer:
         self.non_blocking = non_blocking
         self.use_amp = use_amp and (device == 'cuda')
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.usage_loss_type = usage_loss_type
         
         # Mixed precision training
         self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
@@ -75,7 +93,25 @@ class SpliceTrainer:
         if class_weights is not None:
             class_weights = class_weights.to(device)
         self.splice_criterion = nn.CrossEntropyLoss(weight=class_weights)
-        self.usage_criterion = nn.MSELoss()
+        
+        # Usage loss: weighted MSE, hybrid, or regular MSE
+        if usage_loss_type == 'weighted_mse':
+            self.usage_criterion = WeightedMSELoss(
+                extreme_low_threshold=weighted_mse_extreme_low,
+                extreme_high_threshold=weighted_mse_extreme_high,
+                extreme_weight=weighted_mse_extreme_weight,
+                reduction='mean'
+            )
+        elif usage_loss_type == 'hybrid':
+            self.usage_criterion = HybridUsageLoss(
+                extreme_low_threshold=hybrid_extreme_low,
+                extreme_high_threshold=hybrid_extreme_high,
+                class_weight=hybrid_class_weight,
+                reg_weight=hybrid_reg_weight,
+                reduction='mean'
+            )
+        else:  # 'mse' or default
+            self.usage_criterion = nn.MSELoss()
         
         # Loss weights for multi-task learning
         self.splice_weight = splice_weight
@@ -120,10 +156,111 @@ class SpliceTrainer:
             'learning_rate': []
         }
         
+        # Loss tracking for different SSE ranges
+        self.sse_loss_tracking = {
+            'train': {},  # epoch -> {'zeros': [], 'ones': [], 'middle': [], 'targets': [], 'predictions': []}
+            'val': {}
+        }
+        
         # Time tracking
         self.epoch_start_time = None
         self.first_epoch_duration = None
         self.training_start_time = None
+    
+    def _track_sse_losses(
+        self, 
+        usage_predictions: torch.Tensor,
+        usage_targets: torch.Tensor,
+        splice_mask: torch.Tensor,
+        usage_class_logits: Optional[torch.Tensor] = None,
+        is_training: bool = True
+    ) -> Dict:
+        """
+        Track losses for different SSE value ranges.
+        
+        Works with all loss types: MSE, Weighted MSE, Hybrid, BCE.
+        
+        Args:
+            usage_predictions: Predicted SSE values (batch, central_len, n_conditions)
+            usage_targets: Target SSE values (batch, central_len, n_conditions)
+            splice_mask: Mask for valid splice sites (batch, central_len)
+            usage_class_logits: Classification logits for hybrid loss (batch, central_len, n_conditions, 3)
+            is_training: Whether this is training or validation
+            
+        Returns:
+            Dictionary with losses and predictions/targets for different ranges
+        """
+        if splice_mask.sum() == 0:
+            return None
+        
+        # Flatten and mask
+        mask_flat = splice_mask.reshape(-1)
+        usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+        usage_predictions_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
+        
+        masked_targets = usage_targets_flat[mask_flat]
+        masked_preds = usage_predictions_flat[mask_flat]
+        
+        # Compute per-position losses based on loss type
+        if self.usage_loss_type == 'hybrid':
+            # Hybrid loss: need both regression and classification
+            if usage_class_logits is None:
+                # Fallback to MSE if class logits not provided
+                per_pos_loss = (masked_preds - masked_targets) ** 2
+            else:
+                usage_class_flat = usage_class_logits.reshape(-1, usage_class_logits.shape[-2], usage_class_logits.shape[-1])
+                masked_class_logits = usage_class_flat[mask_flat]
+                
+                # Compute hybrid loss per position
+                original_reduction = self.usage_criterion.reduction
+                self.usage_criterion.reduction = 'none'
+                per_pos_loss = self.usage_criterion(masked_preds, masked_class_logits, masked_targets)
+                self.usage_criterion.reduction = original_reduction
+        
+        elif self.usage_loss_type == 'weighted_mse':
+            # Weighted MSE
+            original_reduction = self.usage_criterion.reduction
+            self.usage_criterion.reduction = 'none'
+            per_pos_loss = self.usage_criterion(masked_preds, masked_targets)
+            self.usage_criterion.reduction = original_reduction
+        
+        elif self.usage_loss_type == 'bce':
+            # Binary cross-entropy (for binary classification)
+            # Assumes targets are in [0, 1] and predictions are logits or probabilities
+            if hasattr(self.usage_criterion, 'reduction'):
+                original_reduction = self.usage_criterion.reduction
+                self.usage_criterion.reduction = 'none'
+                per_pos_loss = self.usage_criterion(masked_preds, masked_targets)
+                self.usage_criterion.reduction = original_reduction
+            else:
+                # Manual BCE calculation if needed
+                per_pos_loss = -(masked_targets * torch.log(masked_preds + 1e-8) + 
+                                (1 - masked_targets) * torch.log(1 - masked_preds + 1e-8))
+        
+        else:  # 'mse' or default
+            # Standard MSE
+            per_pos_loss = (masked_preds - masked_targets) ** 2
+        
+        # Identify different SSE ranges
+        is_zero = (masked_targets < 0.05)
+        is_one = (masked_targets > 0.95)
+        is_middle = (masked_targets >= 0.05) & (masked_targets <= 0.95)
+        
+        # Extract losses
+        zero_losses = per_pos_loss[is_zero]
+        one_losses = per_pos_loss[is_one]
+        middle_losses = per_pos_loss[is_middle]
+        
+        return {
+            'zeros': zero_losses.detach().cpu().numpy() if zero_losses.numel() > 0 else np.array([]),
+            'ones': one_losses.detach().cpu().numpy() if one_losses.numel() > 0 else np.array([]),
+            'middle': middle_losses.detach().cpu().numpy() if middle_losses.numel() > 0 else np.array([]),
+            'n_zeros': is_zero.sum().item(),
+            'n_ones': is_one.sum().item(),
+            'n_middle': is_middle.sum().item(),
+            'targets': masked_targets.detach().cpu().numpy(),
+            'predictions': masked_preds.detach().cpu().numpy()
+        }
     
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch."""
@@ -133,6 +270,18 @@ class SpliceTrainer:
         total_splice_loss = 0
         total_usage_loss = 0
         n_batches = 0
+        
+        # Track SSE losses for this epoch
+        epoch_sse_tracking = {
+            'zeros': [],
+            'ones': [],
+            'middle': [],
+            'n_zeros': 0,
+            'n_ones': 0,
+            'n_middle': 0,
+            'targets': [],
+            'predictions': []
+        }
         
         # Reset gradients at the start
         self.optimizer.zero_grad()
@@ -157,23 +306,81 @@ class SpliceTrainer:
                 # Mask for valid splice positions
                 splice_mask = (splice_labels > 0)  # shape: [batch, positions]
                 usage_targets = torch.nan_to_num(usage_targets, nan=0.0)
-                usage_predictions = output['usage_predictions']
-                if splice_mask.sum() > 0:
-                    mask_flat = splice_mask.reshape(-1)  # [batch*positions]
-                    usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-2], usage_targets.shape[-1])  # [batch*positions, n_conditions, 3]
-                    usage_predictions_flat = usage_predictions.reshape(-1, usage_predictions.shape[-2], usage_predictions.shape[-1])  # [batch*positions, n_conditions, 3]
-                    usage_loss = self.usage_criterion(
-                        usage_predictions_flat[mask_flat],
-                        usage_targets_flat[mask_flat]
-                    )
-                else:
-                    usage_loss = torch.tensor(0.0, device=self.device)
                 
-                # Combined loss (scale by accumulation steps)
-                loss = (
-                    self.splice_weight * splice_loss +
-                    self.usage_weight * usage_loss
-                ) / self.gradient_accumulation_steps
+                # Compute usage loss based on loss type
+                if self.usage_loss_type == 'hybrid':
+                    # Hybrid loss expects both regression and classification outputs
+                    usage_predictions = output['usage_predictions']  # (batch, central_len, n_conditions)
+                    usage_class_logits = output.get('usage_class_logits', None)  # (batch, central_len, n_conditions, 3)
+                    
+                    if usage_class_logits is None:
+                        raise ValueError("Model must output 'usage_class_logits' for hybrid loss")
+                    
+                    if splice_mask.sum() > 0:
+                        mask_flat = splice_mask.reshape(-1)
+                        # Flatten first two dims (batch, central_len), keep n_conditions
+                        usage_preds_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
+                        usage_class_flat = usage_class_logits.reshape(-1, usage_class_logits.shape[-2], usage_class_logits.shape[-1])
+                        usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+                        
+                        usage_loss = self.usage_criterion(
+                            usage_preds_flat[mask_flat],
+                            usage_class_flat[mask_flat],
+                            usage_targets_flat[mask_flat]
+                        )
+                        
+                        # Track SSE losses (pass class logits for hybrid)
+                        sse_tracking = self._track_sse_losses(
+                            usage_predictions, usage_targets, splice_mask, 
+                            usage_class_logits=usage_class_logits,
+                            is_training=True
+                        )
+                        if sse_tracking is not None:
+                            epoch_sse_tracking['zeros'].extend(sse_tracking['zeros'].tolist())
+                            epoch_sse_tracking['ones'].extend(sse_tracking['ones'].tolist())
+                            epoch_sse_tracking['middle'].extend(sse_tracking['middle'].tolist())
+                            epoch_sse_tracking['n_zeros'] += sse_tracking['n_zeros']
+                            epoch_sse_tracking['n_ones'] += sse_tracking['n_ones']
+                            epoch_sse_tracking['n_middle'] += sse_tracking['n_middle']
+                            epoch_sse_tracking['targets'].append(sse_tracking['targets'])
+                            epoch_sse_tracking['predictions'].append(sse_tracking['predictions'])
+                    else:
+                        usage_loss = torch.tensor(0.0, device=self.device)
+                else:
+                    # Standard MSE or weighted MSE for SSE
+                    usage_predictions = output['usage_predictions']  # (batch, central_len, n_conditions)
+                    if splice_mask.sum() > 0:
+                        mask_flat = splice_mask.reshape(-1)
+                        usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+                        usage_predictions_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
+                        usage_loss = self.usage_criterion(
+                            usage_predictions_flat[mask_flat],
+                            usage_targets_flat[mask_flat]
+                        )
+                        
+                        # Track SSE losses (no class logits for MSE/weighted MSE)
+                        sse_tracking = self._track_sse_losses(
+                            usage_predictions, usage_targets, splice_mask, 
+                            usage_class_logits=None,
+                            is_training=True
+                        )
+                        if sse_tracking is not None:
+                            epoch_sse_tracking['zeros'].extend(sse_tracking['zeros'].tolist())
+                            epoch_sse_tracking['ones'].extend(sse_tracking['ones'].tolist())
+                            epoch_sse_tracking['middle'].extend(sse_tracking['middle'].tolist())
+                            epoch_sse_tracking['n_zeros'] += sse_tracking['n_zeros']
+                            epoch_sse_tracking['n_ones'] += sse_tracking['n_ones']
+                            epoch_sse_tracking['n_middle'] += sse_tracking['n_middle']
+                            epoch_sse_tracking['targets'].append(sse_tracking['targets'])
+                            epoch_sse_tracking['predictions'].append(sse_tracking['predictions'])
+                    else:
+                        usage_loss = torch.tensor(0.0, device=self.device)
+            
+            # Combined loss (scale by accumulation steps)
+            loss = (
+                self.splice_weight * splice_loss +
+                self.usage_weight * usage_loss
+            ) / self.gradient_accumulation_steps
             
             # Backward pass with gradient scaling
             if self.use_amp:
@@ -228,6 +435,47 @@ class SpliceTrainer:
             if self.device == 'cuda' and batch_idx % 50 == 0:
                 torch.cuda.empty_cache()
         
+        # Store SSE tracking for this epoch
+        self.sse_loss_tracking['train'][self.current_epoch + 1] = {
+            'zeros': np.array(epoch_sse_tracking['zeros']),
+            'ones': np.array(epoch_sse_tracking['ones']),
+            'middle': np.array(epoch_sse_tracking['middle']),
+            'n_zeros': epoch_sse_tracking['n_zeros'],
+            'n_ones': epoch_sse_tracking['n_ones'],
+            'n_middle': epoch_sse_tracking['n_middle'],
+            'targets': np.concatenate(epoch_sse_tracking['targets']) if epoch_sse_tracking['targets'] else np.array([]),
+            'predictions': np.concatenate(epoch_sse_tracking['predictions']) if epoch_sse_tracking['predictions'] else np.array([])
+        }
+        
+        # Log SSE tracking to TensorBoard
+        if self.writer is not None:
+            epoch_num = self.current_epoch  # Use current_epoch (0-indexed) for consistency with other metrics
+            
+            # Log mean losses for each SSE range
+            if len(epoch_sse_tracking['zeros']) > 0:
+                self.writer.add_scalar('Usage_Loss/Train_Zeros', 
+                                      np.mean(epoch_sse_tracking['zeros']), epoch_num)
+            if len(epoch_sse_tracking['ones']) > 0:
+                self.writer.add_scalar('Usage_Loss/Train_Ones', 
+                                      np.mean(epoch_sse_tracking['ones']), epoch_num)
+            if len(epoch_sse_tracking['middle']) > 0:
+                self.writer.add_scalar('Usage_Loss/Train_Middle', 
+                                      np.mean(epoch_sse_tracking['middle']), epoch_num)
+            
+            # Log combined view
+            self.writer.add_scalars('Usage_Loss/Train_Combined', {
+                'zeros': np.mean(epoch_sse_tracking['zeros']) if len(epoch_sse_tracking['zeros']) > 0 else 0.0,
+                'ones': np.mean(epoch_sse_tracking['ones']) if len(epoch_sse_tracking['ones']) > 0 else 0.0,
+                'middle': np.mean(epoch_sse_tracking['middle']) if len(epoch_sse_tracking['middle']) > 0 else 0.0
+            }, epoch_num)
+            
+            # Log correlation if we have predictions and targets
+            if len(epoch_sse_tracking['targets']) > 0 and len(epoch_sse_tracking['predictions']) > 0:
+                targets = np.concatenate(epoch_sse_tracking['targets']).flatten()
+                preds = np.concatenate(epoch_sse_tracking['predictions']).flatten()
+                correlation = np.corrcoef(targets, preds)[0, 1]
+                self.writer.add_scalar('Usage_Metrics/Train_Correlation', correlation, epoch_num)
+        
         return {
             'loss': total_loss / n_batches,
             'splice_loss': total_splice_loss / n_batches,
@@ -246,6 +494,18 @@ class SpliceTrainer:
         total_usage_loss = 0
         n_batches = 0
         
+        # Track SSE losses for this epoch
+        epoch_sse_tracking = {
+            'zeros': [],
+            'ones': [],
+            'middle': [],
+            'n_zeros': 0,
+            'n_ones': 0,
+            'n_middle': 0,
+            'targets': [],
+            'predictions': []
+        }
+        
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_loader):
                 # Efficient transfer to device
@@ -253,7 +513,7 @@ class SpliceTrainer:
                 splice_labels = batch['splice_labels'].to(self.device, non_blocking=self.non_blocking)
                 usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
                 
-                # Forward pass with mixed precision (use new torch.amp API)
+                # Forward pass with mixed precision
                 with torch.amp.autocast('cuda', enabled=self.use_amp):
                     output = self.model(sequences)
                     
@@ -264,17 +524,77 @@ class SpliceTrainer:
                         splice_labels.reshape(-1)
                     )
                     
-                    splice_mask = (splice_labels > 0).unsqueeze(-1).unsqueeze(-1)
-                    usage_predictions = output['usage_predictions']
-                    valid_mask = splice_mask & ~torch.isnan(usage_targets)
+                    splice_mask = (splice_labels > 0)
+                    usage_targets = torch.nan_to_num(usage_targets, nan=0.0)
                     
-                    if valid_mask.sum() > 0:
-                        usage_loss = self.usage_criterion(
-                            usage_predictions[valid_mask],
-                            usage_targets[valid_mask]
-                        )
+                    # Compute usage loss based on type (SAME AS TRAINING)
+                    if self.usage_loss_type == 'hybrid':
+                        usage_predictions = output['usage_predictions']  # (batch, central_len, n_conditions)
+                        usage_class_logits = output.get('usage_class_logits', None)  # (batch, central_len, n_conditions, 3)
+                        
+                        if usage_class_logits is None:
+                            raise ValueError("Model must output 'usage_class_logits' for hybrid loss")
+                        
+                        if splice_mask.sum() > 0:
+                            mask_flat = splice_mask.reshape(-1)
+                            # Flatten first two dims (batch, central_len), keep n_conditions
+                            usage_preds_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])  # [batch*central_len, n_conditions]
+                            usage_class_flat = usage_class_logits.reshape(-1, usage_class_logits.shape[-2], usage_class_logits.shape[-1])  # [batch*central_len, n_conditions, 3]
+                            usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])  # [batch*central_len, n_conditions]
+                            
+                            usage_loss = self.usage_criterion(
+                                usage_preds_flat[mask_flat],
+                                usage_class_flat[mask_flat],
+                                usage_targets_flat[mask_flat]
+                            )
+                            
+                            # Track SSE losses (pass class logits for hybrid)
+                            sse_tracking = self._track_sse_losses(
+                                usage_predictions, usage_targets, splice_mask,
+                                usage_class_logits=usage_class_logits,
+                                is_training=False
+                            )
+                            if sse_tracking is not None:
+                                epoch_sse_tracking['zeros'].extend(sse_tracking['zeros'].tolist())
+                                epoch_sse_tracking['ones'].extend(sse_tracking['ones'].tolist())
+                                epoch_sse_tracking['middle'].extend(sse_tracking['middle'].tolist())
+                                epoch_sse_tracking['n_zeros'] += sse_tracking['n_zeros']
+                                epoch_sse_tracking['n_ones'] += sse_tracking['n_ones']
+                                epoch_sse_tracking['n_middle'] += sse_tracking['n_middle']
+                                epoch_sse_tracking['targets'].append(sse_tracking['targets'])
+                                epoch_sse_tracking['predictions'].append(sse_tracking['predictions'])
+                        else:
+                            usage_loss = torch.tensor(0.0, device=self.device)
                     else:
-                        usage_loss = torch.tensor(0.0, device=self.device)
+                        # Standard MSE or weighted MSE for SSE
+                        usage_predictions = output['usage_predictions']  # (batch, central_len, n_conditions)
+                        if splice_mask.sum() > 0:
+                            mask_flat = splice_mask.reshape(-1)
+                            # Flatten to [batch*central_len, n_conditions]
+                            usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+                            usage_predictions_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
+                            usage_loss = self.usage_criterion(
+                                usage_predictions_flat[mask_flat],
+                                usage_targets_flat[mask_flat]
+                            )
+                            
+                            # Track SSE losses (no class logits for MSE/weighted MSE)
+                            sse_tracking = self._track_sse_losses(
+                                usage_predictions, usage_targets, splice_mask,
+                                usage_class_logits=None,
+                                is_training=False
+                            )
+                            if sse_tracking is not None:
+                                epoch_sse_tracking['zeros'].extend(sse_tracking['zeros'].tolist())
+                                epoch_sse_tracking['ones'].extend(sse_tracking['ones'].tolist())
+                                epoch_sse_tracking['middle'].extend(sse_tracking['middle'].tolist())
+                                epoch_sse_tracking['n_zeros'] += sse_tracking['n_zeros']
+                                epoch_sse_tracking['n_ones'] += sse_tracking['n_ones']
+                                epoch_sse_tracking['n_middle'] += sse_tracking['n_middle']
+                                epoch_sse_tracking['targets'].append(sse_tracking['targets'])
+                                epoch_sse_tracking['predictions'].append(sse_tracking['predictions'])
+                        else:
+                            usage_loss = torch.tensor(0.0, device=self.device)
                     
                     loss = (
                         self.splice_weight * splice_loss +
@@ -291,11 +611,63 @@ class SpliceTrainer:
                 if self.device == 'cuda' and batch_idx % 50 == 0:
                     torch.cuda.empty_cache()
         
+        # Store SSE tracking for this epoch
+        self.sse_loss_tracking['val'][self.current_epoch + 1] = {
+            'zeros': np.array(epoch_sse_tracking['zeros']),
+            'ones': np.array(epoch_sse_tracking['ones']),
+            'middle': np.array(epoch_sse_tracking['middle']),
+            'n_zeros': epoch_sse_tracking['n_zeros'],
+            'n_ones': epoch_sse_tracking['n_ones'],
+            'n_middle': epoch_sse_tracking['n_middle'],
+            'targets': np.concatenate(epoch_sse_tracking['targets']) if epoch_sse_tracking['targets'] else np.array([]),
+            'predictions': np.concatenate(epoch_sse_tracking['predictions']) if epoch_sse_tracking['predictions'] else np.array([])
+        }
+        
+        # Log SSE tracking to TensorBoard
+        if self.writer is not None:
+            epoch_num = self.current_epoch  # Use current_epoch (0-indexed) for consistency with other metrics
+            
+            # Log mean losses for each SSE range
+            if len(epoch_sse_tracking['zeros']) > 0:
+                self.writer.add_scalar('Usage_Loss/Val_Zeros', 
+                                      np.mean(epoch_sse_tracking['zeros']), epoch_num)
+            if len(epoch_sse_tracking['ones']) > 0:
+                self.writer.add_scalar('Usage_Loss/Val_Ones', 
+                                      np.mean(epoch_sse_tracking['ones']), epoch_num)
+            if len(epoch_sse_tracking['middle']) > 0:
+                self.writer.add_scalar('Usage_Loss/Val_Middle', 
+                                      np.mean(epoch_sse_tracking['middle']), epoch_num)
+            
+            # Log combined view
+            self.writer.add_scalars('Usage_Loss/Val_Combined', {
+                'zeros': np.mean(epoch_sse_tracking['zeros']) if len(epoch_sse_tracking['zeros']) > 0 else 0.0,
+                'ones': np.mean(epoch_sse_tracking['ones']) if len(epoch_sse_tracking['ones']) > 0 else 0.0,
+                'middle': np.mean(epoch_sse_tracking['middle']) if len(epoch_sse_tracking['middle']) > 0 else 0.0
+            }, epoch_num)
+            
+            # Log correlation
+            if len(epoch_sse_tracking['targets']) > 0 and len(epoch_sse_tracking['predictions']) > 0:
+                targets = np.concatenate(epoch_sse_tracking['targets']).flatten()
+                preds = np.concatenate(epoch_sse_tracking['predictions']).flatten()
+                correlation = np.corrcoef(targets, preds)[0, 1]
+                self.writer.add_scalar('Usage_Metrics/Val_Correlation', correlation, epoch_num)
+        
         return {
             'loss': total_loss / n_batches,
             'splice_loss': total_splice_loss / n_batches,
             'usage_loss': total_usage_loss / n_batches
         }
+    
+    def _log_scatter_plot_to_tensorboard(
+        self, 
+        targets: np.ndarray, 
+        predictions: np.ndarray, 
+        epoch: int,
+        split: str = 'val'
+    ):
+        """Create and log scatter plot to TensorBoard."""
+        # Disabled - scatter plots are saved to diagnostics directory instead
+        pass
     
     def train(
         self,
@@ -382,18 +754,18 @@ class SpliceTrainer:
                     self.writer.add_scalar('Val/Splice_Loss_Epoch', val_metrics['splice_loss'], epoch)
                     self.writer.add_scalar('Val/Usage_Loss_Epoch', val_metrics['usage_loss'], epoch)
                 
-                # Log combined metrics for easy comparison
-                self.writer.add_scalars('Loss/Combined', {
+                # Log combined metrics for easy comparison - all under Loss category
+                self.writer.add_scalars('Loss/Total', {
                     'train': train_metrics['loss'],
                     'val': val_metrics['loss'] if val_metrics else 0.0
                 }, epoch)
                 
-                self.writer.add_scalars('Splice_Loss/Combined', {
+                self.writer.add_scalars('Loss/Splice', {
                     'train': train_metrics['splice_loss'],
                     'val': val_metrics['splice_loss'] if val_metrics else 0.0
                 }, epoch)
                 
-                self.writer.add_scalars('Usage_Loss/Combined', {
+                self.writer.add_scalars('Loss/Usage', {
                     'train': train_metrics['usage_loss'],
                     'val': val_metrics['usage_loss'] if val_metrics else 0.0
                 }, epoch)
@@ -453,6 +825,14 @@ class SpliceTrainer:
             print(f"  Total time: {timedelta(seconds=int(total_time))}")
             print(f"  Avg epoch time: {avg_epoch_time:.1f}s")
             print(f"  Best val loss: {self.best_val_loss:.4f}")
+        
+        # Save diagnostic plots
+        if self.checkpoint_dir:
+            if verbose:
+                print(f"\nSaving diagnostic plots...")
+            self.save_diagnostic_plots()
+            if verbose:
+                print(f"  Diagnostic plots saved to: {self.checkpoint_dir / 'diagnostics'}")
         
         # Close TensorBoard writer
         if self.writer is not None:
@@ -522,3 +902,178 @@ class SpliceTrainer:
             print(f"  Global step: {self.global_step}")
             print(f"  Best val loss: {self.best_val_loss:.4f}")
             print(f"  Training history: {len(self.history['train_loss'])} epochs")
+    
+    def save_diagnostic_plots(self, output_dir: Optional[Path] = None):
+        """Save diagnostic plots for SSE loss tracking."""
+        if output_dir is None:
+            if self.checkpoint_dir is None:
+                return
+            output_dir = self.checkpoint_dir / 'diagnostics'
+        else:
+            output_dir = Path(output_dir)
+        
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Import matplotlib here to avoid issues if not available
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("Warning: matplotlib not available, skipping diagnostic plots")
+            return
+        
+        # Save data as npz for later analysis
+        np.savez(
+            output_dir / 'sse_loss_tracking.npz',
+            train_tracking=self.sse_loss_tracking['train'],
+            val_tracking=self.sse_loss_tracking['val']
+        )
+        
+        # Plot 1: Loss progression
+        self._plot_loss_progression(output_dir)
+        
+        # Plot 2: Scatter plots
+        self._plot_scatter_plots(output_dir, split='train', title_prefix='Training')
+        if self.sse_loss_tracking['val']:
+            self._plot_scatter_plots(output_dir, split='val', title_prefix='Validation')
+    
+    def _plot_loss_progression(self, output_dir: Path):
+        """Plot loss progression for different SSE ranges."""
+        import matplotlib.pyplot as plt
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        
+        for split_idx, (split, ax) in enumerate([('train', ax1), ('val', ax2)]):
+            tracking = self.sse_loss_tracking[split]
+            if not tracking:
+                ax.text(0.5, 0.5, f'No {split} data', ha='center', va='center', transform=ax.transAxes)
+                continue
+            
+            epochs = sorted(tracking.keys())
+            
+            # Collect statistics
+            zero_means, zero_stds = [], []
+            one_means, one_stds = [], []
+            middle_means, middle_stds = [], []
+            
+            for epoch in epochs:
+                data = tracking[epoch]
+                if len(data['zeros']) > 0:
+                    zero_means.append(np.mean(data['zeros']))
+                    zero_stds.append(np.std(data['zeros']))
+                else:
+                    zero_means.append(np.nan)
+                    zero_stds.append(np.nan)
+                
+                if len(data['ones']) > 0:
+                    one_means.append(np.mean(data['ones']))
+                    one_stds.append(np.std(data['ones']))
+                else:
+                    one_means.append(np.nan)
+                    one_stds.append(np.nan)
+                
+                if len(data['middle']) > 0:
+                    middle_means.append(np.mean(data['middle']))
+                    middle_stds.append(np.std(data['middle']))
+                else:
+                    middle_means.append(np.nan)
+                    middle_stds.append(np.nan)
+            
+            epochs = np.array(epochs)
+            
+            # Plot
+            ax.errorbar(epochs, zero_means, yerr=zero_stds, marker='o', label='SSE ≈ 0 (< 0.05)', 
+                       capsize=5, color='blue', alpha=0.7)
+            ax.errorbar(epochs, one_means, yerr=one_stds, marker='s', label='SSE ≈ 1 (> 0.95)', 
+                       capsize=5, color='orange', alpha=0.7)
+            ax.errorbar(epochs, middle_means, yerr=middle_stds, marker='^', label='SSE middle (0.05-0.95)', 
+                       capsize=5, color='green', alpha=0.7)
+            
+            ax.set_xlabel('Epoch', fontsize=12)
+            ax.set_ylabel('Loss', fontsize=12)
+            ax.set_title(f'{split.capitalize()} Loss Progression', fontsize=14)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=10)
+        
+        plt.tight_layout()
+        plt.savefig(output_dir / 'sse_loss_progression.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_scatter_plots(self, output_dir: Path, split: str = 'train', title_prefix: str = 'Training'):
+        """Plot density plots of predictions vs targets."""
+        try:
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+        except ImportError:
+            print("Warning: matplotlib or seaborn not available, skipping density plots")
+            return
+        
+        tracking = self.sse_loss_tracking[split]
+        if not tracking:
+            return
+        
+        epochs = sorted(tracking.keys())
+        n_epochs = len(epochs)
+        
+        # Create subplots
+        n_cols = min(4, n_epochs)
+        n_rows = (n_epochs + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
+        if n_epochs == 1:
+            axes = np.array([axes])
+        axes = axes.flatten()
+        
+        for idx, epoch in enumerate(epochs):
+            ax = axes[idx]
+            data = tracking[epoch]
+            
+            if 'targets' in data and 'predictions' in data and len(data['targets']) > 0:
+                targets = data['targets'].flatten()
+                predictions = data['predictions'].flatten()
+                
+                # Create density plot
+                try:
+                    sns.kdeplot(
+                        x=targets, 
+                        y=predictions, 
+                        ax=ax,
+                        fill=True,
+                        cmap='Blues',
+                        levels=10,
+                        thresh=0.05
+                    )
+                except:
+                    # Fallback to scatter if density plot fails (e.g., too few points)
+                    ax.scatter(targets, predictions, alpha=0.3, s=5, color='blue', edgecolors='none')
+                
+                # Perfect prediction line
+                ax.plot([0, 1], [0, 1], 'r--', linewidth=2, label='Perfect', alpha=0.7)
+                
+                # Thresholds
+                ax.axvline(x=0.05, color='gray', linestyle=':', alpha=0.5, linewidth=1)
+                ax.axvline(x=0.95, color='gray', linestyle=':', alpha=0.5, linewidth=1)
+                ax.axhline(y=0.05, color='gray', linestyle=':', alpha=0.5, linewidth=1)
+                ax.axhline(y=0.95, color='gray', linestyle=':', alpha=0.5, linewidth=1)
+                
+                # Correlation
+                correlation = np.corrcoef(targets, predictions)[0, 1]
+                
+                ax.set_xlabel('Target SSE', fontsize=9)
+                ax.set_ylabel('Predicted SSE', fontsize=9)
+                ax.set_title(f'Epoch {epoch} (r={correlation:.3f})', fontsize=10)
+                ax.set_xlim(-0.05, 1.05)
+                ax.set_ylim(-0.05, 1.05)
+                ax.grid(True, alpha=0.3)
+                ax.set_aspect('equal')
+                
+                if idx == 0:
+                    ax.legend(fontsize=8, loc='upper left')
+        
+        # Hide unused subplots
+        for idx in range(n_epochs, len(axes)):
+            axes[idx].axis('off')
+        
+        plt.suptitle(f'{title_prefix} SSE Predictions vs Targets (Density)', fontsize=14, y=1.00)
+        plt.tight_layout()
+        plt.savefig(output_dir / f'sse_density_{split}.png', dpi=150, bbox_inches='tight')
+        plt.close()

@@ -63,10 +63,10 @@ class EncoderModule(nn.Module):
                  alternate: Optional[int] = 4,
                  num_classes: int = 3,
                  n_conditions: int = 5,
-                 n_usage_types: int = 3,
                  add_output_heads: bool = True,
                  context_len: int = 4500,
-                 dropout: float = 0.0):
+                 dropout: float = 0.0,
+                 usage_loss_type: str = 'weighted_mse'):
         """
         Initialize encoder module.
         
@@ -76,17 +76,17 @@ class EncoderModule(nn.Module):
             dilation_strategy: Strategy for dilation rates
             num_classes: Number of splice site classes (3: none, donor, acceptor)
             n_conditions: Number of tissue/timepoint conditions for usage prediction
-            n_usage_types: Number of usage prediction outputs (1-3 for sse, alpha+beta, or all)
             add_output_heads: Whether to add classification and usage prediction heads
             context_len: Number of positions on each end to treat as context (removed from output)
             dropout: Dropout rate (default: 0.0)
+            usage_loss_type: Type of usage loss ('mse', 'weighted_mse', 'hybrid')
         """
         super().__init__()
         
         self.n_conditions = n_conditions
-        self.n_usage_types = n_usage_types
         self.add_output_heads = add_output_heads
         self.context_len = context_len
+        self.usage_loss_type = usage_loss_type
         
         # Initial convolution to project from one-hot (4 channels) to embed_dim
         # Use padding=7 to keep sequence length unchanged (for kernel_size=15)
@@ -153,8 +153,13 @@ class EncoderModule(nn.Module):
             # Splice site classification head
             self.splice_classifier = nn.Conv1d(embed_dim, num_classes, kernel_size=1)
             
-            # Usage prediction head - output only requested types
-            self.usage_predictor = nn.Conv1d(embed_dim, n_conditions * n_usage_types, kernel_size=1)
+            # Usage prediction head - SSE only
+            self.usage_predictor = nn.Conv1d(embed_dim, n_conditions, kernel_size=1)
+            
+            # Hybrid loss: add classification head for SSE (3 classes)
+            if usage_loss_type == 'hybrid':
+                # For each condition, predict 3 classes: is_zero, is_one, is_middle
+                self.usage_classifier = nn.Conv1d(embed_dim, n_conditions * 3, kernel_size=1)
 
     def _get_kernel_sizes(self, num_blocks: int):
         """
@@ -228,7 +233,8 @@ class EncoderModule(nn.Module):
             If add_output_heads=True:
                 Dictionary with predictions only for the central region:
                     - 'splice_logits': (batch_size, central_len, num_classes)
-                    - 'usage_predictions': (batch_size, central_len, n_conditions, 3)
+                    - 'usage_predictions': (batch_size, central_len, n_conditions)
+                    - 'usage_class_logits': (batch_size, central_len, n_conditions, 3) [if usage_loss_type='hybrid']
                 If return_features=True, also includes:
                     - 'encoder_features': Full features (batch_size, seq_len, embed_dim)
                     - 'central_features': Central region features (batch_size, central_len, embed_dim)
@@ -302,32 +308,35 @@ class EncoderModule(nn.Module):
         # Output 1: Classify splice sites
         splice_logits = self.splice_classifier(central_skip_conv)  # (batch, num_classes, central_len)
         
-        # Output 2: Predict usage statistics
-        usage_flat = self.usage_predictor(central_skip_conv)  # (batch, n_conditions*n_usage_types, central_len)
+        # Output 2: Predict SSE (regression)
+        usage_predictions = self.usage_predictor(central_skip_conv)  # (batch, n_conditions, central_len)
         
-        # Transpose back: (batch, central_len, num_classes/n_conditions*n_usage_types)
+        # Transpose back: (batch, central_len, num_classes/n_conditions)
         splice_logits = splice_logits.transpose(1, 2)
-        usage_flat = usage_flat.transpose(1, 2)
+        usage_predictions = usage_predictions.transpose(1, 2)
         
-        # Reshape usage predictions: (batch, central_len, n_conditions, n_usage_types)
-        batch_size, central_len, _ = usage_flat.shape
-        usage_predictions = usage_flat.view(batch_size, central_len, self.n_conditions, self.n_usage_types)
-        
-        # Apply sigmoid activation to SSE (first channel if n_usage_types >= 1)
-        # SSE should be in [0, 1] range
-        if self.n_usage_types >= 1:
-            usage_predictions = usage_predictions.clone()  # Make a copy to modify
-            usage_predictions[..., 0] = torch.sigmoid(usage_predictions[..., 0])
+        # Apply sigmoid activation to SSE (should be in [0, 1] range)
+        usage_predictions = torch.sigmoid(usage_predictions)
         
         output = {
             'splice_logits': splice_logits,
             'usage_predictions': usage_predictions
         }
         
+        # Output 3: Classify SSE values (for hybrid loss)
+        if self.usage_loss_type == 'hybrid':
+            usage_class_logits = self.usage_classifier(central_skip_conv)  # (batch, n_conditions*3, central_len)
+            usage_class_logits = usage_class_logits.transpose(1, 2)  # (batch, central_len, n_conditions*3)
+            
+            # Reshape: (batch, central_len, n_conditions, 3)
+            batch_size, central_len, _ = usage_class_logits.shape
+            usage_class_logits = usage_class_logits.view(batch_size, central_len, self.n_conditions, 3)
+            output['usage_class_logits'] = usage_class_logits
+        
         if return_features:
-            output['encoder_features'] = encoder_features  # Full sequence features
-            output['central_features'] = central_features  # Central region only
-            output['skip_features'] = fused_skip  # Fused multi-scale skip features
+            output['encoder_features'] = encoder_features
+            output['central_features'] = central_features
+            output['skip_features'] = fused_skip
             
         return output
 
@@ -342,18 +351,20 @@ class SplicevoModel(nn.Module):
                  alternate: Optional[int] = 4,
                  num_classes: int = 3,
                  n_conditions: int = 5,
-                 n_usage_types: int = 3,
                  context_len: int = 4500,
-                 dropout: float = 0.3):
+                 dropout: float = 0.3,
+                 usage_loss_type: str = 'weighted_mse'):
         """
-        Initialize model with encoder and dual decoders.
+        Initialize model with encoder for splice site and SSE prediction.
         
         Args:
-            n_usage_types: Number of usage prediction outputs (default: 3 for alpha, beta, sse)
+            n_conditions: Number of conditions (tissues/timepoints) for SSE prediction
+            usage_loss_type: Type of usage loss ('mse', 'weighted_mse', 'hybrid')
         """
         super().__init__()
         
         self.context_len = context_len
+        self.usage_loss_type = usage_loss_type
         
         # Encoder module with output heads
         self.encoder = EncoderModule(
@@ -363,10 +374,10 @@ class SplicevoModel(nn.Module):
             alternate=alternate,
             num_classes=num_classes,
             n_conditions=n_conditions,
-            n_usage_types=n_usage_types,
             add_output_heads=True,
             context_len=context_len,
-            dropout=dropout
+            dropout=dropout,
+            usage_loss_type=usage_loss_type
         )
         
     def forward(self, sequences, return_features: bool = False):
@@ -382,8 +393,10 @@ class SplicevoModel(nn.Module):
             Dictionary with predictions for central region only:
                 - 'splice_logits': (batch_size, central_len, num_classes)
                   where central_len = seq_len - 2 * context_len
-                - 'usage_predictions': (batch_size, central_len, n_conditions, 3)
-                  where the last dimension is [alpha, beta, sse]
+                - 'usage_predictions': (batch_size, central_len, n_conditions)
+                  SSE values in [0,1] range
+                - 'usage_class_logits': (batch_size, central_len, n_conditions, 3) [if usage_loss_type='hybrid']
+                  where the last dimension is [is_zero, is_one, is_middle]
             If return_features=True, also includes full and central features
         """
         return self.encoder(sequences, return_features=return_features)

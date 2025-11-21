@@ -28,7 +28,8 @@ class Splicevo:
                 dilation_strategy=self.config.get('dilation_strategy', 'exponential'),
                 num_classes=self.config.get('num_classes', 3),
                 n_conditions=self.config.get('n_conditions', 5),
-                dropout=self.config.get('dropout', 0.1)
+                dropout=self.config.get('dropout', 0.1),
+                usage_loss_type=self.config.get('usage_loss_type', 'mse')
             )
         else:
             self.model = model
@@ -46,7 +47,7 @@ class Splicevo:
         Create a trainer for the model.
         
         Args:
-            train_data: Tuple of (sequences, labels, usage_arrays)
+            train_data: Tuple of (sequences, labels, usage_sse)
             val_data: Optional validation data in same format
             batch_size: Batch size for training
             **trainer_kwargs: Additional arguments for SpliceTrainer
