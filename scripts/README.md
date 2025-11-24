@@ -95,6 +95,14 @@ Loss val ones #970056
 Loss val middle #e52592
 Loss val zeros #ffb6df
 
+Plot diagnostic plots
+
+```bash
+python ${SPLICEVO_DIR}/scripts/plot_diagnostics.py \
+    --checkpoint-dir ${CHECKPOINT_DIR} \
+    --output-dir ${CHECKPOINT_DIR}/diagnostics/ \
+    --quiet &
+```
 
 ## 3. Predict
 

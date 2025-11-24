@@ -1077,7 +1077,7 @@ class SpliceTrainer:
                 if val_metrics:
                     msg += f" - Val Loss: {val_metrics['loss']:.4f} "
                     msg += f"(Splice: {val_metrics['splice_loss']:.4f}, "
-                    msg += f"Usage: {val_metrics['usage_loss']:.4f})"
+                msg += f"Usage: {val_metrics['usage_loss']:.4f})"
                 
                 # Add ETA based on average epoch time
                 if epoch > 0:
@@ -1199,7 +1199,7 @@ class SpliceTrainer:
             print(f"  Training history: {len(self.history['train_loss'])} epochs")
     
     def save_diagnostic_plots(self, output_dir: Optional[Path] = None):
-        """Save diagnostic plots for SSE loss tracking."""
+        """Save diagnostic plots for loss tracking."""
         if output_dir is None:
             if self.checkpoint_dir is None:
                 return
@@ -1222,6 +1222,15 @@ class SpliceTrainer:
             train_tracking=self.sse_loss_tracking['train'],
             val_tracking=self.sse_loss_tracking['val']
         )
+        
+        # Save splice class tracking
+        with open(output_dir / 'splice_class_tracking.json', 'w') as f:
+            json.dump(self.splice_class_tracking, f, indent=2)
+        
+        # Save hybrid loss tracking if available
+        if self.usage_loss_type == 'hybrid':
+            with open(output_dir / 'hybrid_loss_tracking.json', 'w') as f:
+                json.dump(self.hybrid_loss_tracking, f, indent=2)
         
         # Plot 1: Loss progression
         self._plot_loss_progression(output_dir)
