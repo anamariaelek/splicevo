@@ -13,9 +13,9 @@ class WeightedMSELoss(nn.Module):
     
     def __init__(
         self, 
-        extreme_low_threshold: float = 0.05,
-        extreme_high_threshold: float = 0.95,
-        extreme_weight: float = 10.0,
+        extreme_low_threshold: float = 0.1,
+        extreme_high_threshold: float = 0.9,
+        extreme_weight: float = 5,
         reduction: str = 'mean'
     ):
         """
@@ -81,6 +81,11 @@ class HybridUsageLoss(nn.Module):
     
     For extreme values (near 0 or 1): uses classification loss
     For middle values: uses regression loss
+    
+    Classification uses CrossEntropyLoss over 3 mutually exclusive classes:
+        - Class 0: Low usage (SSE < extreme_low_threshold) - higher weight
+        - Class 1: Middle usage (extreme_low_threshold ≤ SSE ≤ extreme_high_threshold)
+        - Class 2: High usage (SSE > extreme_high_threshold) - higher weight
     """
     
     def __init__(
@@ -89,25 +94,98 @@ class HybridUsageLoss(nn.Module):
         extreme_high_threshold: float = 0.95,
         class_weight: float = 1.0,
         reg_weight: float = 0.1,
+        extreme_class_weight: float = 2.0,
         reduction: str = 'mean'
     ):
         """
         Args:
-            extreme_low_threshold: Values below this are classified as "zero"
-            extreme_high_threshold: Values above this are classified as "one"
+            extreme_low_threshold: Values below this are classified as "low" (class 0)
+            extreme_high_threshold: Values above this are classified as "high" (class 2)
             class_weight: Weight for classification loss
             reg_weight: Weight for regression loss
+            extreme_class_weight: Weight multiplier for extreme classes vs middle
             reduction: 'mean', 'sum', or 'none'
         """
         super().__init__()
-        self.extreme_low = extreme_low_threshold
-        self.extreme_high = extreme_high_threshold
+        
+        # Set instance attributes first
+        self.extreme_low_threshold = extreme_low_threshold
+        self.extreme_high_threshold = extreme_high_threshold
         self.class_weight = class_weight
         self.reg_weight = reg_weight
+        self.extreme_class_weight = extreme_class_weight
         self.reduction = reduction
         
-        self.bce = nn.BCEWithLogitsLoss(reduction='none')
+        # Create class weights: [low, middle, high]
+        # Give higher weight to extreme classes (0 and 2)
+        # Register as buffer so it moves to the correct device automatically
+        self.register_buffer(
+            'ce_class_weights',
+            torch.tensor([extreme_class_weight, 1.0, extreme_class_weight])
+        )
+        
+        # Note: We'll create CE loss in forward pass to ensure weights are on correct device
         self.mse = nn.MSELoss(reduction='none')
+    
+    def get_component_losses(
+        self,
+        regression_pred: torch.Tensor,
+        class_logits: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
+    ):
+        """
+        Get classification and regression losses separately.
+        
+        Args:
+            regression_pred: Regression predictions (batch, n_conditions)
+            class_logits: Classification logits (batch, n_conditions, 3)
+            target: Target values (batch, n_conditions)
+            mask: Optional mask (batch, n_conditions)
+        
+        Returns:
+            Tuple of (regression_loss, classification_loss)
+        """
+        # Create classification targets (class indices)
+        # Class 0: low (< extreme_low_threshold)
+        # Class 1: middle (>= extreme_low_threshold and <= extreme_high_threshold)
+        # Class 2: high (> extreme_high_threshold)
+        class_target = torch.zeros_like(target, dtype=torch.long)
+        class_target[target < self.extreme_low_threshold] = 0
+        class_target[(target >= self.extreme_low_threshold) & (target <= self.extreme_high_threshold)] = 1
+        class_target[target > self.extreme_high_threshold] = 2
+        
+        # Classification loss
+        # class_logits: (batch, n_conditions, 3)
+        # class_target: (batch, n_conditions)
+        # CrossEntropyLoss expects (N, C) and (N), so we need to reshape
+        batch_size, n_conditions, n_classes = class_logits.shape
+        class_logits_2d = class_logits.reshape(-1, n_classes)  # (batch*n_conditions, 3)
+        class_target_1d = class_target.reshape(-1)  # (batch*n_conditions)
+        
+        # Ensure class weights are on the same device as inputs
+        ce_weights = self.ce_class_weights.to(class_logits.device)
+        
+        # Use functional form with weights on correct device
+        class_loss = F.cross_entropy(
+            class_logits_2d, 
+            class_target_1d, 
+            weight=ce_weights,
+            reduction='none'
+        )  # (batch*n_conditions)
+        class_loss = class_loss.reshape(batch_size, n_conditions)  # (batch, n_conditions)
+        
+        # Regression loss (all positions)
+        # Clamp predictions to [0, 1] to prevent extreme values
+        regression_pred_clamped = torch.clamp(regression_pred, 0.0, 1.0)
+        reg_loss = self.mse(regression_pred_clamped, target)
+        
+        # Apply mask if provided
+        if mask is not None:
+            class_loss = class_loss * mask
+            reg_loss = reg_loss * mask
+        
+        return reg_loss, class_loss
     
     def forward(
         self,
@@ -118,39 +196,23 @@ class HybridUsageLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            regression_pred: Regression predictions for usage values (same shape as target)
-            class_logits: Classification logits [batch, ..., 3] for {is_zero, is_one, is_middle}
-            target: Target usage values
-            mask: Optional mask, 1=include, 0=exclude
+            regression_pred: Regression predictions for usage values (batch, n_conditions)
+            class_logits: Classification logits (batch, n_conditions, 3) for {low, middle, high}
+            target: Target usage values (batch, n_conditions)
+            mask: Optional mask, 1=include, 0=exclude (batch, n_conditions)
             
         Returns:
             Combined classification and regression loss
         """
-        # Create classification targets
-        is_zero = (target < self.extreme_low).float()
-        is_one = (target > self.extreme_high).float()
-        is_middle = ((target >= self.extreme_low) & (target <= self.extreme_high)).float()
-        
-        # Stack to get [batch, ..., 3]
-        class_target = torch.stack([is_zero, is_one, is_middle], dim=-1)
-        
-        # Classification loss (all positions)
-        class_loss = self.bce(class_logits, class_target)
-        class_loss = class_loss.mean(dim=-1)  # Average over 3 classes
-        
-        # Regression loss (only on middle values)
-        middle_mask = is_middle.bool()
-        reg_loss = self.mse(regression_pred, target)
-        
-        # Zero out regression loss where target is not middle
-        reg_loss = torch.where(middle_mask, reg_loss, torch.zeros_like(reg_loss))
+        reg_loss, class_loss = self.get_component_losses(
+            regression_pred, class_logits, target, mask
+        )
         
         # Combine losses
         total_loss = self.class_weight * class_loss + self.reg_weight * reg_loss
         
-        # Apply external mask if provided
+        # Apply external mask if provided (already applied in get_component_losses)
         if mask is not None:
-            total_loss = total_loss * mask
             n_elements = mask.sum()
         else:
             n_elements = total_loss.numel()

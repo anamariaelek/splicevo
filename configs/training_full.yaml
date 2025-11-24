@@ -44,8 +44,8 @@ training:
   weighted_mse_extreme_weight: 5.0     # Weight for errors in extreme values (weight for other values=1)
 
   # Hybrid loss parameters
-  hybrid_extreme_low: 0.05      # Values < 0.05 classified as "zero"
-  hybrid_extreme_high: 0.95     # Values > 0.95 classified as "one"
+  hybrid_extreme_low: 0.1       # Values < 0.1 classified as "zero"
+  hybrid_extreme_high: 0.9      # Values > 0.9 classified as "one"
   hybrid_class_weight: 0.8      # Weight for classification component
   hybrid_reg_weight: 0.2        # Weight for regression component
 

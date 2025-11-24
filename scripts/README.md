@@ -50,10 +50,10 @@ Modify the config file to specify parameters of the model to train. Then train t
 
 ```bash
 # The data to train on
-DATA_TRAIN_DIR="${OUT_DIR}/data_processing_brain/memmap_train"
+DATA_TRAIN_DIR="${OUT_DIR}/data_processing/memmap_train"
 
 # Where to save the model
-CHECKPOINT_DIR="${OUT_DIR}/models/brain_hybrid_"
+CHECKPOINT_DIR="${OUT_DIR}/models/resnet_hybridloss"
 
 python ${SPLICEVO_DIR}/scripts/splicevo_train.py \
     --config ${SPLICEVO_DIR}/configs/training_full.yaml \
@@ -102,16 +102,15 @@ Predict using a trained model (no normalization-stats needed for SSE):
 
 ```bash
 # The data to predict for
-DATA_TEST_DIR="${OUT_DIR}/data_processing_brain/memmap_test"
+DATA_TEST_DIR="${OUT_DIR}/data_processing/memmap_test"
 
 # Where the model checkpoint is located
-CHECKPOINT_DIR="${OUT_DIR}/models/brain_weightmse_"
+CHECKPOINT_DIR="${OUT_DIR}/models/resnet_hybridloss"
 
 # Where to save the predictions
-PREDICTIONS_DIR="${OUT_DIR}/predictions_brain_weightmse_"
+PREDICTIONS_DIR="${OUT_DIR}/predictions_resnet_hybridloss"
 
 # Predict from memmap directory and save as memmap
-# Note: --normalization-stats not needed for SSE-only models
 python ${SPLICEVO_DIR}/scripts/splicevo_predict.py \
     --checkpoint ${CHECKPOINT_DIR}/best_model.pt \
     --test-data ${DATA_TEST_DIR} \
