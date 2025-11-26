@@ -1,0 +1,39 @@
+{
+  "orthology_file": "/home/elek/projects/splicing/data/mazin/ortholog_groups.tsv",
+  "genomes": [
+    {
+      "genome_id": "human_GRCh37",
+      "genome_path": "/home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa.gz",
+      "gtf_path": "/home/elek/sds/sd17d003/Anamaria/genomes/mazin/gtf/Homo_sapiens.gtf.gz",
+      "chromosomes": ["19", "20", "21"],
+      "metadata": {
+        "species": "homo_sapiens",
+        "assembly": "GRCh37"
+      },
+      "common_name": "human"
+    },
+    {
+      "genome_id": "mouse_GRCm38",
+      "genome_path": "/home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa.gz",
+      "gtf_path": "/home/elek/sds/sd17d003/Anamaria/genomes/mazin/gtf/Mus_musculus.gtf.gz",
+      "chromosomes": ["17", "18", "19"],
+      "metadata": {
+        "species": "mus_musculus",
+        "assembly": "GRCm38"
+      },
+      "common_name": "mouse"
+    }
+  ],
+  "usage_files": {
+    "human_GRCh37": {
+      "pattern": "/home/elek/projects/splicing/results/spliser/Homo_sapiens/Human.{tissue}.{timepoint}.combined.tsv",
+      "tissues": ["Brain", "Cerebellum"],
+      "timepoints": [1, 5]
+    },
+    "mouse_GRCm38": {
+      "pattern": "/home/elek/projects/splicing/results/spliser/Mus_musculus/Mouse.{tissue}.{timepoint}.combined.tsv",
+      "tissues": ["Brain", "Cerebellum"],
+      "timepoints": [1, 5]
+    }
+  }
+}

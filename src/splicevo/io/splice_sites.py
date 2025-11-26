@@ -21,6 +21,7 @@ class SpliceSite:
     site_type: int  # 0=negative, 1=donor, 2=acceptor
     strand: str
     site_usage: Dict[str, float] = field(default_factory=dict)  # For site-specific extension
+    species_id: Optional[str] = None  # NEW: species identifier
 
     @classmethod
     def from_genomic_position(cls,

@@ -35,19 +35,22 @@ class MultiGenomeDataLoader:
         self.genomes: Dict[str, GenomeData] = {}
         self.loaded_data: List[SpliceSite] = []
         self.orthology_table: Optional[pd.DataFrame] = None
-        self.usage_data: Dict[str, Dict[str, pd.DataFrame]] = {}  # {genome_id: {condition_key: usage_df}}
-        self.usage_conditions: List[Dict[str, str]] = []  # List of condition metadata
-        self.condition_to_key: Dict[str, str] = {}  # Maps (tissue, timepoint) to condition_key
+        self.usage_data: Dict[str, Dict[str, pd.DataFrame]] = {}
+        self.usage_conditions: List[Dict[str, str]] = []
+        self.condition_to_key: Dict[str, str] = {}
+        self.genome_to_species: Dict[str, str] = {}  # Genome_id -> species mapping
+        self.species_to_id: Dict[str, int] = {}  # Species -> integer ID
         # Load orthology file if provided
         if orthology_file is not None:
             self._load_orthology_file(orthology_file)
-        
+    
     def add_genome(self, 
                    genome_id: str, 
                    genome_path: Union[str, Path], 
                    gtf_path: Union[str, Path],
                    chromosomes: Optional[List[str]] = None,
-                   metadata: Optional[Dict] = None) -> None:
+                   metadata: Optional[Dict] = None,
+                   common_name: Optional[str] = None) -> None:  # CHANGED: species -> common_name
         """
         Add a genome to the data loader.
         
@@ -57,9 +60,21 @@ class MultiGenomeDataLoader:
             gtf_path: Path to the GTF annotation file
             chromosomes: List of chromosomes to include (None for all)
             metadata: Additional metadata for the genome
+            common_name: Common species name (e.g., 'human', 'mouse')
         """
         if metadata is None:
             metadata = {}
+        
+        # Extract common_name from metadata if not provided
+        if common_name is None:
+            common_name = metadata.get('common_name', genome_id.split('_')[0])
+        
+        # Store species mapping
+        self.genome_to_species[genome_id] = common_name
+        
+        # Assign integer ID to species if not seen before
+        if common_name not in self.species_to_id:
+            self.species_to_id[common_name] = len(self.species_to_id)
             
         self.genomes[genome_id] = GenomeData(
             genome_id=genome_id,
@@ -160,6 +175,7 @@ class MultiGenomeDataLoader:
                     continue
                     
                 chrom = transcript.exons.iloc[0]['chrom']
+                species = self.genome_to_species.get(genome_id, genome_id)
                 
                 # Collect donor sites in bulk
                 for donor_pos in transcript.splice_donor_sites:
@@ -172,7 +188,8 @@ class MultiGenomeDataLoader:
                         'position': donor_pos,
                         'site_type': 1,  # donor
                         'strand': transcript.strand,
-                        'site_usage': usage_stats
+                        'site_usage': usage_stats,
+                        'species_id': species
                     })
                     
                 # Collect acceptor sites in bulk
@@ -186,7 +203,8 @@ class MultiGenomeDataLoader:
                         'position': acceptor_pos,
                         'site_type': 2,  # acceptor
                         'strand': transcript.strand,
-                        'site_usage': usage_stats
+                        'site_usage': usage_stats,
+                        'species_id': species
                     })
             
             # Bulk extend instead of individual appends
@@ -248,7 +266,9 @@ class MultiGenomeDataLoader:
             max_transcripts_per_genome: Maximum transcripts per genome
             n_jobs: Number of parallel jobs (None for auto-detection)
         """
-        self.loaded_data = []
+        # CHANGED: Don't reset loaded_data, append to it instead
+        # OLD: self.loaded_data = []
+        # NEW: Keep existing loaded_data if any
         
         for genome_id in self.genomes:
             # Load all splice sites
@@ -515,7 +535,7 @@ class MultiGenomeDataLoader:
                              window_size: int,
                              context_size: int,
                              total_window: int,
-                             genome_cache: Optional[Dict] = None) -> Tuple[List[np.ndarray], List[np.ndarray], Dict[str, List[np.ndarray]], List[Dict]]:
+                             genome_cache: Optional[Dict] = None) -> Tuple[List[np.ndarray], List[np.ndarray], Dict[str, List[np.ndarray]], List[Dict], List[int]]:
         """
         Process windows for a single gene (parallelizable).
         
@@ -523,14 +543,20 @@ class MultiGenomeDataLoader:
             genome_cache: Optional pre-loaded genome to avoid repeated loading
         
         Returns:
-            Tuple of (sequences, labels, usage_dict, metadata_rows)
+            Tuple of (sequences, labels, usage_dict, metadata_rows, species_ids)
         """
         nuc_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
         
+        # Initialize ALL return values at the start to handle early returns
         sequences = []
         labels_list = []
         usage_dict = {'alpha': [], 'beta': [], 'sse': []}
         metadata_rows = []
+        species_ids = []  # MOVED: Initialize here before any early returns
+        
+        # Get species ID for this genome
+        species = self.genome_to_species.get(genome_id, genome_id)
+        species_id = self.species_to_id[species]
         
         # Use cached genome if available, otherwise load it
         if genome_cache is not None and genome_id in genome_cache:
@@ -567,7 +593,7 @@ class MultiGenomeDataLoader:
         try:
             seq = genome.get_seq(chrom, actual_start + 1, actual_end, strand == '-')
         except Exception:
-            return sequences, labels_list, usage_dict, metadata_rows
+            return sequences, labels_list, usage_dict, metadata_rows, species_ids  # species_ids now defined
         
         # Ensure seq is a string
         if not isinstance(seq, str):
@@ -656,6 +682,7 @@ class MultiGenomeDataLoader:
             usage_dict['alpha'].append(usage_alpha)
             usage_dict['beta'].append(usage_beta)
             usage_dict['sse'].append(usage_sse)
+            species_ids.append(species_id)
 
             # Create metadata for this window
             metadata_row = {
@@ -666,11 +693,13 @@ class MultiGenomeDataLoader:
                 'window_start': window_center_genomic_start,
                 'window_end': window_center_genomic_end,
                 'n_donor_sites': n_donor_sites,
-                'n_acceptor_sites': n_acceptor_sites
+                'n_acceptor_sites': n_acceptor_sites,
+                'species': species,
+                'species_id': species_id
             }
             metadata_rows.append(metadata_row)
         
-        return sequences, labels_list, usage_dict, metadata_rows
+        return sequences, labels_list, usage_dict, metadata_rows, species_ids
 
     def to_arrays(self,
                   window_size: int = 1000,
@@ -678,7 +707,7 @@ class MultiGenomeDataLoader:
                   alpha_threshold: Optional[int] = None,
                   n_workers: Optional[int] = None,
                   use_parallel: bool = True,
-                  save_memmap: Optional[Union[str, Path]] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
+                  save_memmap: Optional[Union[str, Path]] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame, np.ndarray]:
         """
         Convert loaded data to arrays for ML training.
         
@@ -691,7 +720,7 @@ class MultiGenomeDataLoader:
             save_memmap: Optional path to save arrays as memmap files
         
         Returns:
-            Tuple of (sequences, labels, usage_arrays, metadata_df)
+            Tuple of (sequences, labels, usage_arrays, metadata_df, species_ids)
         """
         if not self.loaded_data:
             raise ValueError("No data loaded. Call load_all_genomes_data() first.")
@@ -764,6 +793,7 @@ class MultiGenomeDataLoader:
             seq_shape = (total_windows, total_window, 4)
             label_shape = (total_windows, window_size)
             usage_shape = (total_windows, window_size, n_conditions)
+            species_shape = (total_windows,)  # NEW: shape for species IDs
             
             print(f"Pre-allocating memmap arrays in {save_memmap}")
             sequences = np.memmap(
@@ -778,6 +808,14 @@ class MultiGenomeDataLoader:
                 dtype=np.int8,
                 mode='w+',
                 shape=label_shape
+            )
+            
+            # NEW: Create species_ids memmap
+            species_ids = np.memmap(
+                save_memmap / 'species_ids.mmap',
+                dtype=np.int32,
+                mode='w+',
+                shape=species_shape
             )
             
             usage_arrays = {
@@ -818,6 +856,7 @@ class MultiGenomeDataLoader:
             all_labels = []
             all_usage = {'alpha': [], 'beta': [], 'sse': []}
             all_metadata_rows = []
+            all_species_ids = []  # Already exists
 
         for genome_id in loaded_genomes:
             print(f"Processing genome {genome_id}...")
@@ -860,15 +899,15 @@ class MultiGenomeDataLoader:
                                      unit="gene",
                                      mininterval=0.5):
                         try:
-                            seq_list, lbl_list, usage_dict, metadata_rows = future.result(timeout=120)
+                            seq_list, lbl_list, usage_dict, metadata_rows, sp_ids = future.result(timeout=120)
                             
                             if save_memmap:
-                                # Write incrementally to memmap
                                 n_windows = len(seq_list)
                                 if n_windows > 0:
                                     end_idx = current_idx + n_windows
                                     sequences[current_idx:end_idx] = np.array(seq_list, dtype=np.float32)
                                     labels[current_idx:end_idx] = np.array(lbl_list, dtype=np.int8)
+                                    species_ids[current_idx:end_idx] = np.array(sp_ids, dtype=np.int32)
                                     
                                     for key in ['alpha', 'beta', 'sse']:
                                         usage_arrays[key][current_idx:end_idx] = np.array(usage_dict[key], dtype=np.float32)
@@ -880,6 +919,7 @@ class MultiGenomeDataLoader:
                                     if current_idx % 100 < n_windows:
                                         sequences.flush()
                                         labels.flush()
+                                        species_ids.flush()
                                         for key in usage_arrays:
                                             usage_arrays[key].flush()
                             else:
@@ -890,6 +930,7 @@ class MultiGenomeDataLoader:
                                 all_usage['beta'].extend(usage_dict['beta'])
                                 all_usage['sse'].extend(usage_dict['sse'])
                                 all_metadata_rows.extend(metadata_rows)
+                                all_species_ids.extend(sp_ids)
                                 
                         except Exception as e:
                             gene_id = future_to_gene[future]
@@ -900,7 +941,7 @@ class MultiGenomeDataLoader:
                                                        desc=f"  {genome_id} genes",
                                                        unit="gene"):
                     try:
-                        seq_list, lbl_list, usage_dict, metadata_rows = self._process_gene_windows(
+                        seq_list, lbl_list, usage_dict, metadata_rows, sp_ids = self._process_gene_windows( 
                             genome_id, gene_id, df_gene,
                             splice_site_index, condition_to_idx, n_conditions,
                             window_size, context_size, total_window,
@@ -914,6 +955,7 @@ class MultiGenomeDataLoader:
                                 end_idx = current_idx + n_windows
                                 sequences[current_idx:end_idx] = np.array(seq_list, dtype=np.float32)
                                 labels[current_idx:end_idx] = np.array(lbl_list, dtype=np.int8)
+                                species_ids[current_idx:end_idx] = np.array(sp_ids, dtype=np.int32)
                                 
                                 for key in ['alpha', 'beta', 'sse']:
                                     usage_arrays[key][current_idx:end_idx] = np.array(usage_dict[key], dtype=np.float32)
@@ -928,6 +970,7 @@ class MultiGenomeDataLoader:
                             all_usage['beta'].extend(usage_dict['beta'])
                             all_usage['sse'].extend(usage_dict['sse'])
                             all_metadata_rows.extend(metadata_rows)
+                            all_species_ids.extend(sp_ids)
                             
                     except Exception as e:
                         print(f"Warning: Failed to process gene {gene_id}: {e}")
@@ -938,6 +981,7 @@ class MultiGenomeDataLoader:
             print("Flushing memmap arrays...")
             sequences.flush()
             labels.flush()
+            species_ids.flush()
             for key in usage_arrays:
                 usage_arrays[key].flush()
             
@@ -948,12 +992,15 @@ class MultiGenomeDataLoader:
                 'sequences_shape': list(sequences.shape),
                 'labels_shape': list(labels.shape),
                 'usage_shape': list(usage_arrays['alpha'].shape),
+                'species_ids_shape': [n_samples],
                 'sequences_dtype': 'float32',
                 'labels_dtype': 'int8',
                 'usage_dtype': 'float32',
+                'species_ids_dtype': 'int32',
                 'window_size': window_size,
                 'context_size': context_size,
-                'n_conditions': n_conditions
+                'n_conditions': n_conditions,
+                'species_mapping': self.species_to_id
             }
             
             with open(save_memmap / 'metadata.json', 'w') as f:
@@ -966,6 +1013,7 @@ class MultiGenomeDataLoader:
             print("Converting to numpy arrays...")
             sequences = np.array(all_sequences, dtype=np.float32)
             labels = np.array(all_labels, dtype=np.int8)
+            species_ids = np.array(all_species_ids, dtype=np.int32)
             usage_arrays = {
                 'alpha': np.array(all_usage['alpha'], dtype=np.float32),
                 'beta': np.array(all_usage['beta'], dtype=np.float32),
@@ -992,15 +1040,18 @@ class MultiGenomeDataLoader:
         
         # Validation
         assert labels.shape[0] == n_samples, "Labels shape mismatch"
+        assert species_ids.shape[0] == n_samples, "Species IDs shape mismatch"
         assert usage_arrays['alpha'].shape[0] == n_samples, "Usage arrays shape mismatch"
         assert len(metadata) == n_samples, "Metadata mismatch"
 
         print(f"Created {n_samples} windowed examples")
         print(f"  Sequence shape: {sequences.shape}")
         print(f"  Labels shape: {labels.shape}")
+        print(f"  Species IDs shape: {species_ids.shape}") 
         print(f"  Usage arrays shape: {usage_arrays['alpha'].shape}")
-        print(f"  Total donor sites: {(labels == 1).sum()}")
-        print(f"  Total acceptor sites: {(labels == 2).sum()}")
-        print(f"  Total no-site positions: {(labels == 0).sum()}")
+        print(f"  Species distribution:")
+        for species, sp_id in sorted(self.species_to_id.items(), key=lambda x: x[1]):
+            count = (species_ids == sp_id).sum() if isinstance(species_ids, np.ndarray) else sum(1 for x in species_ids if x == sp_id)
+            print(f"    {species} (ID={sp_id}): {count} windows")
         
-        return sequences, labels, usage_arrays, metadata
+        return sequences, labels, usage_arrays, metadata, species_ids

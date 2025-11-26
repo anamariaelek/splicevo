@@ -421,14 +421,14 @@ class SpliceTrainer:
         self.optimizer.zero_grad()
         
         for batch_idx, batch in enumerate(self.train_loader):
-            # Efficient transfer to device (non-blocking for memmap data)
             sequences = batch['sequences'].to(self.device, non_blocking=self.non_blocking)
             splice_labels = batch['splice_labels'].to(self.device, non_blocking=self.non_blocking)
             usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
+            species_ids = batch['species_id'].to(self.device, non_blocking=self.non_blocking)
             
             # Forward pass with mixed precision
             with torch.amp.autocast('cuda', enabled=self.use_amp):
-                output = self.model(sequences)
+                output = self.model(sequences, species_ids=species_ids)
                 
                 # Compute splice classification loss
                 splice_logits = output['splice_logits']
@@ -746,10 +746,11 @@ class SpliceTrainer:
                 sequences = batch['sequences'].to(self.device, non_blocking=self.non_blocking)
                 splice_labels = batch['splice_labels'].to(self.device, non_blocking=self.non_blocking)
                 usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
+                species_ids = batch['species_id'].to(self.device, non_blocking=self.non_blocking)  # NEW
                 
                 # Forward pass with mixed precision
                 with torch.amp.autocast('cuda', enabled=self.use_amp):
-                    output = self.model(sequences)
+                    output = self.model(sequences, species_ids=species_ids)
                     
                     # Compute losses (same as training)
                     splice_logits = output['splice_logits']

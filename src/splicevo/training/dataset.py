@@ -14,7 +14,8 @@ class SpliceDataset(Dataset):
         self,
         sequences: Union[np.ndarray, np.memmap],
         splice_labels: Union[np.ndarray, np.memmap],
-        usage_sse: Optional[Union[np.ndarray, np.memmap]] = None
+        usage_sse: Optional[Union[np.ndarray, np.memmap]] = None,
+        species_ids: Optional[Union[np.ndarray, np.memmap]] = None
     ):
         """
         Initialize dataset.
@@ -23,10 +24,12 @@ class SpliceDataset(Dataset):
             sequences: One-hot encoded sequences (n_samples, seq_len, 4)
             splice_labels: Splice site labels (n_samples, seq_len)
             usage_sse: SSE values (n_samples, seq_len, n_conditions) or None
+            species_ids: Species IDs (n_samples,) or None
         """
         self.sequences = sequences
         self.splice_labels = splice_labels
         self.usage_sse = usage_sse
+        self.species_ids = species_ids
         
         # Validate shapes
         assert len(self.sequences) == len(self.splice_labels), \
@@ -35,6 +38,10 @@ class SpliceDataset(Dataset):
         if self.usage_sse is not None:
             assert len(self.sequences) == len(self.usage_sse), \
                 "Sequences and usage must have same length"
+        
+        if self.species_ids is not None:
+            assert len(self.sequences) == len(self.species_ids), \
+                "Sequences and species IDs must have same length"
     
     def __len__(self):
         return len(self.sequences)
@@ -57,10 +64,17 @@ class SpliceDataset(Dataset):
             # Create dummy tensor if no usage data
             usage_targets = torch.zeros((sequences.shape[0], 1), dtype=torch.float32)
         
+        # Add species ID
+        if self.species_ids is not None:
+            species_id = torch.tensor(self.species_ids[idx], dtype=torch.long)
+        else:
+            species_id = torch.tensor(0, dtype=torch.long)
+        
         return {
             'sequences': sequences,
             'splice_labels': splice_labels,
-            'usage_targets': usage_targets
+            'usage_targets': usage_targets,
+            'species_id': species_id
         }
     
     @classmethod

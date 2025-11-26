@@ -123,6 +123,8 @@ def load_data(config: dict, log_fn=print):
 
     sequences = labels = None
     usage_sse = None
+    species_ids = None
+    species_mapping = {}
 
     if use_mmap:
         # Resolve mmap directory from config path
@@ -138,6 +140,7 @@ def load_data(config: dict, log_fn=print):
         seq_file = mmap_dir / 'sequences.mmap'
         lbl_file = mmap_dir / 'labels.mmap'
         sse_file = mmap_dir / 'usage_sse.mmap'
+        species_file = mmap_dir / 'species_ids.mmap'
 
         # Check if memmap files exist
         if not (seq_file.exists() and lbl_file.exists()):
@@ -172,6 +175,24 @@ def load_data(config: dict, log_fn=print):
             else:
                 log_fn("No SSE array file found. Usage prediction will be disabled.")
                 usage_sse = None
+
+            # Load species IDs if available
+            species_file = mmap_dir / 'species_ids.mmap'
+            if species_file.exists():
+                species_ids = np.memmap(
+                    species_file,
+                    dtype=np.dtype(meta.get('species_ids_dtype', 'int32')),
+                    mode='r',
+                    shape=tuple(meta.get('species_ids_shape', [meta['sequences_shape'][0]]))
+                )
+                log_fn(f"  Species IDs shape: {species_ids.shape}")
+                
+                # Load species mapping
+                species_mapping = meta.get('species_mapping', {})
+                log_fn(f"  Species mapping: {species_mapping}")
+            else:
+                species_ids = None
+                species_mapping = {}
         else:
             raise FileNotFoundError(f"Memmap files not found in {mmap_dir}.")
 
@@ -187,7 +208,23 @@ def load_data(config: dict, log_fn=print):
                 usage_sse = data['usage_sse']
             else:
                 usage_sse = None
-    
+            
+            # Load species IDs if available
+            if 'species_ids' in data:
+                species_ids = data['species_ids']
+                log_fn(f"  Species IDs shape: {species_ids.shape}")
+            else:
+                species_ids = None
+        
+        # Try to load species mapping from metadata
+        metadata_path = data_path.parent / 'metadata.json'
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                meta = json.load(f)
+                species_mapping = meta.get('species_mapping', {})
+        else:
+            species_mapping = {}
+
     # Check if SSE is available and log once
     if usage_sse is None:
         log_fn("No SSE array loaded, training without usage prediction.")
@@ -210,10 +247,10 @@ def load_data(config: dict, log_fn=print):
     else:
         log_fn("  No SSE array present.")
 
-    return sequences, labels, usage_sse, None
+    return sequences, labels, usage_sse, None, species_ids, species_mapping  # NEW
 
 
-def create_datasets(sequences, labels, usage_sse, config: dict, log_fn=print):
+def create_datasets(sequences, labels, usage_sse, species_ids, config: dict, log_fn=print):  # NEW: species_ids
     """Create train/val datasets."""
     split_ratio = config['data'].get('train_split', 0.8)
     n_samples = len(sequences)
@@ -221,23 +258,23 @@ def create_datasets(sequences, labels, usage_sse, config: dict, log_fn=print):
     
     log_fn(f"\nSplitting data: {n_train} train, {n_samples - n_train} val")
     
-    if usage_sse is not None:
-        train_sse = usage_sse[:n_train]
-        val_sse = usage_sse[n_train:]
-    else:
-        train_sse = None
-        val_sse = None
+    train_sse = usage_sse[:n_train] if usage_sse is not None else None
+    val_sse = usage_sse[n_train:] if usage_sse is not None else None
+    train_species = species_ids[:n_train] if species_ids is not None else None  # NEW
+    val_species = species_ids[n_train:] if species_ids is not None else None  # NEW
 
     train_dataset = SpliceDataset(
         sequences[:n_train],
         labels[:n_train],
-        train_sse
+        train_sse,
+        train_species  # NEW
     )
     
     val_dataset = SpliceDataset(
         sequences[n_train:],
         labels[n_train:],
-        val_sse
+        val_sse,
+        val_species  # NEW
     )
     
     return train_dataset, val_dataset
@@ -267,7 +304,7 @@ def compute_class_weights(labels, config: dict, log_fn=print):
     return class_weights
 
 
-def create_model(config: dict, usage_sse: Optional[np.ndarray], log_fn=print):
+def create_model(config: dict, usage_sse: Optional[np.ndarray], species_mapping: Dict[str, int], log_fn=print):  # NEW: species_mapping
     """Create model from config and return model with usage info."""
     model_config = config['model']
     training_config = config['training']
@@ -282,6 +319,8 @@ def create_model(config: dict, usage_sse: Optional[np.ndarray], log_fn=print):
     # Get usage loss type from training config
     usage_loss_type = training_config.get('usage_loss_type', 'weighted_mse')
     
+    n_species = len(species_mapping) if species_mapping else 1  # NEW
+    
     model_params = {
         'embed_dim': model_config.get('embed_dim', 128),
         'num_resblocks': model_config.get('num_resblocks', 8),
@@ -291,7 +330,9 @@ def create_model(config: dict, usage_sse: Optional[np.ndarray], log_fn=print):
         'n_conditions': n_conditions,
         'context_len': model_config.get('context_len', 4500),
         'dropout': model_config.get('dropout', 0.5),
-        'usage_loss_type': usage_loss_type
+        'usage_loss_type': usage_loss_type,
+        'n_species': n_species,  # NEW
+        'species_embed_dim': model_config.get('species_embed_dim', 16)  # NEW
     }
     model = SplicevoModel(**model_params)
     
@@ -303,8 +344,10 @@ def create_model(config: dict, usage_sse: Optional[np.ndarray], log_fn=print):
     log_fn(f"  num_classes: {model_params['num_classes']}")
     log_fn(f"  n_conditions: {model_params['n_conditions']}")
     log_fn(f"  usage_loss_type: {usage_loss_type}")
-    if usage_loss_type == 'hybrid':
-        log_fn(f"    -> Classification head added for hybrid loss")
+    log_fn(f"  n_species: {model_params['n_species']}")  # NEW
+    if n_species > 1:
+        log_fn(f"  species_embed_dim: {model_params['species_embed_dim']}")
+        log_fn(f"  species_mapping: {species_mapping}")
     
     # Return model and n_conditions for trainer setup
     return model, n_conditions
@@ -432,7 +475,7 @@ def main():
     
     # Load and normalize data
     data_start = time.time()
-    sequences, labels, usage_sse, usage_stats = load_data(
+    sequences, labels, usage_sse, usage_stats, species_ids, species_mapping = load_data(  # NEW
         config, log_print
     )
     data_time = time.time() - data_start
@@ -466,7 +509,7 @@ def main():
     # Create datasets
     dataset_start = time.time()
     train_dataset, val_dataset = create_datasets(
-        sequences, labels, usage_sse, config, log_print
+        sequences, labels, usage_sse, species_ids, config, log_print  # NEW: species_ids
     )
     dataset_time = time.time() - dataset_start
     
@@ -476,7 +519,7 @@ def main():
     
     # Create model (pass usage_sse to determine n_conditions)
     model_start = time.time()
-    model, n_conditions = create_model(config, usage_sse, log_print)
+    model, n_conditions = create_model(config, usage_sse, species_mapping, log_print)  # NEW: species_mapping
     model_time = time.time() - model_start
     
     # Create dataloaders

@@ -66,7 +66,10 @@ class EncoderModule(nn.Module):
                  add_output_heads: bool = True,
                  context_len: int = 4500,
                  dropout: float = 0.0,
-                 usage_loss_type: str = 'weighted_mse'):
+                 usage_loss_type: str = 'weighted_mse',
+                 n_species: int = 1,  # NEW
+                 species_embed_dim: int = 16  # NEW
+        ):
         """
         Initialize encoder module.
         
@@ -87,10 +90,25 @@ class EncoderModule(nn.Module):
         self.add_output_heads = add_output_heads
         self.context_len = context_len
         self.usage_loss_type = usage_loss_type
+        self.n_species = n_species  # NEW
+        self.species_embed_dim = species_embed_dim  # NEW
+        
+        # NEW: Species embedding
+        if n_species > 1:
+            self.species_embedding = nn.Embedding(n_species, species_embed_dim)
+            input_channels = 4 + species_embed_dim  # DNA + species
+        else:
+            self.species_embedding = None
+            input_channels = 4
         
         # Initial convolution to project from one-hot (4 channels) to embed_dim
         # Use padding=7 to keep sequence length unchanged (for kernel_size=15)
-        self.input_conv = nn.Conv1d(4, embed_dim, kernel_size=15, padding=7)
+        self.initial_conv = nn.Conv1d(
+            in_channels=input_channels,  # CHANGED from 4
+            out_channels=embed_dim,
+            kernel_size=7,
+            padding=3
+        )
 
         # Don't use batchnorm after first layer convolution, somehow it ruins interpretability 
         # self.input_bn = nn.BatchNorm1d(embed_dim)
@@ -220,13 +238,14 @@ class EncoderModule(nn.Module):
         else:
             raise ValueError(f"Unknown dilation strategy: {strategy}")
         
-    def forward(self, sequences, return_features: bool = False):
+    def forward(self, sequences, species_ids=None, return_features: bool = False):  # NEW: species_ids parameter
         """
         Forward pass through encoder.
         
         Args:
             sequences: One-hot encoded DNA sequences of shape (batch_size, seq_len, 4)
                       Expected format: [context_len | central_region | context_len]
+            species_ids: Species IDs (batch,) - integer species identifiers
             return_features: Whether to return intermediate features
             
         Returns:
@@ -242,11 +261,24 @@ class EncoderModule(nn.Module):
             If add_output_heads=False:
                 Central region features of shape (batch_size, central_len, embed_dim)
         """
-        # Transpose for conv1d: (batch_size, 4, seq_len)
+        batch_size, seq_len, _ = sequences.shape
+        
+        # NEW: Add species embedding if available
+        if self.species_embedding is not None and species_ids is not None:
+            # Get species embeddings (batch, species_embed_dim)
+            species_emb = self.species_embedding(species_ids)
+            
+            # Tile across sequence length (batch, seq_len, species_embed_dim)
+            species_emb_tiled = species_emb.unsqueeze(1).expand(-1, seq_len, -1)
+            
+            # Concatenate with DNA sequence (batch, seq_len, 4 + species_embed_dim)
+            sequences = torch.cat([sequences, species_emb_tiled], dim=-1)
+        
+        # Conv1d expects (batch, channels, length)
         x = sequences.transpose(1, 2)
         
         # Project from 4 channels to embed_dim
-        x = self.input_conv(x)
+        x = self.initial_conv(x)
         # Don't use batchnorm after first layer convolution, somehow ruins interpretability
         # x = self.input_bn(x)
         x = self.input_relu(x)
@@ -353,7 +385,10 @@ class SplicevoModel(nn.Module):
                  n_conditions: int = 5,
                  context_len: int = 4500,
                  dropout: float = 0.3,
-                 usage_loss_type: str = 'weighted_mse'):
+                 usage_loss_type: str = 'weighted_mse',
+                 n_species: int = 1,  # NEW
+                 species_embed_dim: int = 16  # NEW
+        ):
         """
         Initialize model with encoder for splice site and SSE prediction.
         
@@ -377,7 +412,9 @@ class SplicevoModel(nn.Module):
             add_output_heads=True,
             context_len=context_len,
             dropout=dropout,
-            usage_loss_type=usage_loss_type
+            usage_loss_type=usage_loss_type,
+            n_species=n_species,  # NEW
+            species_embed_dim=species_embed_dim  # NEW
         )
         
     def forward(self, sequences, return_features: bool = False):

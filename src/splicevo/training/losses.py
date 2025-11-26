@@ -79,13 +79,12 @@ class HybridUsageLoss(nn.Module):
     """
     Hybrid loss for usage prediction combining classification and regression.
     
-    For extreme values (near 0 or 1): uses classification loss
-    For middle values: uses regression loss
-    
     Classification uses CrossEntropyLoss over 3 mutually exclusive classes:
-        - Class 0: Low usage (SSE < extreme_low_threshold) - higher weight
+        - Class 0: Low usage (SSE < extreme_low_threshold)
         - Class 1: Middle usage (extreme_low_threshold ≤ SSE ≤ extreme_high_threshold)
-        - Class 2: High usage (SSE > extreme_high_threshold) - higher weight
+        - Class 2: High usage (SSE > extreme_high_threshold)
+
+    Regression uses MSELoss over all positions.
     """
     
     def __init__(
@@ -99,8 +98,8 @@ class HybridUsageLoss(nn.Module):
     ):
         """
         Args:
-            extreme_low_threshold: Values below this are classified as "low" (class 0)
-            extreme_high_threshold: Values above this are classified as "high" (class 2)
+            extreme_low_threshold: Values below this are classified as "low"
+            extreme_high_threshold: Values above this are classified as "high"
             class_weight: Weight for classification loss
             reg_weight: Weight for regression loss
             extreme_class_weight: Weight multiplier for extreme classes vs middle
@@ -117,14 +116,13 @@ class HybridUsageLoss(nn.Module):
         self.reduction = reduction
         
         # Create class weights: [low, middle, high]
-        # Give higher weight to extreme classes (0 and 2)
+        # Give higher weight to extreme classes (low and high)
         # Register as buffer so it moves to the correct device automatically
         self.register_buffer(
             'ce_class_weights',
             torch.tensor([extreme_class_weight, 1.0, extreme_class_weight])
         )
         
-        # Note: We'll create CE loss in forward pass to ensure weights are on correct device
         self.mse = nn.MSELoss(reduction='none')
     
     def get_component_losses(
@@ -174,11 +172,9 @@ class HybridUsageLoss(nn.Module):
             reduction='none'
         )  # (batch*n_conditions)
         class_loss = class_loss.reshape(batch_size, n_conditions)  # (batch, n_conditions)
-        
+
         # Regression loss (all positions)
-        # Clamp predictions to [0, 1] to prevent extreme values
-        regression_pred_clamped = torch.clamp(regression_pred, 0.0, 1.0)
-        reg_loss = self.mse(regression_pred_clamped, target)
+        reg_loss = self.mse(regression_pred, target)
         
         # Apply mask if provided
         if mask is not None:

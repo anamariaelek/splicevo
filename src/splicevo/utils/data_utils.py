@@ -35,6 +35,13 @@ def load_processed_data(fn):
         else:
             beta = None
 
+        # Load species IDs if available
+        if 'species_ids' in test_data.keys():
+            species_ids = test_data['species_ids']
+            print(f"Species IDs shape: {species_ids.shape}")
+        else:
+            species_ids = None
+
     elif os.path.isdir(fn):
         # Load mmap files
         mmap_dir = os.path.abspath(fn)
@@ -99,13 +106,26 @@ def load_processed_data(fn):
             else:
                 beta = None
             
+            # Load species IDs if available
+            species_file = os.path.join(mmap_dir, 'species_ids.mmap')
+            if os.path.exists(species_file):
+                species_ids = np.memmap(
+                    species_file,
+                    dtype=np.dtype(meta.get('species_ids_dtype', 'int32')),
+                    mode='r',
+                    shape=tuple(meta.get('species_ids_shape', [meta['sequences_shape'][0]]))
+                )
+                print(f"Species IDs shape: {species_ids.shape}")
+            else:
+                species_ids = None
+            
         else:
             raise FileNotFoundError(f"Memmap files not found in {mmap_dir}.")
         
     else:
         raise ValueError("Unknown file format")
     
-    return sequences, labels, alpha, beta, sse
+    return sequences, labels, alpha, beta, sse, species_ids
 
 def load_predictions(fn, keys=None):
     
