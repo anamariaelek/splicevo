@@ -11,10 +11,10 @@
 #
 
 set -e  # Exit on error
-
+``
 # Configuration - MODIFY THESE
-SPLICEVO_DIR="/home/elek/projects/splicevo"
-OUT_DIR="/home/elek/projects/splicing/results"
+SPLICEVO_DIR="/home/hd/hd_hd/hd_mf354/projects/splicevo"
+OUT_DIR="/home/hd/hd_hd/hd_mf354/projects/splicing/results"
 
 # Config files
 DATA_CONFIG="${SPLICEVO_DIR}/configs/data_human_mouse.json"
@@ -29,22 +29,25 @@ MODEL_DIR="${OUT_DIR}/models/resnet_hybridloss"
 PREDICTIONS_DIR="${OUT_DIR}/predictions/resnet_hybridloss"
 
 # SLURM job parameters
-PARTITION="cpu-single"  # Change to your partition name
+PARTITION_CPU="cpu-single"  # Change to your partition name
+PARTITION_GPU="gpu-single"  # Change to your GPU partition name
 ACCOUNT=""  # Change if needed
 TIME_LOAD="24:00:00"
 TIME_SPLIT="24:00:00"
 TIME_TRAIN="72:00:00"
 TIME_PREDICT="12:00:00"
-MEM_LOAD="64G"
+MEM_LOAD="256G"
 MEM_SPLIT="128G"
 MEM_TRAIN="128G"
 MEM_PREDICT="32G"
-CPUS_LOAD="16"
-CPUS_SPLIT="4"
+CPUS_LOAD="2"
+CPUS_SPLIT="1"
 CPUS_TRAIN="8"
 CPUS_PREDICT="4"
 GPUS_TRAIN="1"
+NTASKS_PER_NODE_TRAIN="10"
 GPUS_PREDICT="1"
+NTASKS_PER_NODE_PREDICT="10"
 
 # Split parameters
 POV_GENOME="human_GRCh37"
@@ -137,21 +140,25 @@ if [[ "$START_FROM" == "load" ]]; then
 #SBATCH --job-name=splicevo_load
 #SBATCH --output=${LOG_DIR}/load_%j.out
 #SBATCH --error=${LOG_DIR}/load_%j.err
-#SBATCH --partition=${PARTITION}
+#SBATCH --partition=${PARTITION_CPU}
 #SBATCH --time=${TIME_LOAD}
 #SBATCH --mem=${MEM_LOAD}
 #SBATCH --cpus-per-task=${CPUS_LOAD}
 $([ -n "$ACCOUNT" ] && echo "#SBATCH --account=${ACCOUNT}")
 
 set -e
+
+# Initialize conda for bash shell
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+
+# Activate conda environment
+conda activate splicevo
+
 echo "Starting data load job at \$(date)"
 echo "Loading data from: ${DATA_CONFIG}"
 echo "Output directory: ${LOAD_DIR}"
 
-python ${SPLICEVO_DIR}/scripts/data_load.py \\
-    --config ${DATA_CONFIG} \\
-    --output_dir ${LOAD_DIR} \\
-    --n_cpus ${CPUS_LOAD}
+python ${SPLICEVO_DIR}/scripts/data_load.py --config ${DATA_CONFIG} --output_dir ${LOAD_DIR} --n_cpus ${CPUS_LOAD} --sequential
 
 echo "Data load completed at \$(date)"
 EOF
@@ -173,26 +180,25 @@ if [[ "$START_FROM" =~ ^(load|split)$ ]]; then
 #SBATCH --job-name=splicevo_split
 #SBATCH --output=${LOG_DIR}/split_%j.out
 #SBATCH --error=${LOG_DIR}/split_%j.err
-#SBATCH --partition=${PARTITION}
+#SBATCH --partition=${PARTITION_CPU}
 #SBATCH --time=${TIME_SPLIT}
 #SBATCH --mem=${MEM_SPLIT}
 #SBATCH --cpus-per-task=${CPUS_SPLIT}
 $([ -n "$ACCOUNT" ] && echo "#SBATCH --account=${ACCOUNT}")
 
 set -e
+
+# Initialize conda for bash shell
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+
+# Activate conda environment
+conda activate splicevo
+
 echo "Starting data split job at \$(date)"
 echo "Input directory: ${LOAD_DIR}"
 echo "Output directory: ${SPLIT_DIR}"
 
-python ${SPLICEVO_DIR}/scripts/data_split.py \\
-    --input_dir ${LOAD_DIR} \\
-    --output_dir ${SPLIT_DIR} \\
-    --n_cpus ${CPUS_SPLIT} \\
-    --pov_genome ${POV_GENOME} \\
-    --test_chromosomes ${TEST_CHROMOSOMES} \\
-    --window_size ${WINDOW_SIZE} \\
-    --context_size ${CONTEXT_SIZE} \\
-    --alpha_threshold ${ALPHA_THRESHOLD}
+python ${SPLICEVO_DIR}/scripts/data_split.py --input_dir ${LOAD_DIR} --output_dir ${SPLIT_DIR} --n_cpus ${CPUS_SPLIT} --pov_genome ${POV_GENOME} --test_chromosomes ${TEST_CHROMOSOMES} --window_size ${WINDOW_SIZE} --context_size ${CONTEXT_SIZE} --alpha_threshold ${ALPHA_THRESHOLD} --sequential --process-by-genome
 
 echo "Data split completed at \$(date)"
 EOF
@@ -220,7 +226,7 @@ if [[ "$START_FROM" =~ ^(load|split|train)$ ]]; then
 #SBATCH --job-name=splicevo_train
 #SBATCH --output=${LOG_DIR}/train_%j.out
 #SBATCH --error=${LOG_DIR}/train_%j.err
-#SBATCH --partition=${PARTITION}
+#SBATCH --partition=${PARTITION_GPU}
 #SBATCH --time=${TIME_TRAIN}
 #SBATCH --mem=${MEM_TRAIN}
 #SBATCH --cpus-per-task=${CPUS_TRAIN}
@@ -228,14 +234,20 @@ if [[ "$START_FROM" =~ ^(load|split|train)$ ]]; then
 $([ -n "$ACCOUNT" ] && echo "#SBATCH --account=${ACCOUNT}")
 
 set -e
+
+# Initialize conda for bash shell
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+
+# Activate conda environment
+conda activate splicevo
+
+module load devel/cuda
+export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK}
 echo "Starting training job at \$(date)"
 echo "Training data: ${DATA_TRAIN_DIR}"
 echo "Model directory: ${MODEL_DIR}"
 
-python ${SPLICEVO_DIR}/scripts/splicevo_train.py \\
-    --config ${TRAINING_CONFIG} \\
-    --data ${DATA_TRAIN_DIR} \\
-    --checkpoint-dir ${MODEL_DIR}
+python ${SPLICEVO_DIR}/scripts/splicevo_train.py --config ${TRAINING_CONFIG} --data ${DATA_TRAIN_DIR} --checkpoint-dir ${MODEL_DIR}
 
 echo "Training completed at \$(date)"
 EOF
@@ -262,7 +274,7 @@ PREDICT_SCRIPT=$(cat <<EOF
 #SBATCH --job-name=splicevo_predict
 #SBATCH --output=${LOG_DIR}/predict_%j.out
 #SBATCH --error=${LOG_DIR}/predict_%j.err
-#SBATCH --partition=${PARTITION}
+#SBATCH --partition=${PARTITION_GPU}
 #SBATCH --time=${TIME_PREDICT}
 #SBATCH --mem=${MEM_PREDICT}
 #SBATCH --cpus-per-task=${CPUS_PREDICT}
@@ -270,6 +282,13 @@ PREDICT_SCRIPT=$(cat <<EOF
 $([ -n "$ACCOUNT" ] && echo "#SBATCH --account=${ACCOUNT}")
 
 set -e
+
+# Initialize conda for bash shell
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+
+# Activate conda environment
+conda activate splicevo
+
 echo "Starting prediction job at \$(date)"
 echo "Test data: ${DATA_TEST_DIR}"
 echo "Model checkpoint: ${MODEL_DIR}/best_model.pt"
@@ -315,6 +334,6 @@ echo "Check logs in: ${LOG_DIR}"
 echo ""
 if [[ -n "$LOAD_JOB" || -n "$SPLIT_JOB" || -n "$TRAIN_JOB" || -n "$PREDICT_JOB" ]]; then
     echo "To cancel all jobs:"
-    echo "  scancel$([ -n "$LOAD_JOB" ] && echo " ${LOAD_JOB}")$([ -n "$SPLIT_JOB" ] && echo " ${SPLIT_JOB}")$([ -n "$TRAIN_JOB" ] && echo " ${TRAIN_JOB}")$([ -n "$PREDICT_JOB" ] && echo " ${PREDICT_JOB}")"
+    echo "To cancel all jobs:"AD_JOB" ] && echo " ${LOAD_JOB}")$([ -n "$SPLIT_JOB" ] && echo " ${SPLIT_JOB}")$([ -n "$TRAIN_JOB" ] && echo " ${TRAIN_JOB}")$([ -n "$PREDICT_JOB" ] && echo " ${PREDICT_JOB}")"
 fi
 echo "============================================"

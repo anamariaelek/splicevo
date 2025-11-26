@@ -1,10 +1,10 @@
 {
-  "orthology_file": "/home/elek/projects/splicing/data/mazin/ortholog_groups.tsv",
+  "orthology_file": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv",
   "genomes": [
     {
       "genome_id": "human_GRCh37",
-      "genome_path": "/home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa.gz",
-      "gtf_path": "/home/elek/sds/sd17d003/Anamaria/genomes/mazin/gtf/Homo_sapiens.gtf.gz",
+      "genome_path": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Homo_sapiens.fa.gz",
+      "gtf_path": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/gtf/Homo_sapiens.gtf.gz",
       "chromosomes": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "X", "Y", "MT"],
       "metadata": {
         "species": "homo_sapiens",
@@ -14,8 +14,8 @@
     },
     {
       "genome_id": "mouse_GRCm38",
-      "genome_path": "/home/elek/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa.gz",
-      "gtf_path": "/home/elek/sds/sd17d003/Anamaria/genomes/mazin/gtf/Mus_musculus.gtf.gz",
+      "genome_path": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Mus_musculus.fa.gz",
+      "gtf_path": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/gtf/Mus_musculus.gtf.gz",
       "chromosomes": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "X", "Y", "MT"],
       "metadata": {
         "species": "mus_musculus",
@@ -26,12 +26,12 @@
   ],
   "usage_files": {
     "human_GRCh37": {
-      "pattern": "/home/elek/projects/splicing/results/spliser/Homo_sapiens/Human.{tissue}.{timepoint}.combined.tsv",
+      "pattern": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/spliser_for_splicevo/Homo_sapiens/Human.{tissue}.{timepoint}.combined.tsv",
       "tissues": ["Brain", "Cerebellum", "Heart", "Kidney", "Liver", "Ovary", "Testis"],
       "timepoints": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     },
     "mouse_GRCm38": {
-      "pattern": "/home/elek/projects/splicing/results/spliser/Mus_musculus/Mouse.{tissue}.{timepoint}.combined.tsv",
+      "pattern": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/spliser_for_splicevo/Mus_musculus/Mouse.{tissue}.{timepoint}.combined.tsv",
       "tissues": ["Brain", "Cerebellum", "Heart", "Kidney", "Liver", "Ovary", "Testis"],
       "timepoints": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     }

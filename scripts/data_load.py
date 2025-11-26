@@ -20,6 +20,7 @@ parser.add_argument("--n_cpus", type=int, default=8, help="Number of CPU cores t
 parser.add_argument("--quiet", action='store_true', help="Suppress console output")
 parser.add_argument("--append", action='store_true', help="Append to existing data instead of starting fresh")
 parser.add_argument("--overwrite", type=str, nargs='+', help="Genome IDs to overwrite (re-load even if already present)")
+parser.add_argument("--sequential", action='store_true', help="Load genomes sequentially (one at a time) to reduce memory usage")
 args = parser.parse_args()
 
 output_dir = args.output_dir
@@ -354,15 +355,39 @@ if new_genomes:
     # Store current loaded data count
     prev_count = len(loader.loaded_data)
     
-    # Temporarily filter to only new genomes
-    all_genomes = loader.genomes.copy()
-    loader.genomes = {gid: all_genomes[gid] for gid in new_genomes}
-    
-    # Load only new data
-    loader.load_all_genomes_data()
-    
-    # Restore all genomes
-    loader.genomes = all_genomes
+    if args.sequential:
+        # Load genomes one at a time to reduce memory usage
+        log_print(f"  Using sequential loading mode (lower memory usage)")
+        all_genomes = loader.genomes.copy()
+        
+        for i, genome_id in enumerate(new_genomes, 1):
+            genome_load_start = time.time()
+            log_print(f"  [{i}/{len(new_genomes)}] Loading {genome_id}...")
+            
+            # Temporarily set to single genome
+            loader.genomes = {genome_id: all_genomes[genome_id]}
+            
+            # Load data for this genome only
+            loader.load_all_genomes_data()
+            
+            genome_load_time = time.time() - genome_load_start
+            current_count = len(loader.loaded_data) - prev_count
+            log_print(f"      ✓ {genome_id} loaded {current_count} sites in {genome_load_time:.2f} seconds")
+            prev_count = len(loader.loaded_data)
+        
+        # Restore all genomes
+        loader.genomes = all_genomes
+    else:
+        # Parallel loading
+        # Temporarily filter to only new genomes
+        all_genomes = loader.genomes.copy()
+        loader.genomes = {gid: all_genomes[gid] for gid in new_genomes}
+        
+        # Load only new data
+        loader.load_all_genomes_data()
+        
+        # Restore all genomes
+        loader.genomes = all_genomes
     
     new_count = len(loader.loaded_data) - prev_count
     log_print(f"  Loaded {new_count} new splice sites")
@@ -456,25 +481,16 @@ log_print("Timing Summary")
 log_print("=" * 60)
 log_print(f"Step 1 - Initialize loader:     {format_time(step1_time):>12} ({100*step1_time/total_time:5.1f}%)")
 log_print(f"Step 2 - Add genomes:           {format_time(step2_time):>12} ({100*step2_time/total_time:5.1f}%)")
-
-for genome_id, gt in genome_times.items():
-    log_print(f"  - {genome_id:20s}   {format_time(gt):>12}")
-
 log_print(f"Step 3 - Add usage files:       {format_time(step3_time):>12} ({100*step3_time/total_time:5.1f}%)")
-
-for genome_id, ut in usage_times.items():
-    log_print(f"  - {genome_id:20s}   {format_time(ut):>12}")
-
 log_print(f"Step 4 - Load genome data:      {format_time(step4_time):>12} ({100*step4_time/total_time:5.1f}%)")
-log_print(f"Step 5 - Save:                  {format_time(step5_time):>12} ({100*step5_time/total_time:5.1f}%)")
+log_print(f"Step 5 - Save intermediate data: {format_time(step5_time):>12} ({100*step5_time/total_time:5.1f}%)")
 log_print("-" * 60)
-log_print(f"Total time:                     {format_time(total_time):>12}")
-log_print(f"\nData loading completed at {datetime.now()}")
+log_print(f"Total time:                     {format_time(total_time):>12} (100.0%)")
 log_print("=" * 60)
-log_print(f"Results saved to: {os.path.abspath(output_dir)}")
-
+log_print(f"Data loading completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 if args.quiet:
     sys.stdout = original_stdout
     sys.stderr = original_stderr
     log_file_handle.close()
     print(f"Data loading complete. Log saved to: {log_file}")
+    
