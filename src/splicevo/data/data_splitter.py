@@ -141,7 +141,8 @@ def split_to_memmap_chunked(
         log_fn(f"\n    [{genome_idx}/{len(sites_by_genome)}] Processing {genome_id} ({len(genome_sites)} sites)...")
 
         genome_genes = sorted(list(genes_by_genome.get(genome_id, set())))
-        csize = max(250, chunk_size)
+        # Reduce chunk size more aggressively to prevent OOM during conversion
+        csize = max(100, min(500, chunk_size))
         n_chunks = (len(genome_genes) + csize - 1) // csize
         log_fn(f"        Chunking {len(genome_genes)} genes into {n_chunks} chunks of size ~{csize}")
 
@@ -163,6 +164,15 @@ def split_to_memmap_chunked(
             loader.loaded_data = chunk_sites
 
             workers = effective_workers(requested_workers, sequential=True, by_genome=True)
+            
+            # Pre-check memory before attempting array conversion
+            mem_before, _ = get_memory_usage()
+            max_memory_mb = max(max_memory_mb, mem_before)
+            estimated_chunk_mb = (len(chunk_sites) * 1900 * 4 * 4) / (1024 * 1024)  # rough estimate
+            if mem_before + estimated_chunk_mb > 3500:
+                workers = 1
+                log_fn(f"        Memory approaching limit ({format_memory(mem_before)}), forcing single worker")
+            
             try:
                 sequences, labels, usage_arrays, metadata, species_ids = loader.to_arrays(
                     window_size=window_size,
@@ -171,15 +181,21 @@ def split_to_memmap_chunked(
                     n_workers=workers,
                     save_memmap=None
                 )
-            except MemoryError:
-                log_fn("        MemoryError detected, retrying chunk with single worker...")
-                sequences, labels, usage_arrays, metadata, species_ids = loader.to_arrays(
-                    window_size=window_size,
-                    context_size=context_size,
-                    alpha_threshold=alpha_threshold,
-                    n_workers=1,
-                    save_memmap=None
-                )
+            except MemoryError as e:
+                log_fn(f"        MemoryError: {e}")
+                log_fn("        Retrying chunk with single worker and smaller operations...")
+                try:
+                    sequences, labels, usage_arrays, metadata, species_ids = loader.to_arrays(
+                        window_size=window_size,
+                        context_size=context_size,
+                        alpha_threshold=alpha_threshold,
+                        n_workers=1,
+                        save_memmap=None
+                    )
+                except MemoryError:
+                    log_fn(f"        FATAL: Still OOM after retry. Chunk {ci+1}/{n_chunks} is too large.")
+                    log_fn(f"        Try reducing --chunk-size from {chunk_size} to {max(50, chunk_size // 2)}")
+                    raise
 
             n_windows = len(sequences)
 
@@ -225,6 +241,8 @@ def split_to_memmap_chunked(
                 
                 # Write metadata CSV header
                 metadata.to_csv(metadata_file, index=False, mode='w')
+                del metadata  # Release metadata immediately after writing
+                
             else:
                 # Append to existing memmap files more efficiently
                 new_total = total_windows + n_windows
@@ -282,16 +300,52 @@ def split_to_memmap_chunked(
                 
                 # Append metadata CSV
                 metadata.to_csv(metadata_file, index=False, mode='a', header=False)
+                del metadata  # Release metadata immediately after writing
 
-            # Clean up immediately after writing
-            del sequences, labels, usage_arrays, species_ids, metadata
+            # Convert to memmap and explicitly release numpy arrays
+            # Write sequences
+            seq_mm = np.memmap(meta_info["paths"]["sequences"], mode='r+', 
+                             dtype=sequences.dtype, shape=(total_windows,) + sequences.shape[1:])
+            seq_mm[total_windows - n_windows:total_windows] = sequences
+            del seq_mm
+            del sequences
+            gc.collect()
+            
+            # Write labels
+            lbl_mm = np.memmap(meta_info["paths"]["labels"], mode='r+',
+                             dtype=labels.dtype, shape=(total_windows,) + labels.shape[1:])
+            lbl_mm[total_windows - n_windows:total_windows] = labels
+            del lbl_mm
+            del labels
+            gc.collect()
+            
+            # Write species_ids
+            spc_mm = np.memmap(meta_info["paths"]["species_ids"], mode='r+',
+                             dtype=species_ids.dtype, shape=(total_windows,))
+            spc_mm[total_windows - n_windows:total_windows] = species_ids
+            del spc_mm
+            del species_ids
+            gc.collect()
+            
+            # Write usage arrays
+            for key, usage_array in usage_arrays.items():
+                entry = next((e for e in meta_info["usage"] if e["key"] == key), None)
+                if entry is not None:
+                    u_mm = np.memmap(entry["path"], mode='r+', 
+                                   dtype=usage_array.dtype, shape=(total_windows,) + usage_array.shape[1:])
+                    u_mm[total_windows - n_windows:total_windows] = usage_array
+                    del u_mm
+                del usage_array
+            
+            del usage_arrays
             gc.collect()
 
-            # Report memory usage occasionally
+            # Report memory usage with delta
             chunk_count += 1
             current_mem, peak_mem = get_memory_usage()
             max_memory_mb = max(max_memory_mb, current_mem)
-            log_fn(f"        Memory: current={format_memory(current_mem)}, peak in session={format_memory(max_memory_mb)}")
+            mem_delta = current_mem - mem_before
+            log_fn(f"        Memory: current={format_memory(current_mem)}, delta={format_memory(mem_delta)}, peak={format_memory(max_memory_mb)}")
 
         log_fn(f"        {genome_id} processed: {total_windows} total windows")
 

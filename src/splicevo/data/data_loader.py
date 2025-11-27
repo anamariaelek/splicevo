@@ -8,10 +8,52 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 import json
+import psutil
+import os
 
 from ..io.genome import GenomeData
 from ..io.gene_annotation import GTFProcessor, Transcript
 from ..io.splice_sites import SpliceSite
+
+
+def get_memory_usage() -> Tuple[float, float]:
+    """
+    Get current and peak memory usage in MB.
+    
+    Returns:
+        Tuple of (current_mb, peak_mb) in MB
+    """
+    try:
+        process = psutil.Process(os.getpid())
+        current_mb = process.memory_info().rss / 1024 / 1024
+        # Try to get peak if available (Linux only)
+        try:
+            with open(f'/proc/{os.getpid()}/status', 'r') as f:
+                for line in f:
+                    if line.startswith('VmPeak'):
+                        peak_mb = int(line.split()[1])
+                        return current_mb, peak_mb
+        except:
+            pass
+        return current_mb, current_mb
+    except:
+        return 0.0, 0.0
+
+
+def format_memory(mb: float) -> str:
+    """
+    Format memory value for display.
+    
+    Args:
+        mb: Memory in MB
+        
+    Returns:
+        Formatted string (GB if >= 1024 MB, else MB)
+    """
+    if mb >= 1024:
+        return f"{mb / 1024:.2f}GB"
+    else:
+        return f"{mb:.0f}MB"
 
 
 class MultiGenomeDataLoader:
@@ -40,6 +82,7 @@ class MultiGenomeDataLoader:
         self.condition_to_key: Dict[str, str] = {}
         self.genome_to_species: Dict[str, str] = {}  # Genome_id -> species mapping
         self.species_to_id: Dict[str, int] = {}  # Species -> integer ID
+        self.max_memory_mb = 0.0
         # Load orthology file if provided
         if orthology_file is not None:
             self._load_orthology_file(orthology_file)
@@ -232,9 +275,8 @@ class MultiGenomeDataLoader:
             
         genome_data = self.genomes[genome_id]
         
-        # Load genome and annotations
-        #print(f"Loading genome {genome_id}...")
-        #genome = genome_data.load_genome()
+        # Log initial memory
+        mem_start, _ = get_memory_usage()
         
         print(f"Processing GTF annotations for {genome_id}...")
         gtf_processor = GTFProcessor(str(genome_data.gtf_path))
@@ -253,7 +295,14 @@ class MultiGenomeDataLoader:
         # Process all splice sites
         print(f"Processing {len(positions_data)} sequences...")
         examples = SpliceSite.from_positions_batch(positions_data)
+        
+        # Log final memory
+        mem_end, peak_mem = get_memory_usage()
+        self.max_memory_mb = max(self.max_memory_mb, mem_end)
+        mem_delta = mem_end - mem_start
         print(f"Loaded {len(examples)} examples")
+        print(f"  Memory: delta={format_memory(mem_delta)}, current={format_memory(mem_end)}, peak={format_memory(self.max_memory_mb)}")
+        
         return examples
 
     def load_all_genomes_data(self,
@@ -262,13 +311,10 @@ class MultiGenomeDataLoader:
         Load data from all added genomes using optimized parallel batch processing.
         
         Args:
-            batch_size: Number of sequences to process in each batch
             max_transcripts_per_genome: Maximum transcripts per genome
-            n_jobs: Number of parallel jobs (None for auto-detection)
         """
-        # CHANGED: Don't reset loaded_data, append to it instead
-        # OLD: self.loaded_data = []
-        # NEW: Keep existing loaded_data if any
+        print("Loading data from all genomes...")
+        mem_start, _ = get_memory_usage()
         
         for genome_id in self.genomes:
             # Load all splice sites
@@ -278,8 +324,11 @@ class MultiGenomeDataLoader:
             )
             self.loaded_data.extend(genome_examples)
             
-        print(f"Total loaded examples: {len(self.loaded_data)}")
-        
+        mem_end, peak_mem = get_memory_usage()
+        mem_delta = mem_end - mem_start
+        print(f"\nTotal loaded examples: {len(self.loaded_data)}")
+        print(f"Total memory: delta={format_memory(mem_delta)}, current={format_memory(mem_end)}, peak={format_memory(self.max_memory_mb)}")
+
     def get_dataframe(self) -> pd.DataFrame:
         """Get loaded data as DataFrame"""
         if not self.loaded_data:
@@ -725,6 +774,8 @@ class MultiGenomeDataLoader:
         if not self.loaded_data:
             raise ValueError("No data loaded. Call load_all_genomes_data() first.")
 
+        mem_start, _ = get_memory_usage()
+
         if n_workers is None:
             n_workers = min(mp.cpu_count(), 8)
         
@@ -734,7 +785,10 @@ class MultiGenomeDataLoader:
         for site in self.loaded_data:
             key = (site.genome_id, site.chromosome, site.position, site.strand)
             splice_site_index[key] = site
-        print(f"Indexed {len(splice_site_index)} splice sites")
+        print(f"Loaded {len(splice_site_index)} splice sites")
+        mem_check, _ = get_memory_usage()
+        self.max_memory_mb = max(self.max_memory_mb, mem_check)
+        print(f"  Memory after indexing: current={format_memory(mem_check)}, peak={format_memory(self.max_memory_mb)}")
         
         # Get all splice sites info
         df = self.get_dataframe()
@@ -864,8 +918,6 @@ class MultiGenomeDataLoader:
             genes = df_genome['gene_id'].unique()
             
             print(f"  Processing {len(genes)} genes...")
-            
-            # Pre-load genome once
             print(f"  Pre-loading genome...")
             genome_cache = {genome_id: self.genomes[genome_id].load_genome()}
 
@@ -893,6 +945,7 @@ class MultiGenomeDataLoader:
                         )
                         future_to_gene[future] = gene_id
                     
+                    # Add memory monitoring in the future loop
                     for future in tqdm(as_completed(future_to_gene), 
                                      total=len(gene_tasks),
                                      desc=f"  {genome_id} genes",
@@ -1053,5 +1106,12 @@ class MultiGenomeDataLoader:
         for species, sp_id in sorted(self.species_to_id.items(), key=lambda x: x[1]):
             count = (species_ids == sp_id).sum() if isinstance(species_ids, np.ndarray) else sum(1 for x in species_ids if x == sp_id)
             print(f"    {species} (ID={sp_id}): {count} windows")
+        
+        # Add final memory report
+        mem_end, peak_mem = get_memory_usage()
+        self.max_memory_mb = max(self.max_memory_mb, mem_end)
+        mem_delta = mem_end - mem_start
+        print(f"\nArray conversion complete:")
+        print(f"  Memory: delta={format_memory(mem_delta)}, current={format_memory(mem_end)}, peak={format_memory(self.max_memory_mb)}")
         
         return sequences, labels, usage_arrays, metadata, species_ids

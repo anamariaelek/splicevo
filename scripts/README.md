@@ -23,7 +23,7 @@ You need to have a config file (e.g. `${SPLICEVO_DIR}/configs/data_human_mouse.j
 
 ```bash
 python ${SPLICEVO_DIR}/scripts/data_load.py \
-    --config ${SPLICEVO_DIR}/configs/data_human_mouse.json \
+    --config ${SPLICEVO_DIR}/configs/data_human_mouse_rat.json \
     --output_dir ${OUT_DIR}/data/load/hsap_mmus_rnor \
     --n_cpus 16 \
     --quiet &
