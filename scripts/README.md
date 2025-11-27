@@ -192,7 +192,7 @@ Small test example:
 ```bash
 python ${SPLICEVO_DIR}/scripts/data_split.py \
     --input_dir ${OUT_DIR}/data/load/small \
-    --output_dir ${OUT_DIR}/data/split/small \
+    --output_dir ${OUT_DIR}/data/split/small_ \
     --n_cpus 2 \
     --pov_genome human_GRCh37 \
     --test_chromosomes 21 \

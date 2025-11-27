@@ -52,10 +52,15 @@ class SpliceTrainer:
         """
         Initialize trainer.
         
+        IMPORTANT: For multi-species training, the train_loader must use a custom sampler
+        that ensures each batch contains only samples from a single species. This allows
+        the model to use species-specific output heads efficiently. Use 
+        SpeciesBatchSampler with your DataLoader.
+        
         Args:
-            model: The model to train
-            train_loader: DataLoader for training data
-            val_loader: DataLoader for validation data
+            model: The model to train (must support species_ids parameter if n_species > 1)
+            train_loader: DataLoader for training data (use SpeciesBatchSampler for multi-species)
+            val_loader: DataLoader for validation data (use SpeciesBatchSampler for multi-species)
             device: Device to train on ('cuda' or 'cpu')
             learning_rate: Initial learning rate
             weight_decay: L2 regularization weight
