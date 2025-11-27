@@ -194,6 +194,81 @@ else:
         genome_test_genes = df[(df['genome_id'] == genome_id) & (df['gene_id'].isin(test_genes))]['gene_id'].unique()
         log_print(f"    {genome_id}: {len(genome_test_genes)} genes")
     
+    # Check that test genes do not overlap any train genes by genomic coordinates
+    log_print(f"\n  Checking for coordinate overlaps between train and test genes...")
+    
+    overlap_issues = []
+    leaking_genes = set()
+    
+    for genome_id in df['genome_id'].unique():
+        genome_df = df[df['genome_id'] == genome_id]
+        
+        train_genes_genome = genome_df[(genome_df['gene_id'].isin(train_genes)) & 
+                                        (genome_df['genome_id'] == genome_id)].copy()
+        test_genes_genome = genome_df[(genome_df['gene_id'].isin(test_genes)) & 
+                                       (genome_df['genome_id'] == genome_id)].copy()
+        
+        if len(train_genes_genome) == 0 or len(test_genes_genome) == 0:
+            continue
+        
+        # Group by chromosome and check for overlaps
+        for chrom in genome_df['chromosome'].unique():
+            train_chrom = train_genes_genome[train_genes_genome['chromosome'] == chrom]
+            test_chrom = test_genes_genome[test_genes_genome['chromosome'] == chrom]
+            
+            if len(train_chrom) == 0 or len(test_chrom) == 0:
+                continue
+            
+            # Get coordinate ranges for each set
+            train_ranges = train_chrom.groupby('gene_id').agg({
+                'position': ['min', 'max']
+            }).values
+            
+            test_ranges = test_chrom.groupby('gene_id').agg({
+                'position': ['min', 'max']
+            }).values
+            
+            # Check for overlaps within 5000bp 
+            overlap_buffer = 5000
+            for test_gene_idx, (test_min, test_max) in enumerate(test_ranges):
+                for train_gene_idx, (train_min, train_max) in enumerate(train_ranges):
+                    # Check if ranges overlap or are very close
+                    if not (test_max + overlap_buffer < train_min or test_min - overlap_buffer > train_max):
+                        test_gene_id = test_chrom['gene_id'].unique()[test_gene_idx]
+                        train_gene_id = train_chrom['gene_id'].unique()[train_gene_idx]
+                        distance_bp = max(0, min(abs(test_min - train_max), abs(train_min - test_max)))
+                        
+                        overlap_issues.append({
+                            'genome': genome_id,
+                            'chromosome': chrom,
+                            'test_gene': test_gene_id,
+                            'train_gene': train_gene_id,
+                            'distance_bp': distance_bp
+                        })
+                        
+                        # Mark this test gene for relabeling
+                        leaking_genes.add(test_gene_id)
+    
+    if leaking_genes:
+        log_print(f"\n    Found {len(leaking_genes)} test genes with coordinate overlaps")
+        log_print(f"      Relabeling these genes as train to prevent data leakage...")
+        
+        # Move leaking genes from test to train
+        test_genes = test_genes - leaking_genes
+        train_genes = train_genes | leaking_genes
+        
+        # Show details of relabeled genes
+        overlap_df = pd.DataFrame(overlap_issues)
+        relabeled_details = overlap_df.drop_duplicates('test_gene')
+        log_print(f"\n  Relabeled genes (first 20):")
+        for _, row in relabeled_details.head(20).iterrows():
+            log_print(f"    {row['test_gene']:20s} ({row['genome']} chr{row['chromosome']}) - {row['distance_bp']}bp from {row['train_gene']}")
+        
+        if len(relabeled_details) > 20:
+            log_print(f"    ... and {len(relabeled_details) - 20} more genes")
+    else:
+        log_print(f"    No coordinate overlaps detected between train and test genes")
+
     df['split'] = df['gene_id'].apply(lambda x: 'test' if x in test_genes else 'train')
 
 # Count splice sites in each split
