@@ -209,12 +209,24 @@ def split_to_memmap_chunked(
                 lbl_path = os.path.join(mmap_dir, 'labels.mmap')
                 spc_path = os.path.join(mmap_dir, 'species_ids.mmap')
 
+                # Write sequences
                 seq_mm = np.memmap(seq_path, mode='w+', dtype=sequences.dtype, shape=seq_shape)
-                seq_mm[:] = sequences; del seq_mm
+                seq_mm[:] = sequences
+                del seq_mm
+                del sequences
+                
+                # Write labels
                 lbl_mm = np.memmap(lbl_path, mode='w+', dtype=labels.dtype, shape=label_shape)
-                lbl_mm[:] = labels; del lbl_mm
+                lbl_mm[:] = labels
+                del lbl_mm
+                del labels
+                
+                # Write species_ids
                 spc_mm = np.memmap(spc_path, mode='w+', dtype=species_ids.dtype, shape=species_shape)
-                spc_mm[:] = species_ids; del spc_mm
+                spc_mm[:] = species_ids
+                del spc_mm
+                del species_ids
+                gc.collect()
 
                 meta_info["paths"].update({"sequences": seq_path, "labels": lbl_path, "species_ids": spc_path})
                 meta_info["dtypes"].update({
@@ -228,79 +240,96 @@ def split_to_memmap_chunked(
                     "species_ids": list(species_shape),
                 })
 
-                # usage arrays
+                # usage arrays - write directly
                 for key, usage_array in usage_arrays.items():
                     u_shape = (n_windows,) + usage_array.shape[1:]
                     u_path = os.path.join(mmap_dir, f'usage_{key}.mmap')
                     u_mm = np.memmap(u_path, mode='w+', dtype=usage_array.dtype, shape=u_shape)
-                    u_mm[:] = usage_array; del u_mm
+                    u_mm[:] = usage_array
+                    del u_mm
+                    del usage_array
                     meta_info["usage"].append({"key": key, "path": u_path, "dtype": str(usage_array.dtype), "shape": list(u_shape)})
+                
+                del usage_arrays
+                gc.collect()
 
                 total_windows = n_windows
                 first_write_done = True
                 
                 # Write metadata CSV header
                 metadata.to_csv(metadata_file, index=False, mode='w')
-                del metadata  # Release metadata immediately after writing
+                del metadata
                 
             else:
-                # Append to existing memmap files more efficiently
+                # Append mode: extend memmap files without loading all old data
                 new_total = total_windows + n_windows
+                old_size = total_windows
 
-                for array_name, array_file in [
-                    ('sequences', meta_info["paths"]["sequences"]),
-                    ('labels', meta_info["paths"]["labels"]),
-                    ('species_ids', meta_info["paths"]["species_ids"])
-                ]:
-                    if array_name == 'sequences':
-                        current_array = sequences
-                    elif array_name == 'labels':
-                        current_array = labels
-                    else:
-                        current_array = species_ids
+                # Extend and write sequences (no copy of old data)
+                seq_path = meta_info["paths"]["sequences"]
+                old_seq = np.memmap(seq_path, mode='r+', dtype=meta_info["dtypes"]["sequences"], 
+                                   shape=(old_size,) + sequences.shape[1:])
+                # Resize by recreating memmap with new shape
+                del old_seq
+                os.system(f"truncate -s +{n_windows * np.dtype(meta_info['dtypes']['sequences']).itemsize * sequences.shape[1] * sequences.shape[2]} {seq_path}")
+                seq_mm = np.memmap(seq_path, mode='r+', dtype=meta_info["dtypes"]["sequences"],
+                                  shape=(new_total,) + sequences.shape[1:])
+                seq_mm[old_size:new_total] = sequences
+                del seq_mm
+                del sequences
+                gc.collect()
 
-                    old_dtype = np.dtype(meta_info["dtypes"][array_name])
-                    old_shape_tail = tuple(meta_info["shapes"][array_name][1:])
-                    new_shape = (new_total,) + old_shape_tail
-                    
-                    old_mm = np.memmap(array_file, mode='r+', dtype=old_dtype, shape=(total_windows,) + old_shape_tail)
-                    tmp_path = os.path.join(mmap_dir, f'{array_name}_temp.mmap')
-                    new_mm = np.memmap(tmp_path, mode='w+', dtype=old_dtype, shape=new_shape)
-                    new_mm[:total_windows] = old_mm[:]
-                    new_mm[total_windows:new_total] = current_array
-                    del old_mm, new_mm
-                    os.replace(tmp_path, array_file)
-                    meta_info["shapes"][array_name][0] = new_total
+                # Extend and write labels
+                lbl_path = meta_info["paths"]["labels"]
+                lbl_mm = np.memmap(lbl_path, mode='r+', dtype=meta_info["dtypes"]["labels"],
+                                  shape=(new_total,) + labels.shape[1:])
+                lbl_mm[old_size:new_total] = labels
+                del lbl_mm
+                del labels
+                gc.collect()
 
-                # Usage arrays
+                # Extend and write species_ids
+                spc_path = meta_info["paths"]["species_ids"]
+                spc_mm = np.memmap(spc_path, mode='r+', dtype=meta_info["dtypes"]["species_ids"],
+                                  shape=(new_total,))
+                spc_mm[old_size:new_total] = species_ids
+                del spc_mm
+                del species_ids
+                gc.collect()
+
+                # Extend and write usage arrays
                 for key, usage_array in usage_arrays.items():
                     entry = next((e for e in meta_info["usage"] if e["key"] == key), None)
                     if entry is None:
+                        # First time seeing this usage key
                         u_path = os.path.join(mmap_dir, f'usage_{key}.mmap')
-                        u_shape_init = (total_windows,) + usage_array.shape[1:]
-                        u_mm = np.memmap(u_path, mode='w+', dtype=usage_array.dtype, shape=u_shape_init)
-                        u_mm[:] = 0; del u_mm
-                        entry = {"key": key, "path": u_path, "dtype": str(usage_array.dtype), "shape": list(u_shape_init)}
+                        # Need to backfill with placeholder
+                        placeholder = np.zeros((old_size,) + usage_array.shape[1:], dtype=usage_array.dtype)
+                        u_mm = np.memmap(u_path, mode='w+', dtype=usage_array.dtype, 
+                                       shape=(new_total,) + usage_array.shape[1:])
+                        u_mm[:old_size] = placeholder
+                        u_mm[old_size:new_total] = usage_array
+                        del u_mm, placeholder
+                        entry = {"key": key, "path": u_path, "dtype": str(usage_array.dtype), "shape": list((new_total,) + usage_array.shape[1:])}
                         meta_info["usage"].append(entry)
+                    else:
+                        u_path = entry["path"]
+                        u_mm = np.memmap(u_path, mode='r+', dtype=entry["dtype"],
+                                       shape=(new_total,) + usage_array.shape[1:])
+                        u_mm[old_size:new_total] = usage_array
+                        del u_mm
+                        entry["shape"][0] = new_total
                     
-                    u_path = entry["path"]
-                    u_dtype = np.dtype(entry["dtype"])
-                    u_tail = tuple(entry["shape"][1:])
-                    u_new_shape = (new_total,) + u_tail
-                    u_old = np.memmap(u_path, mode='r+', dtype=u_dtype, shape=(total_windows,) + u_tail)
-                    u_tmp = os.path.join(mmap_dir, f'usage_{key}_temp.mmap')
-                    u_new = np.memmap(u_tmp, mode='w+', dtype=u_dtype, shape=u_new_shape)
-                    u_new[:total_windows] = u_old[:]
-                    u_new[total_windows:new_total] = usage_array
-                    del u_old, u_new
-                    os.replace(u_tmp, u_path)
-                    entry["shape"][0] = new_total
+                    del usage_array
+                
+                del usage_arrays
+                gc.collect()
 
                 total_windows = new_total
                 
                 # Append metadata CSV
                 metadata.to_csv(metadata_file, index=False, mode='a', header=False)
-                del metadata  # Release metadata immediately after writing
+                del metadata
 
             # Convert to memmap and explicitly release numpy arrays
             # Write sequences
