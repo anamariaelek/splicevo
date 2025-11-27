@@ -11,18 +11,18 @@
 #
 
 set -e  # Exit on error
-``
+
 # Configuration - MODIFY THESE
 SPLICEVO_DIR="/home/hd/hd_hd/hd_mf354/projects/splicevo"
 OUT_DIR="/home/hd/hd_hd/hd_mf354/projects/splicing/results"
 
 # Config files
-DATA_CONFIG="${SPLICEVO_DIR}/configs/data_human_mouse.json"
+DATA_CONFIG="${SPLICEVO_DIR}/configs/data_helix_human_mouse_rat.json"
 TRAINING_CONFIG="${SPLICEVO_DIR}/configs/training_resnet.yaml"
 
 # Data directories
-LOAD_DIR="${OUT_DIR}/data/load/hsap_mmus"
-SPLIT_DIR="${OUT_DIR}/data/split/hsap_mmus"
+LOAD_DIR="${OUT_DIR}/data/load/hsap_mmus_rnor"
+SPLIT_DIR="${OUT_DIR}/data/split/hsap_mmus_rnor"
 DATA_TRAIN_DIR="${SPLIT_DIR}/memmap_train"
 DATA_TEST_DIR="${SPLIT_DIR}/memmap_test"
 MODEL_DIR="${OUT_DIR}/models/resnet_hybridloss"
@@ -36,11 +36,11 @@ TIME_LOAD="24:00:00"
 TIME_SPLIT="24:00:00"
 TIME_TRAIN="72:00:00"
 TIME_PREDICT="12:00:00"
-MEM_LOAD="256G"
+MEM_LOAD="128G"
 MEM_SPLIT="128G"
 MEM_TRAIN="128G"
 MEM_PREDICT="32G"
-CPUS_LOAD="2"
+CPUS_LOAD="1"
 CPUS_SPLIT="1"
 CPUS_TRAIN="8"
 CPUS_PREDICT="4"
@@ -198,7 +198,7 @@ echo "Starting data split job at \$(date)"
 echo "Input directory: ${LOAD_DIR}"
 echo "Output directory: ${SPLIT_DIR}"
 
-python ${SPLICEVO_DIR}/scripts/data_split.py --input_dir ${LOAD_DIR} --output_dir ${SPLIT_DIR} --n_cpus ${CPUS_SPLIT} --pov_genome ${POV_GENOME} --test_chromosomes ${TEST_CHROMOSOMES} --window_size ${WINDOW_SIZE} --context_size ${CONTEXT_SIZE} --alpha_threshold ${ALPHA_THRESHOLD} --sequential --process-by-genome
+python ${SPLICEVO_DIR}/scripts/data_split.py --input_dir ${LOAD_DIR} --output_dir ${SPLIT_DIR} --n_cpus ${CPUS_SPLIT} --pov_genome ${POV_GENOME} --test_chromosomes ${TEST_CHROMOSOMES} --window_size ${WINDOW_SIZE} --context_size ${CONTEXT_SIZE} --alpha_threshold ${ALPHA_THRESHOLD} --sequential --process-by-genome --chunk-size 1000
 
 echo "Data split completed at \$(date)"
 EOF
@@ -334,6 +334,6 @@ echo "Check logs in: ${LOG_DIR}"
 echo ""
 if [[ -n "$LOAD_JOB" || -n "$SPLIT_JOB" || -n "$TRAIN_JOB" || -n "$PREDICT_JOB" ]]; then
     echo "To cancel all jobs:"
-    echo "To cancel all jobs:"AD_JOB" ] && echo " ${LOAD_JOB}")$([ -n "$SPLIT_JOB" ] && echo " ${SPLIT_JOB}")$([ -n "$TRAIN_JOB" ] && echo " ${TRAIN_JOB}")$([ -n "$PREDICT_JOB" ] && echo " ${PREDICT_JOB}")"
+    echo "  scancel$([ -n "$LOAD_JOB" ] && echo " ${LOAD_JOB}")$([ -n "$SPLIT_JOB" ] && echo " ${SPLIT_JOB}")$([ -n "$TRAIN_JOB" ] && echo " ${TRAIN_JOB}")$([ -n "$PREDICT_JOB" ] && echo " ${PREDICT_JOB}")"
 fi
 echo "============================================"
