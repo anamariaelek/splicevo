@@ -45,82 +45,58 @@ def load_processed_data(fn):
     elif os.path.isdir(fn):
         # Load mmap files
         mmap_dir = os.path.abspath(fn)
-        seq_file = os.path.join(mmap_dir, 'sequences.mmap')
-        lbl_file = os.path.join(mmap_dir, 'labels.mmap')
-        # Check which usage files exist
-        usage_files = {
-            'usage_alpha': os.path.join(mmap_dir, 'usage_alpha.mmap'),
-            'usage_beta': os.path.join(mmap_dir, 'usage_beta.mmap'),
-            'usage_sse': os.path.join(mmap_dir, 'usage_sse.mmap')
-        }
-        available_usage = {k: v for k, v in usage_files.items() if os.path.exists(v)}
-
-        # Load memmap files
-        if os.path.exists(seq_file) and os.path.exists(lbl_file):
-
-            # Parse dtypes from metadata
-            meta_path = os.path.join(mmap_dir, 'metadata.json')
-            if not os.path.exists(meta_path):
-                raise FileNotFoundError(f"Missing metadata.json in {mmap_dir}")
-            with open(meta_path, 'r') as f:
-                meta = json.load(f)
-            seq_dtype = np.dtype(meta.get('sequences_dtype', 'float32'))
-            lbl_dtype = np.dtype(meta.get('labels_dtype', 'int8'))
-            usage_dtype = np.dtype(meta.get('usage_dtype', 'float32'))
-
-            # Load sequences and labels
-            sequences = np.memmap(seq_file, dtype=seq_dtype, mode='r', shape=tuple(meta['sequences_shape']))
-            print(f"Sequences shape: {sequences.shape}")
-            labels = np.memmap(lbl_file, dtype=lbl_dtype, mode='r', shape=tuple(meta['labels_shape']))
-            print(f"Labels shape: {labels.shape}")
-
-            # Load available usage arrays
-            if 'usage_sse' in available_usage:
-                sse = np.memmap(
-                    available_usage['usage_sse'],
-                    dtype=usage_dtype, 
-                    mode='r',
-                    shape=tuple(meta['usage_shape'])
-                )
-                print(f"SSE shape: {sse.shape}")
-            else:
-                sse = None
-            if 'usage_alpha' in available_usage:
-                alpha = np.memmap(
-                    available_usage['usage_alpha'],
-                    dtype=usage_dtype, 
-                    mode='r',
-                    shape=tuple(meta['usage_shape'])
-                )
-                print(f"Alpha shape: {alpha.shape}")
-            else:
-                alpha = None
-            if 'usage_beta' in available_usage:
-                beta = np.memmap(
-                    available_usage['usage_beta'],
-                    dtype=usage_dtype, 
-                    mode='r',
-                    shape=tuple(meta['usage_shape'])
-                )
-                print(f"Beta shape: {beta.shape}")
-            else:
-                beta = None
-            
-            # Load species IDs if available
-            species_file = os.path.join(mmap_dir, 'species_ids.mmap')
-            if os.path.exists(species_file):
-                species_ids = np.memmap(
-                    species_file,
-                    dtype=np.dtype(meta.get('species_ids_dtype', 'int32')),
-                    mode='r',
-                    shape=tuple(meta.get('species_ids_shape', [meta['sequences_shape'][0]]))
-                )
-                print(f"Species IDs shape: {species_ids.shape}")
-            else:
-                species_ids = None
-            
+        
+        # Parse metadata
+        meta_path = os.path.join(mmap_dir, 'metadata.json')
+        if not os.path.exists(meta_path):
+            raise FileNotFoundError(f"Missing metadata.json in {mmap_dir}")
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        
+        # Load sequences and labels
+        seq_path = meta['paths']['sequences']
+        seq_dtype = np.dtype(meta['dtypes']['sequences'])
+        seq_shape = tuple(meta['shapes']['sequences'])
+        sequences = np.memmap(seq_path, dtype=seq_dtype, mode='r', shape=seq_shape)
+        print(f"Sequences shape: {sequences.shape}")
+        
+        lbl_path = meta['paths']['labels']
+        lbl_dtype = np.dtype(meta['dtypes']['labels'])
+        lbl_shape = tuple(meta['shapes']['labels'])
+        labels = np.memmap(lbl_path, dtype=lbl_dtype, mode='r', shape=lbl_shape)
+        print(f"Labels shape: {labels.shape}")
+        
+        # Load species IDs if available
+        if 'species_ids' in meta['paths']:
+            species_path = meta['paths']['species_ids']
+            species_dtype = np.dtype(meta['dtypes']['species_ids'])
+            species_shape = tuple(meta['shapes']['species_ids'])
+            species_ids = np.memmap(species_path, dtype=species_dtype, mode='r', shape=species_shape)
+            print(f"Species IDs shape: {species_ids.shape}")
         else:
-            raise FileNotFoundError(f"Memmap files not found in {mmap_dir}.")
+            species_ids = None
+        
+        # Load usage arrays from list structure
+        alpha = None
+        beta = None
+        sse = None
+        for usage_entry in meta.get('usage', []):
+            key = usage_entry['key']
+            u_path = usage_entry['path']
+            u_dtype = np.dtype(usage_entry['dtype'])
+            u_shape = tuple(usage_entry['shape'])
+            
+            usage_array = np.memmap(u_path, dtype=u_dtype, mode='r', shape=u_shape)
+            
+            if key == 'alpha':
+                alpha = usage_array
+                print(f"Alpha shape: {alpha.shape}")
+            elif key == 'beta':
+                beta = usage_array
+                print(f"Beta shape: {beta.shape}")
+            elif key == 'sse':
+                sse = usage_array
+                print(f"SSE shape: {sse.shape}")
         
     else:
         raise ValueError("Unknown file format")

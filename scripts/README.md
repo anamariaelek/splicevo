@@ -158,6 +158,7 @@ Split the loaded data into training and test sets. This step:
     - Genes on test chromosomes in the specified POV genome are assigned to test set, and all other genes are used for training.
     - All other genomes are split so that all orhologs of test genes are included in the test set, and the remaining genes are used for training.
 - Converts to windowed sequences and saves as memmap
+- Uses memory-efficient genome-by-genome chunked processing
 
 To generate the train/test split, run:
 
@@ -165,35 +166,41 @@ To generate the train/test split, run:
 python ${SPLICEVO_DIR}/scripts/data_split.py \
     --input_dir ${OUT_DIR}/data/load/hsap_mmus \
     --output_dir ${OUT_DIR}/data/split/hsap_mmus \
-    --n_cpus 4 \
+    --n_cpus 2 \
     --pov_genome human_GRCh37 \
     --test_chromosomes 1 3 5 \
     --window_size 1000 \
     --context_size 450 \
     --alpha_threshold 5 \
+    --chunk-size 1000 \
     --quiet &
 ```
 
-**Note:** If the job gets killed (likely due to OOM), try:
-- Reducing `--n_cpus`
-- Running without `&` to see actual error messages before the kill
-- Monitoring memory usage: `watch -n 1 free -h` (run in another terminal)
-- Check exit code after job completes: `echo $?` (137 typically means killed by OOM)
+**Note:** The script uses memory-efficient chunked processing by default:
+- Processes one genome at a time
+- Splits genes into chunks (default: 2000 genes per chunk)
+- Uses conservative worker count (default: 2) to avoid OOM
+- If still experiencing OOM, try: `--n_cpus 1` and/or `--chunk-size 1000`
+
+Monitoring:
+- Check memory usage: `watch -n 1 free -h`
 - Monitor the process: `ps aux | grep data_split` and `top -p <PID>`
+- Check exit code: `echo $?` (137 typically means killed by OOM)
 
 Small test example:
 
 ```bash
 python ${SPLICEVO_DIR}/scripts/data_split.py \
-    --input_dir ${OUT_DIR}/data/load_small \
-    --output_dir ${OUT_DIR}/data/split_small \
-    --n_cpus 8 \
+    --input_dir ${OUT_DIR}/data/load/small \
+    --output_dir ${OUT_DIR}/data/split/small \
+    --n_cpus 2 \
     --pov_genome human_GRCh37 \
     --test_chromosomes 21 \
     --window_size 1000 \
     --context_size 450 \
     --alpha_threshold 5 \
-    --quiet 
+    --chunk-size 1000 \
+    --quiet &
 ```
 
 Arguments:
@@ -203,6 +210,8 @@ Arguments:
 `--window_size`: Size of central window containing splice sites (default: 1000)  
 `--context_size`: Size of context on each side of window (default: 450)  
 `--alpha_threshold`: Minimum alpha value; lower values set to 0 (default: 5)  
+`--n_cpus`: Number of parallel workers (default: 2, clamped to 1-2 in chunked mode)  
+`--chunk-size`: Genes per chunk (default: 2000; reduce if OOM occurs)  
 
 **Output files:**
 

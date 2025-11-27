@@ -2,17 +2,10 @@
 
 from ..io.genome import GenomeData
 from ..io.splice_sites import SpliceSite
-from .data_loader import (
-    MultiGenomeDataLoader
-)
-from .data_splitter import (
-    DataSplit,
-    StratifiedGCSplitter
-)
+from .data_loader import MultiGenomeDataLoader
+from .data_splitter import DataSplit, split_to_memmap_chunked
 __all__ = [
-    'GenomeData',
-    'SpliceSite', 
-    'MultiGenomeDataLoader',
-    'DataSplit',
-    'StratifiedGCSplitter'
+    "MultiGenomeDataLoader",
+    "DataSplit",
+    "split_to_memmap_chunked",
 ]

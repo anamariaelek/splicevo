@@ -11,11 +11,12 @@ import pandas as pd
 import pickle
 
 from splicevo.data import MultiGenomeDataLoader
+from splicevo.data.data_splitter import split_to_memmap_chunked, effective_workers
 
 parser = argparse.ArgumentParser(description="Split loaded data into train/test sets")
 parser.add_argument("--input_dir", type=str, required=True, help="Directory with loaded data")
 parser.add_argument("--output_dir", type=str, required=True, help="Directory to save split results")
-parser.add_argument("--n_cpus", type=int, default=8, help="Number of CPU cores to use")
+parser.add_argument("--n_cpus", type=int, default=2, help="Number of CPU cores to use (default: 2 for memory safety)")
 parser.add_argument("--quiet", action='store_true', help="Suppress console output")
 parser.add_argument("--pov_genome", type=str, default="human_GRCh37", 
                     help="Point-of-view genome for chromosome splitting")
@@ -24,8 +25,7 @@ parser.add_argument("--test_chromosomes", type=str, nargs='+', default=['1', '3'
 parser.add_argument("--window_size", type=int, default=1000, help="Window size for sequences")
 parser.add_argument("--context_size", type=int, default=450, help="Context size on each side")
 parser.add_argument("--alpha_threshold", type=int, default=5, help="Minimum alpha value threshold")
-parser.add_argument("--sequential", action='store_true', help="Process train and test splits sequentially to reduce memory usage")
-parser.add_argument("--process-by-genome", action='store_true', help="Process one genome at a time to reduce memory usage (most scalable)")
+parser.add_argument("--chunk-size", type=int, default=2000, help="Number of genes to process per chunk (default: 2000)")
 args = parser.parse_args()
 
 input_dir = args.input_dir
@@ -214,19 +214,16 @@ for split_name, split_df in [('Train', train_sites), ('Test', test_sites)]:
         log_print(f"    {genome_id}: {len(genome_sites)} sites ({n_donors} donors, {n_acceptors} acceptors)")
 
 step2_time = time.time() - step2_start
-log_print(f"  \nGTrain/test split determined in {step2_time:.2f} seconds")
+log_print(f"  \nTrain/test split determined in {step2_time:.2f} seconds")
 log_print("")
 
 # Step 3: Convert to arrays for each split
 log_print("Step 3: Creating train and test datasets...")
+log_print("  Using genome-by-genome chunked processing (memory-efficient mode)")
+log_print(f"  Workers: {n_cpus}, Chunk size: {args.chunk_size}")
 step3_start = time.time()
 
 original_loaded_data = loader.loaded_data
-
-if args.sequential:
-    log_print("  Using sequential processing mode (lower memory usage)")
-if args.process_by_genome:
-    log_print("  Using genome-by-genome processing mode (most scalable)")
 
 for split in ['train', 'test']:
     log_print(f"\n  Processing {split} split...")
@@ -244,208 +241,46 @@ for split in ['train', 'test']:
     
     mmap_dir = os.path.join(output_dir, f'memmap_{split}')
     
-    if args.process_by_genome:
-        # Process genome by genome to minimize memory usage
-        log_print(f"    Processing genome-by-genome...")
-        
-        # Group sites by genome
-        sites_by_genome = {}
-        for site in split_sites:
-            if site.genome_id not in sites_by_genome:
-                sites_by_genome[site.genome_id] = []
-            sites_by_genome[site.genome_id].append(site)
-        
-        log_print(f"    Found {len(sites_by_genome)} genomes to process")
-        for gid, sites in sites_by_genome.items():
-            log_print(f"      {gid}: {len(sites)} sites")
-        
-        all_metadata = []
-        total_windows = 0
-        first_genome = True
-        
-        for genome_idx, (genome_id, genome_sites) in enumerate(sites_by_genome.items(), 1):
-            genome_time_start = time.time()
-            log_print(f"\n    [{genome_idx}/{len(sites_by_genome)}] Processing {genome_id} ({len(genome_sites)} sites)...")
-            
-            # Set loader to this genome's sites only
-            loader.loaded_data = genome_sites
-            
-            # Convert to arrays for this genome
-            sequences, labels, usage_arrays, metadata, species_ids = loader.to_arrays(
-                window_size=args.window_size,
-                context_size=args.context_size,
-                alpha_threshold=args.alpha_threshold,
-                n_workers=n_cpus,
-                save_memmap=None  # We'll handle memmap ourselves
-            )
-            
-            n_windows = len(sequences)
-            log_print(f"        Created {n_windows} windows from {genome_id}")
-            
-            if first_genome:
-                # First genome: create new memmap files
-                os.makedirs(mmap_dir, exist_ok=True)
-                
-                # Save initial arrays as memmap
-                seq_shape = (n_windows,) + sequences.shape[1:]
-                label_shape = (n_windows,) + labels.shape[1:]
-                species_shape = (n_windows,)
-                
-                seq_mmap = np.lib.format.open_memmap(
-                    os.path.join(mmap_dir, 'sequences.npy'),
-                    mode='w+',
-                    dtype=sequences.dtype,
-                    shape=seq_shape
-                )
-                seq_mmap[:] = sequences
-                del seq_mmap
-                
-                label_mmap = np.lib.format.open_memmap(
-                    os.path.join(mmap_dir, 'labels.npy'),
-                    mode='w+',
-                    dtype=labels.dtype,
-                    shape=label_shape
-                )
-                label_mmap[:] = labels
-                del label_mmap
-                
-                species_mmap = np.lib.format.open_memmap(
-                    os.path.join(mmap_dir, 'species_ids.npy'),
-                    mode='w+',
-                    dtype=species_ids.dtype,
-                    shape=species_shape
-                )
-                species_mmap[:] = species_ids
-                del species_mmap
-                
-                # Save usage arrays
-                for i, usage_array in enumerate(usage_arrays):
-                    usage_shape = (n_windows,) + usage_array.shape[1:]
-                    usage_mmap = np.lib.format.open_memmap(
-                        os.path.join(mmap_dir, f'usage_{i}.npy'),
-                        mode='w+',
-                        dtype=usage_array.dtype,
-                        shape=usage_shape
-                    )
-                    usage_mmap[:] = usage_array
-                    del usage_mmap
-                
-                total_windows = n_windows
-                first_genome = False
-                
-            else:
-                # Subsequent genomes: append to existing memmap files
-                new_total = total_windows + n_windows
-                
-                # Resize and append sequences
-                seq_mmap = np.lib.format.open_memmap(
-                    os.path.join(mmap_dir, 'sequences.npy'),
-                    mode='r+'
-                )
-                seq_mmap_resized = np.lib.format.open_memmap(
-                    os.path.join(mmap_dir, 'sequences_temp.npy'),
-                    mode='w+',
-                    dtype=seq_mmap.dtype,
-                    shape=(new_total,) + seq_mmap.shape[1:]
-                )
-                seq_mmap_resized[:total_windows] = seq_mmap[:]
-                seq_mmap_resized[total_windows:new_total] = sequences
-                del seq_mmap, seq_mmap_resized
-                os.replace(os.path.join(mmap_dir, 'sequences_temp.npy'), 
-                          os.path.join(mmap_dir, 'sequences.npy'))
-                
-                # Resize and append labels
-                label_mmap = np.lib.format.open_memmap(
-                    os.path.join(mmap_dir, 'labels.npy'),
-                    mode='r+'
-                )
-                label_mmap_resized = np.lib.format.open_memmap(
-                    os.path.join(mmap_dir, 'labels_temp.npy'),
-                    mode='w+',
-                    dtype=label_mmap.dtype,
-                    shape=(new_total,) + label_mmap.shape[1:]
-                )
-                label_mmap_resized[:total_windows] = label_mmap[:]
-                label_mmap_resized[total_windows:new_total] = labels
-                del label_mmap, label_mmap_resized
-                os.replace(os.path.join(mmap_dir, 'labels_temp.npy'), 
-                          os.path.join(mmap_dir, 'labels.npy'))
-                
-                # Resize and append species IDs
-                species_mmap = np.lib.format.open_memmap(
-                    os.path.join(mmap_dir, 'species_ids.npy'),
-                    mode='r+'
-                )
-                species_mmap_resized = np.lib.format.open_memmap(
-                    os.path.join(mmap_dir, 'species_ids_temp.npy'),
-                    mode='w+',
-                    dtype=species_mmap.dtype,
-                    shape=(new_total,)
-                )
-                species_mmap_resized[:total_windows] = species_mmap[:]
-                species_mmap_resized[total_windows:new_total] = species_ids
-                del species_mmap, species_mmap_resized
-                os.replace(os.path.join(mmap_dir, 'species_ids_temp.npy'), 
-                          os.path.join(mmap_dir, 'species_ids.npy'))
-                
-                # Resize and append usage arrays
-                for i, usage_array in enumerate(usage_arrays):
-                    usage_mmap = np.lib.format.open_memmap(
-                        os.path.join(mmap_dir, f'usage_{i}.npy'),
-                        mode='r+'
-                    )
-                    usage_mmap_resized = np.lib.format.open_memmap(
-                        os.path.join(mmap_dir, f'usage_{i}_temp.npy'),
-                        mode='w+',
-                        dtype=usage_mmap.dtype,
-                        shape=(new_total,) + usage_mmap.shape[1:]
-                    )
-                    usage_mmap_resized[:total_windows] = usage_mmap[:]
-                    usage_mmap_resized[total_windows:new_total] = usage_array
-                    del usage_mmap, usage_mmap_resized
-                    os.replace(os.path.join(mmap_dir, f'usage_{i}_temp.npy'), 
-                              os.path.join(mmap_dir, f'usage_{i}.npy'))
-                
-                total_windows = new_total
-            
-            all_metadata.append(metadata)
-            
-            genome_time = time.time() - genome_time_start
-            log_print(f"        {genome_id} processed in {genome_time:.2f} seconds")
-            
-            # Clear memory after each genome
-            del sequences, labels, usage_arrays, species_ids, metadata
-            import gc
-            gc.collect()
-        
-        # Restore loader
-        loader.loaded_data = split_sites
-        
-        # Combine all metadata
-        metadata = pd.concat(all_metadata, ignore_index=True)
-        
-        log_print(f"\n    Total windows created: {total_windows}")
-        log_print(f"    Combined metadata rows: {len(metadata)}")
-        
-        # Reload final arrays for info display
-        sequences = np.load(os.path.join(mmap_dir, 'sequences.npy'), mmap_mode='r')
-        labels = np.load(os.path.join(mmap_dir, 'labels.npy'), mmap_mode='r')
-        species_ids = np.load(os.path.join(mmap_dir, 'species_ids.npy'), mmap_mode='r')
-        usage_arrays = [np.load(os.path.join(mmap_dir, f'usage_{i}.npy'), mmap_mode='r') 
-                       for i in range(len(loader.usage_conditions))]
-        
-    else:
-        # Original processing: all genomes at once
-        loader.loaded_data = split_sites
-        
-        sequences, labels, usage_arrays, metadata, species_ids = loader.to_arrays(
-            window_size=args.window_size,
-            context_size=args.context_size,
-            alpha_threshold=args.alpha_threshold,
-            n_workers=n_cpus,
-            save_memmap=mmap_dir
-        )
+    # Use chunked splitting (always)
+    result = split_to_memmap_chunked(
+        loader=loader,
+        split_sites=split_sites,
+        usage_conditions=loader.usage_conditions,
+        mmap_dir=mmap_dir,
+        window_size=args.window_size,
+        context_size=args.context_size,
+        alpha_threshold=args.alpha_threshold,
+        requested_workers=n_cpus,
+        chunk_size=args.chunk_size,
+        log_fn=log_print,
+    )
     
+    # Reload lightweight info from metadata.json
+    with open(result["meta_file"], "r") as f:
+        meta_out = json.load(f)
+
+    # Open memmaps for shape logging (no full load)
+    seq_path = meta_out["paths"]["sequences"]
+    lbl_path = meta_out["paths"]["labels"]
+    spc_path = meta_out["paths"]["species_ids"]
+    seq_shape = tuple(meta_out["shapes"]["sequences"])
+    lbl_shape = tuple(meta_out["shapes"]["labels"])
+    spc_shape = tuple(meta_out["shapes"]["species_ids"])
+    seq_dtype = np.dtype(meta_out["dtypes"]["sequences"])
+    lbl_dtype = np.dtype(meta_out["dtypes"]["labels"])
+    spc_dtype = np.dtype(meta_out["dtypes"]["species_ids"])
+
+    sequences = np.memmap(seq_path, mode='r', dtype=seq_dtype, shape=seq_shape)
+    labels = np.memmap(lbl_path, mode='r', dtype=lbl_dtype, shape=lbl_shape)
+    species_ids = np.memmap(spc_path, mode='r', dtype=spc_dtype, shape=spc_shape)
+
+    usage_arrays = []
+    for ue in meta_out.get("usage", []):
+        usage_arrays.append(np.memmap(ue["path"], mode='r', dtype=np.dtype(ue["dtype"]), shape=tuple(ue["shape"])))
+
+    # Use combined metadata from splitter
+    metadata = result["metadata"]
+
     log_print(f"    Created {len(sequences)} windows")
     log_print(f"    Sequences shape: {sequences.shape}")
     log_print(f"    Labels shape: {labels.shape}")
@@ -466,8 +301,20 @@ for split in ['train', 'test']:
     with open(os.path.join(output_dir, f"species_info_{split}.json"), 'w') as f:
         json.dump(species_info, f, indent=2)
     
-    # Save usage info
-    usage_info = loader.get_usage_array_info(usage_arrays)
+    # Save usage info from metadata.json
+    usage_info = {
+        "n_conditions": len(meta_out.get("usage", [])),
+        "usage_files": [
+            {
+                "key": ue["key"],
+                "path": ue["path"],
+                "dtype": ue["dtype"],
+                "shape": ue["shape"]
+            }
+            for ue in meta_out.get("usage", [])
+        ],
+        "total_windows": meta_out.get("total_windows", 0)
+    }
     with open(os.path.join(output_dir, f"usage_info_{split}.json"), 'w') as f:
         json.dump(usage_info, f, indent=2, default=str)
     
@@ -480,13 +327,12 @@ for split in ['train', 'test']:
     split_time = time.time() - split_start
     log_print(f"    {split.capitalize()} split completed in {split_time:.2f} seconds")
     
-    # Clear memory if sequential mode
-    if args.sequential or args.process_by_genome:
-        log_print(f"    Clearing memory after {split} split...")
-        del sequences, labels, usage_arrays, metadata, species_ids
-        import gc
-        gc.collect()
-        log_print(f"    Memory cleared")
+    # Clear memory after each split
+    log_print(f"    Clearing memory after {split} split...")
+    del sequences, labels, usage_arrays, metadata, species_ids
+    import gc
+    gc.collect()
+    log_print(f"    Memory cleared")
 
 loader.loaded_data = original_loaded_data
 
