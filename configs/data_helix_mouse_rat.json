@@ -26,12 +26,12 @@
   ],
   "usage_files": {
     "mouse_GRCm38": {
-      "pattern": "/home/elek/sds/sd17d003/Anamaria/spliser_for_splicevo/Mus_musculus/Mouse.{tissue}.{timepoint}.combined.tsv",
+      "pattern": "/home/elek/projects/splicing/results/spliser/Mus_musculus/Mouse.{tissue}.{timepoint}.combined.tsv",
       "tissues": ["Brain", "Cerebellum", "Heart", "Kidney", "Liver", "Ovary", "Testis"],
       "timepoints": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     },
     "rat_Rnor5.0": {
-      "pattern": "/home/elek/sds/sd17d003/Anamaria/spliser_for_splicevo/Rattus_norvegicus/Rat.{tissue}.{timepoint}.combined.tsv",
+      "pattern": "/home/elek/projects/splicing/results/spliser/Rattus_norvegicus/Rat.{tissue}.{timepoint}.combined.tsv",
       "tissues": ["Brain", "Cerebellum", "Heart", "Kidney", "Liver"],
       "timepoints": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     }

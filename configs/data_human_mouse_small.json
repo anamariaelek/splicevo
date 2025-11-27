@@ -26,12 +26,12 @@
   ],
   "usage_files": {
     "human_GRCh37": {
-      "pattern": "/home/elek/projects/splicing/results/spliser/Homo_sapiens/Human.{tissue}.{timepoint}.combined.tsv",
+      "pattern": "/home/elek/sds/sd17d003/Anamaria/spliser_for_splicevo/Homo_sapiens/Human.{tissue}.{timepoint}.combined.tsv",
       "tissues": ["Brain", "Cerebellum"],
       "timepoints": [1, 5]
     },
     "mouse_GRCm38": {
-      "pattern": "/home/elek/projects/splicing/results/spliser/Mus_musculus/Mouse.{tissue}.{timepoint}.combined.tsv",
+      "pattern": "/home/elek/sds/sd17d003/Anamaria/spliser_for_splicevo/Mus_musculus/Mouse.{tissue}.{timepoint}.combined.tsv",
       "tissues": ["Brain", "Cerebellum"],
       "timepoints": [1, 5]
     }
