@@ -60,12 +60,14 @@ Reads individual genome directories and combines them into train/test splits bas
 
 **Usage:**
 ```bash
+SPLICEVO_DIR=/home/elek/projects/splicevo
+ORTHOLOGY_FILE=/home/elek/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
 python ${SPLICEVO_DIR}/scripts/data_split.py \
-    --input_dir data/processed_small \
-    --output_dir data/splits_small/run1 \
-    --orthology_file ~/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv \
+    --input_dir data/processed \
+    --output_dir data/splits/run1 \
+    --orthology_file ${ORTHOLOGY_FILE} \
     --pov_genome human_GRCh37 \
-    --test_chromosomes 21 \
+    --test_chromosomes 1 3 5 \
     --quiet &
 ```
 

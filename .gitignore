@@ -109,3 +109,4 @@ ENV/
 
 # Data
 data
+scripts/slurm*

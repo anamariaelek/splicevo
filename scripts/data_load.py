@@ -210,6 +210,7 @@ sequences, labels, usage_arrays, metadata, species_ids = loader.to_arrays(
     context_size=context_size,
     alpha_threshold=alpha_threshold,
     n_workers=n_cpus,
+    use_parallel=False,
     save_memmap=genome_output_dir
 )
 

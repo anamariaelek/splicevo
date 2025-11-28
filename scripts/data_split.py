@@ -97,7 +97,7 @@ log_print("Step 2: Loading orthology file...")
 step2_start = time.time()
 
 # Read the orthology file - it's a TSV with columns: ortholog_group, genome_id, gene_id
-orthology_df = pd.read_csv(args.orthology_file, sep='\t')
+orthology_df = pd.read_csv(args.orthology_file, sep='\t', dtype={'ortholog_group': str, 'genome_id': str, 'gene_id': str})
 
 log_print(f"  Orthology file shape: {orthology_df.shape}")
 log_print(f"  Columns: {list(orthology_df.columns)}")
@@ -212,6 +212,14 @@ test_sequences_list = []
 test_labels_list = []
 test_metadata_list = []
 
+train_usage_alpha_list = []
+train_usage_beta_list = []
+train_usage_sse_list = []
+
+test_usage_alpha_list = []
+test_usage_beta_list = []
+test_usage_sse_list = []
+
 total_train_seqs = 0
 total_test_seqs = 0
 
@@ -258,6 +266,29 @@ for genome_id in sorted(genome_dirs):
     labels = np.memmap(os.path.join(genome_dir, 'labels.mmap'), 
                       dtype=label_dtype, mode='r', shape=label_shape)
     
+    # Load usage arrays if they exist
+    usage_alpha = None
+    usage_beta = None
+    usage_sse = None
+    
+    usage_alpha_path = os.path.join(genome_dir, 'usage_alpha.mmap')
+    if os.path.exists(usage_alpha_path):
+        usage_alpha_shape = tuple(summary['sequence_shape'][:1])  # Same first dimension as sequences
+        usage_alpha_dtype = summary['dtypes'].get('usage_alpha', 'float32')
+        usage_alpha = np.memmap(usage_alpha_path, dtype=usage_alpha_dtype, mode='r', shape=usage_alpha_shape)
+    
+    usage_beta_path = os.path.join(genome_dir, 'usage_beta.mmap')
+    if os.path.exists(usage_beta_path):
+        usage_beta_shape = tuple(summary['sequence_shape'][:1])
+        usage_beta_dtype = summary['dtypes'].get('usage_beta', 'float32')
+        usage_beta = np.memmap(usage_beta_path, dtype=usage_beta_dtype, mode='r', shape=usage_beta_shape)
+    
+    usage_sse_path = os.path.join(genome_dir, 'usage_sse.mmap')
+    if os.path.exists(usage_sse_path):
+        usage_sse_shape = tuple(summary['sequence_shape'][:1])
+        usage_sse_dtype = summary['dtypes'].get('usage_sse', 'float32')
+        usage_sse = np.memmap(usage_sse_path, dtype=usage_sse_dtype, mode='r', shape=usage_sse_shape)
+    
     # Extract and save train sequences
     if train_indices:
         train_seqs = sequences[train_indices]
@@ -265,6 +296,13 @@ for genome_id in sorted(genome_dirs):
         train_sequences_list.append(train_seqs)
         train_labels_list.append(train_lbls)
         total_train_seqs += len(train_indices)
+        
+        if usage_alpha is not None:
+            train_usage_alpha_list.append(usage_alpha[train_indices])
+        if usage_beta is not None:
+            train_usage_beta_list.append(usage_beta[train_indices])
+        if usage_sse is not None:
+            train_usage_sse_list.append(usage_sse[train_indices])
         
         # Add metadata entries
         for idx in train_indices:
@@ -278,6 +316,13 @@ for genome_id in sorted(genome_dirs):
         test_sequences_list.append(test_seqs)
         test_labels_list.append(test_lbls)
         total_test_seqs += len(test_indices)
+        
+        if usage_alpha is not None:
+            test_usage_alpha_list.append(usage_alpha[test_indices])
+        if usage_beta is not None:
+            test_usage_beta_list.append(usage_beta[test_indices])
+        if usage_sse is not None:
+            test_usage_sse_list.append(usage_sse[test_indices])
         
         # Add metadata entries
         for idx in test_indices:
@@ -298,19 +343,37 @@ step5_start = time.time()
 log_print("  Combining train data...")
 train_sequences = np.concatenate(train_sequences_list, axis=0) if train_sequences_list else np.array([])
 train_labels = np.concatenate(train_labels_list, axis=0) if train_labels_list else np.array([])
+train_usage_alpha = np.concatenate(train_usage_alpha_list, axis=0) if train_usage_alpha_list else None
+train_usage_beta = np.concatenate(train_usage_beta_list, axis=0) if train_usage_beta_list else None
+train_usage_sse = np.concatenate(train_usage_sse_list, axis=0) if train_usage_sse_list else None
 train_metadata_df = pd.DataFrame(train_metadata_list) if train_metadata_list else pd.DataFrame()
 
 log_print(f"    Train sequences shape: {train_sequences.shape}")
 log_print(f"    Train labels shape: {train_labels.shape}")
+if train_usage_alpha is not None:
+    log_print(f"    Train usage_alpha shape: {train_usage_alpha.shape}")
+if train_usage_beta is not None:
+    log_print(f"    Train usage_beta shape: {train_usage_beta.shape}")
+if train_usage_sse is not None:
+    log_print(f"    Train usage_sse shape: {train_usage_sse.shape}")
 
 # Combine test data
 log_print("  Combining test data...")
 test_sequences = np.concatenate(test_sequences_list, axis=0) if test_sequences_list else np.array([])
 test_labels = np.concatenate(test_labels_list, axis=0) if test_labels_list else np.array([])
+test_usage_alpha = np.concatenate(test_usage_alpha_list, axis=0) if test_usage_alpha_list else None
+test_usage_beta = np.concatenate(test_usage_beta_list, axis=0) if test_usage_beta_list else None
+test_usage_sse = np.concatenate(test_usage_sse_list, axis=0) if test_usage_sse_list else None
 test_metadata_df = pd.DataFrame(test_metadata_list) if test_metadata_list else pd.DataFrame()
 
 log_print(f"    Test sequences shape: {test_sequences.shape}")
 log_print(f"    Test labels shape: {test_labels.shape}")
+if test_usage_alpha is not None:
+    log_print(f"    Test usage_alpha shape: {test_usage_alpha.shape}")
+if test_usage_beta is not None:
+    log_print(f"    Test usage_beta shape: {test_usage_beta.shape}")
+if test_usage_sse is not None:
+    log_print(f"    Test usage_sse shape: {test_usage_sse.shape}")
 
 # Save train data
 if len(train_sequences) > 0:
@@ -329,6 +392,27 @@ if len(train_sequences) > 0:
                                shape=train_labels.shape)
     train_lbl_mmap[:] = train_labels
     del train_lbl_mmap
+    
+    if train_usage_alpha is not None:
+        train_alpha_mmap = np.memmap(os.path.join(train_dir, 'usage_alpha.mmap'), 
+                                     dtype=train_usage_alpha.dtype, mode='w+', 
+                                     shape=train_usage_alpha.shape)
+        train_alpha_mmap[:] = train_usage_alpha
+        del train_alpha_mmap
+    
+    if train_usage_beta is not None:
+        train_beta_mmap = np.memmap(os.path.join(train_dir, 'usage_beta.mmap'), 
+                                    dtype=train_usage_beta.dtype, mode='w+', 
+                                    shape=train_usage_beta.shape)
+        train_beta_mmap[:] = train_usage_beta
+        del train_beta_mmap
+    
+    if train_usage_sse is not None:
+        train_sse_mmap = np.memmap(os.path.join(train_dir, 'usage_sse.mmap'), 
+                                   dtype=train_usage_sse.dtype, mode='w+', 
+                                   shape=train_usage_sse.shape)
+        train_sse_mmap[:] = train_usage_sse
+        del train_sse_mmap
     
     train_metadata_df.to_csv(os.path.join(train_dir, 'metadata.csv'), index=False)
 
@@ -349,6 +433,27 @@ if len(test_sequences) > 0:
                               shape=test_labels.shape)
     test_lbl_mmap[:] = test_labels
     del test_lbl_mmap
+    
+    if test_usage_alpha is not None:
+        test_alpha_mmap = np.memmap(os.path.join(test_dir, 'usage_alpha.mmap'), 
+                                    dtype=test_usage_alpha.dtype, mode='w+', 
+                                    shape=test_usage_alpha.shape)
+        test_alpha_mmap[:] = test_usage_alpha
+        del test_alpha_mmap
+    
+    if test_usage_beta is not None:
+        test_beta_mmap = np.memmap(os.path.join(test_dir, 'usage_beta.mmap'), 
+                                   dtype=test_usage_beta.dtype, mode='w+', 
+                                   shape=test_usage_beta.shape)
+        test_beta_mmap[:] = test_usage_beta
+        del test_beta_mmap
+    
+    if test_usage_sse is not None:
+        test_sse_mmap = np.memmap(os.path.join(test_dir, 'usage_sse.mmap'), 
+                                  dtype=test_usage_sse.dtype, mode='w+', 
+                                  shape=test_usage_sse.shape)
+        test_sse_mmap[:] = test_usage_sse
+        del test_sse_mmap
     
     test_metadata_df.to_csv(os.path.join(test_dir, 'metadata.csv'), index=False)
 
