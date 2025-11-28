@@ -1,4 +1,8 @@
-"""Split loaded data into train/test sets based on orthology."""
+"""Split genome data into train/test sets based on chromosomes and orthology.
+
+This script reads data from individual genome directories (created by data_load.py)
+and combines them into train/test splits based on chromosome assignment and orthology.
+"""
 
 import time
 import os
@@ -8,31 +12,27 @@ import json
 import argparse
 import sys
 import pandas as pd
-import pickle
-
-from splicevo.data import MultiGenomeDataLoader
-from splicevo.data.data_splitter import split_to_memmap_chunked, effective_workers
+from pathlib import Path
 
 parser = argparse.ArgumentParser(description="Split loaded data into train/test sets")
-parser.add_argument("--input_dir", type=str, required=True, help="Directory with loaded data")
-parser.add_argument("--output_dir", type=str, required=True, help="Directory to save split results")
-parser.add_argument("--n_cpus", type=int, default=2, help="Number of CPU cores to use (default: 2 for memory safety)")
-parser.add_argument("--quiet", action='store_true', help="Suppress console output")
+parser.add_argument("--input_dir", type=str, required=True, 
+                    help="Base directory containing genome subdirectories")
+parser.add_argument("--output_dir", type=str, required=True, 
+                    help="Directory to save split results")
+parser.add_argument("--orthology_file", type=str, required=True, 
+                    help="Path to orthology file (TSV format)")
 parser.add_argument("--pov_genome", type=str, default="human_GRCh37", 
                     help="Point-of-view genome for chromosome splitting")
-parser.add_argument("--test_chromosomes", type=str, nargs='+', default=['1', '3', '5'], 
-                    help="Test chromosomes for POV genome")
-parser.add_argument("--window_size", type=int, default=1000, help="Window size for sequences")
-parser.add_argument("--context_size", type=int, default=450, help="Context size on each side")
-parser.add_argument("--alpha_threshold", type=int, default=5, help="Minimum alpha value threshold")
-parser.add_argument("--chunk-size", type=int, default=2000, help="Number of genes to process per chunk (default: 2000)")
+parser.add_argument("--test_chromosomes", type=int, nargs='+', default=[20], 
+                    help="Test chromosomes for POV genome (as integers)")
+parser.add_argument("--n_cpus", type=int, default=2, help="Number of CPU cores to use")
+parser.add_argument("--quiet", action='store_true', help="Suppress console output")
 args = parser.parse_args()
 
 input_dir = args.input_dir
 output_dir = args.output_dir
-n_cpus = args.n_cpus
 pov_genome = args.pov_genome
-test_chromosomes = args.test_chromosomes
+test_chromosomes = set(str(c) for c in args.test_chromosomes)
 
 # Start timing
 script_start_time = time.time()
@@ -70,402 +70,326 @@ log_print(f"Train/test splitting started at: {datetime.now().strftime('%Y-%m-%d 
 log_print(f"Input directory: {input_dir}")
 log_print(f"Output directory: {output_dir}")
 log_print(f"POV genome: {pov_genome}")
-log_print(f"Test chromosomes: {test_chromosomes}")
+log_print(f"Test chromosomes: {sorted(test_chromosomes)}")
 log_print("=" * 60)
 
-# Step 1: Load intermediate data
-log_print("Step 1: Loading intermediate data...")
+# Step 1: Discover available genomes
+log_print("\nStep 1: Discovering available genomes...")
 step1_start = time.time()
 
-loader_file = os.path.join(input_dir, "loader_state.pkl")
-log_print(f"  Loading loader state from {loader_file}")
-with open(loader_file, 'rb') as f:
-    loader_state = pickle.load(f)
+genome_dirs = []
+for item in os.listdir(input_dir):
+    item_path = os.path.join(input_dir, item)
+    if os.path.isdir(item_path):
+        summary_file = os.path.join(item_path, 'summary.json')
+        if os.path.exists(summary_file):
+            genome_dirs.append(item)
 
-# Reconstruct loader
-log_print("  Reconstructing loader...")
-loader = MultiGenomeDataLoader()
-loader.loaded_data = loader_state['loaded_data']
-loader.usage_conditions = loader_state['usage_conditions']
-loader.genome_to_species = loader_state['genome_to_species']
-loader.species_to_id = loader_state['species_to_id']
-loader.orthology_table = loader_state['orthology_table']
-
-# Reconstruct genomes dict (paths only, don't load actual genomes yet)
-from splicevo.io.genome import GenomeData
-from pathlib import Path
-for gid, gdata in loader_state['genomes'].items():
-    loader.genomes[gid] = GenomeData(
-        genome_id=gdata['genome_id'],
-        genome_path=Path(gdata['genome_path']),
-        gtf_path=Path(gdata['gtf_path']),
-        chromosomes=gdata['chromosomes'],
-        metadata=gdata['metadata']
-    )
-
-log_print(f"  Loaded {len(loader.loaded_data)} splice sites")
-log_print(f"  Loaded {len(loader.genomes)} genomes")
+log_print(f"  Found {len(genome_dirs)} genome directories:")
+for gid in sorted(genome_dirs):
+    log_print(f"    - {gid}")
 
 step1_time = time.time() - step1_start
-log_print(f"  Intermediate data loaded in {step1_time:.2f} seconds")
-log_print("")
+log_print(f"✓ Discovery completed in {step1_time:.2f} seconds\n")
 
-# Step 2: Determine train/test gene split
-log_print("Step 2: Determining train/test split based on orthology...")
+# Step 2: Load orthology file
+log_print("Step 2: Loading orthology file...")
 step2_start = time.time()
 
-df = loader.get_dataframe()
-ortho_df = loader.orthology_table
+# Read the orthology file - it's a TSV with columns: ortholog_group, genome_id, gene_id
+orthology_df = pd.read_csv(args.orthology_file, sep='\t')
 
-# Add diagnostic logging for loaded data
-log_print(f"\n  Loaded data breakdown:")
-for genome_id in df['genome_id'].unique():
-    genome_df = df[df['genome_id'] == genome_id]
-    log_print(f"    {genome_id}: {len(genome_df)} sites, {genome_df['gene_id'].nunique()} genes")
-    log_print(f"      Chromosomes: {sorted(genome_df['chromosome'].unique())}")
+log_print(f"  Orthology file shape: {orthology_df.shape}")
+log_print(f"  Columns: {list(orthology_df.columns)}")
 
-if ortho_df is None:
-    log_print("WARNING: No orthology table loaded. Cannot split by orthology.")
-    log_print("Falling back to chromosome-based split for POV genome only.")
-    
-    df['split'] = 'train'
-    pov_mask = df['genome_id'] == pov_genome
-    test_chr_mask = df['chromosome'].isin(test_chromosomes)
-    df.loc[pov_mask & test_chr_mask, 'split'] = 'test'
-    
-    test_genes = set(df[df['split'] == 'test']['gene_id'].unique())
-    train_genes = set(df[df['split'] == 'train']['gene_id'].unique())
-    test_ortholog_groups = []
-    
-else:
-    # Find genes on test chromosomes in POV genome
-    pov_test_genes = df[
-        (df['genome_id'] == pov_genome) & 
-        (df['chromosome'].isin(test_chromosomes))
-    ]['gene_id'].unique()
-    
-    log_print(f"\n  POV genome ({pov_genome}) test chromosomes: {test_chromosomes}")
-    log_print(f"  Found {len(pov_test_genes)} genes on test chromosomes in POV genome")
-    
-    # Find ortholog groups for these test genes
-    test_ortholog_groups = ortho_df[
-        (ortho_df['genome_id'] == pov_genome) & 
-        (ortho_df['gene_id'].isin(pov_test_genes))
-    ]['ortholog_group'].unique()
-    
-    log_print(f"  These genes belong to {len(test_ortholog_groups)} ortholog groups")
-    
-    # Get all genes in these ortholog groups (across all species)
-    test_genes_all_species = ortho_df[
-        ortho_df['ortholog_group'].isin(test_ortholog_groups)
-    ]['gene_id'].unique()
-    
-    log_print(f"  Total genes in test ortholog groups (all species): {len(test_genes_all_species)}")
-    
-    # Diagnostic: show distribution across genomes in orthology
-    log_print(f"\n  Test genes by genome (from orthology):")
-    test_ortho_by_genome = ortho_df[ortho_df['ortholog_group'].isin(test_ortholog_groups)]
-    for genome_id in test_ortho_by_genome['genome_id'].unique():
-        n_genes = test_ortho_by_genome[test_ortho_by_genome['genome_id'] == genome_id]['gene_id'].nunique()
-        log_print(f"    {genome_id}: {n_genes} genes")
-    
-    # Get genes actually present in loaded data
-    loaded_gene_ids = set(df['gene_id'].unique())
-    
-    test_genes = set(test_genes_all_species) & loaded_gene_ids
-    train_genes = loaded_gene_ids - test_genes
-    
-    # Diagnostic: show which genes were filtered out
-    filtered_out = set(test_genes_all_species) - test_genes
-    if filtered_out:
-        log_print(f"\n  Warning: {len(filtered_out)} test genes from orthology not found in loaded data")
-        # Show breakdown by genome
-        filtered_by_genome = ortho_df[ortho_df['gene_id'].isin(filtered_out)]
-        for genome_id in filtered_by_genome['genome_id'].unique():
-            n_filtered = filtered_by_genome[filtered_by_genome['genome_id'] == genome_id]['gene_id'].nunique()
-            log_print(f"    {genome_id}: {n_filtered} genes filtered out")
-    
-    log_print(f"\n  Train genes (in loaded data): {len(train_genes)}")
-    log_print(f"  Test genes (in loaded data): {len(test_genes)}")
-    
-    # Diagnostic: show test genes by genome
-    log_print(f"\n  Test genes by genome (in loaded data):")
-    for genome_id in df['genome_id'].unique():
-        genome_test_genes = df[(df['genome_id'] == genome_id) & (df['gene_id'].isin(test_genes))]['gene_id'].unique()
-        log_print(f"    {genome_id}: {len(genome_test_genes)} genes")
-    
-    # Check that test genes do not overlap any train genes by genomic coordinates
-    log_print(f"\n  Checking for coordinate overlaps between train and test genes...")
-    
-    overlap_issues = []
-    leaking_genes = set()
-    
-    for genome_id in df['genome_id'].unique():
-        genome_df = df[df['genome_id'] == genome_id]
-        
-        train_genes_genome = genome_df[(genome_df['gene_id'].isin(train_genes)) & 
-                                        (genome_df['genome_id'] == genome_id)].copy()
-        test_genes_genome = genome_df[(genome_df['gene_id'].isin(test_genes)) & 
-                                       (genome_df['genome_id'] == genome_id)].copy()
-        
-        if len(train_genes_genome) == 0 or len(test_genes_genome) == 0:
-            continue
-        
-        # Group by chromosome and check for overlaps
-        for chrom in genome_df['chromosome'].unique():
-            train_chrom = train_genes_genome[train_genes_genome['chromosome'] == chrom]
-            test_chrom = test_genes_genome[test_genes_genome['chromosome'] == chrom]
-            
-            if len(train_chrom) == 0 or len(test_chrom) == 0:
-                continue
-            
-            # Get coordinate ranges for each set
-            train_ranges = train_chrom.groupby('gene_id').agg({
-                'position': ['min', 'max']
-            }).values
-            
-            test_ranges = test_chrom.groupby('gene_id').agg({
-                'position': ['min', 'max']
-            }).values
-            
-            # Check for overlaps within 5000bp 
-            overlap_buffer = 5000
-            for test_gene_idx, (test_min, test_max) in enumerate(test_ranges):
-                for train_gene_idx, (train_min, train_max) in enumerate(train_ranges):
-                    # Check if ranges overlap or are very close
-                    if not (test_max + overlap_buffer < train_min or test_min - overlap_buffer > train_max):
-                        test_gene_id = test_chrom['gene_id'].unique()[test_gene_idx]
-                        train_gene_id = train_chrom['gene_id'].unique()[train_gene_idx]
-                        distance_bp = max(0, min(abs(test_min - train_max), abs(train_min - test_max)))
-                        
-                        overlap_issues.append({
-                            'genome': genome_id,
-                            'chromosome': chrom,
-                            'test_gene': test_gene_id,
-                            'train_gene': train_gene_id,
-                            'distance_bp': distance_bp
-                        })
-                        
-                        # Mark this test gene for relabeling
-                        leaking_genes.add(test_gene_id)
-    
-    if leaking_genes:
-        log_print(f"\n    Found {len(leaking_genes)} test genes with coordinate overlaps")
-        log_print(f"      Relabeling these genes as train to prevent data leakage...")
-        
-        # Move leaking genes from test to train
-        test_genes = test_genes - leaking_genes
-        train_genes = train_genes | leaking_genes
-        
-        # Show details of relabeled genes
-        overlap_df = pd.DataFrame(overlap_issues)
-        relabeled_details = overlap_df.drop_duplicates('test_gene')
-        log_print(f"\n  Relabeled genes (first 20):")
-        for _, row in relabeled_details.head(20).iterrows():
-            log_print(f"    {row['test_gene']:20s} ({row['genome']} chr{row['chromosome']}) - {row['distance_bp']}bp from {row['train_gene']}")
-        
-        if len(relabeled_details) > 20:
-            log_print(f"    ... and {len(relabeled_details) - 20} more genes")
-    else:
-        log_print(f"    No coordinate overlaps detected between train and test genes")
+# Create mappings
+# gene_id -> ortholog_group_id
+gene_to_group = {}
+for _, row in orthology_df.iterrows():
+    gene_id = row['gene_id']
+    group_id = row['ortholog_group']
+    gene_to_group[gene_id] = group_id
 
-    df['split'] = df['gene_id'].apply(lambda x: 'test' if x in test_genes else 'train')
+# genome_id -> set of gene_ids in that genome
+genome_genes = {}
+for _, row in orthology_df.iterrows():
+    genome_id = row['genome_id']
+    gene_id = row['gene_id']
+    if genome_id not in genome_genes:
+        genome_genes[genome_id] = set()
+    genome_genes[genome_id].add(gene_id)
 
-# Count splice sites in each split
-train_sites = df[df['split'] == 'train']
-test_sites = df[df['split'] == 'test']
-
-log_print(f"\nSplit statistics:")
-log_print(f"  Train: {len(train_sites)} splice sites from {len(train_genes)} genes")
-log_print(f"  Test: {len(test_sites)} splice sites from {len(test_genes)} genes")
-
-# Show distribution by genome and site type
-for split_name, split_df in [('Train', train_sites), ('Test', test_sites)]:
-    log_print(f"\n  {split_name} split by genome:")
-    for genome_id in split_df['genome_id'].unique():
-        genome_sites = split_df[split_df['genome_id'] == genome_id]
-        n_donors = (genome_sites['site_type'] == 1).sum()
-        n_acceptors = (genome_sites['site_type'] == 2).sum()
-        log_print(f"    {genome_id}: {len(genome_sites)} sites ({n_donors} donors, {n_acceptors} acceptors)")
+log_print(f"  Loaded {len(gene_to_group)} gene-to-group mappings")
+n_groups = len(set(gene_to_group.values()))
+log_print(f"  Total ortholog groups: {n_groups}")
+log_print(f"  Genomes in orthology file: {sorted(genome_genes.keys())}")
 
 step2_time = time.time() - step2_start
-log_print(f"  \nTrain/test split determined in {step2_time:.2f} seconds")
-log_print("")
+log_print(f"✓ Orthology loaded in {step2_time:.2f} seconds\n")
 
-# Step 3: Convert to arrays for each split
-log_print("Step 3: Creating train and test datasets...")
-log_print("  Using genome-by-genome chunked processing (memory-efficient mode)")
-log_print(f"  Workers: {n_cpus}, Chunk size: {args.chunk_size}")
+# Step 3: Determine train/test split based on POV genome chromosomes
+log_print("Step 3: Determining train/test split...")
 step3_start = time.time()
 
-original_loaded_data = loader.loaded_data
+# Load POV genome metadata to get chromosome info
+pov_genome_dir = os.path.join(input_dir, pov_genome)
+if not os.path.exists(pov_genome_dir):
+    log_print(f"ERROR: POV genome directory not found: {pov_genome_dir}")
+    sys.exit(1)
 
-for split in ['train', 'test']:
-    log_print(f"\n  Processing {split} split...")
-    split_start = time.time()
-    
-    split_genes = train_genes if split == 'train' else test_genes
-    
-    # Filter loaded_data
-    split_sites = [
-        site for site in original_loaded_data 
-        if site.gene_id in split_genes
-    ]
-    
-    log_print(f"    Filtered to {len(split_sites)} splice sites")
-    
-    mmap_dir = os.path.join(output_dir, f'memmap_{split}')
-    
-    # Use chunked splitting (always)
-    result = split_to_memmap_chunked(
-        loader=loader,
-        split_sites=split_sites,
-        usage_conditions=loader.usage_conditions,
-        mmap_dir=mmap_dir,
-        window_size=args.window_size,
-        context_size=args.context_size,
-        alpha_threshold=args.alpha_threshold,
-        requested_workers=n_cpus,
-        chunk_size=args.chunk_size,
-        log_fn=log_print,
-    )
-    
-    # Reload lightweight info from metadata.json
-    with open(result["meta_file"], "r") as f:
-        meta_out = json.load(f)
+pov_metadata = pd.read_csv(os.path.join(pov_genome_dir, 'metadata.csv'))
+# Convert chromosome to string for consistent comparison
+pov_metadata['chromosome'] = pov_metadata['chromosome'].astype(str)
 
-    # Open memmaps for shape logging (no full load)
-    seq_path = meta_out["paths"]["sequences"]
-    lbl_path = meta_out["paths"]["labels"]
-    spc_path = meta_out["paths"]["species_ids"]
-    seq_shape = tuple(meta_out["shapes"]["sequences"])
-    lbl_shape = tuple(meta_out["shapes"]["labels"])
-    spc_shape = tuple(meta_out["shapes"]["species_ids"])
-    seq_dtype = np.dtype(meta_out["dtypes"]["sequences"])
-    lbl_dtype = np.dtype(meta_out["dtypes"]["labels"])
-    spc_dtype = np.dtype(meta_out["dtypes"]["species_ids"])
+log_print(f"  Loaded POV genome metadata: {len(pov_metadata)} entries")
 
-    sequences = np.memmap(seq_path, mode='r', dtype=seq_dtype, shape=seq_shape)
-    labels = np.memmap(lbl_path, mode='r', dtype=lbl_dtype, shape=lbl_shape)
-    species_ids = np.memmap(spc_path, mode='r', dtype=spc_dtype, shape=spc_shape)
+# Identify test and train genes from POV genome
+test_genes_pov = set()
+train_genes_pov = set()
 
-    usage_arrays = []
-    for ue in meta_out.get("usage", []):
-        usage_arrays.append(np.memmap(ue["path"], mode='r', dtype=np.dtype(ue["dtype"]), shape=tuple(ue["shape"])))
+for _, row in pov_metadata.iterrows():
+    gene_id = row['gene_id']
+    chrom = str(row['chromosome'])
+    
+    if chrom in test_chromosomes:
+        test_genes_pov.add(gene_id)
+    else:
+        train_genes_pov.add(gene_id)
 
-    # Use combined metadata from splitter
-    metadata = result["metadata"]
+log_print(f"  POV genome test genes (chrom {sorted(test_chromosomes)}): {len(test_genes_pov)}")
+log_print(f"  POV genome train genes: {len(train_genes_pov)}")
 
-    log_print(f"    Created {len(sequences)} windows")
-    log_print(f"    Sequences shape: {sequences.shape}")
-    log_print(f"    Labels shape: {labels.shape}")
-    log_print(f"    Species IDs shape: {species_ids.shape}")
-    
-    # Save metadata
-    metadata.to_csv(
-        os.path.join(output_dir, f"metadata_{split}.csv.gz"), 
-        index=False, 
-        compression='gzip'
-    )
-    
-    # Save species mapping
-    species_info = {
-        'species_mapping': loader.species_to_id,
-        'genome_to_species': loader.genome_to_species
-    }
-    with open(os.path.join(output_dir, f"species_info_{split}.json"), 'w') as f:
-        json.dump(species_info, f, indent=2)
-    
-    # Save usage info from metadata.json
-    usage_info = {
-        "n_conditions": len(meta_out.get("usage", [])),
-        "usage_files": [
-            {
-                "key": ue["key"],
-                "path": ue["path"],
-                "dtype": ue["dtype"],
-                "shape": ue["shape"]
-            }
-            for ue in meta_out.get("usage", [])
-        ],
-        "total_windows": meta_out.get("total_windows", 0)
-    }
-    with open(os.path.join(output_dir, f"usage_info_{split}.json"), 'w') as f:
-        json.dump(usage_info, f, indent=2, default=str)
-    
-    usage_summary = loader.get_usage_summary()
-    usage_summary.to_csv(
-        os.path.join(output_dir, f"usage_summary_{split}.csv"), 
-        index=False
-    )
-    
-    split_time = time.time() - split_start
-    log_print(f"    {split.capitalize()} split completed in {split_time:.2f} seconds")
-    
-    # Clear memory after each split
-    log_print(f"    Clearing memory after {split} split...")
-    del sequences, labels, usage_arrays, metadata, species_ids
-    import gc
-    gc.collect()
-    log_print(f"    Memory cleared")
+# Map POV genes to ortholog groups
+test_orthologs = set()
 
-loader.loaded_data = original_loaded_data
+n_test_mapped = 0
+
+for gene_id in test_genes_pov:
+    group_id = gene_to_group.get(gene_id)
+    if group_id:
+        test_orthologs.add(group_id)
+        n_test_mapped += 1
+
+log_print(f"  Mapped POV genes to orthology: {n_test_mapped}/{len(test_genes_pov)}")
+log_print(f"  Test ortholog groups: {len(test_orthologs)}")
+
+# Create gene-to-split mapping for all genomes
+# Strategy: By default, all genes go to train
+# If a gene's ortholog group contains ANY test gene from POV, the entire group goes to test
+gene_split_mapping = {}  # (genome_id, gene_id) -> 'train' or 'test'
+total_assignments = 0
+
+for gene_id, group_id in gene_to_group.items():
+    # Determine split: test if in test group, otherwise train
+    split = 'test' if group_id in test_orthologs else 'train'
+    
+    # Find which genome(s) this gene belongs to
+    for genome_id in genome_dirs:
+        if gene_id in genome_genes.get(genome_id, set()):
+            gene_split_mapping[(genome_id, gene_id)] = split
+            total_assignments += 1
+
+test_assignments = sum(1 for v in gene_split_mapping.values() if v == 'test')
+train_assignments = sum(1 for v in gene_split_mapping.values() if v == 'train')
+
+log_print(f"  Total gene assignments across all genomes: {total_assignments}")
+log_print(f"    Train: {train_assignments}")
+log_print(f"    Test: {test_assignments}")
 
 step3_time = time.time() - step3_start
-log_print(f"\n  All splits created in {step3_time:.2f} seconds")
-log_print("")
+log_print(f"✓ Split determined in {step3_time:.2f} seconds\n")
 
-# Step 4: Save gene lists and split info
-log_print("Step 4: Saving gene lists...")
+# Step 4: Load and split data from each genome
+log_print("Step 4: Loading and splitting genome data...")
 step4_start = time.time()
 
-log_print(f"  Saving {len(train_genes)} train genes")
-log_print(f"  Saving {len(test_genes)} test genes")
+# Initialize lists for collecting data
+train_sequences_list = []
+train_labels_list = []
+train_metadata_list = []
 
-with open(os.path.join(output_dir, "train_genes.txt"), 'w') as f:
-    for gene in sorted(train_genes):
-        f.write(f"{gene}\n")
+test_sequences_list = []
+test_labels_list = []
+test_metadata_list = []
 
-with open(os.path.join(output_dir, "test_genes.txt"), 'w') as f:
-    for gene in sorted(test_genes):
-        f.write(f"{gene}\n")
+total_train_seqs = 0
+total_test_seqs = 0
 
-split_info = {
-    'pov_genome': pov_genome,
-    'test_chromosomes': test_chromosomes,
-    'n_train_genes': len(train_genes),
-    'n_test_genes': len(test_genes),
-    'n_test_ortholog_groups': len(test_ortholog_groups),
-    'orthology_based_split': ortho_df is not None,
-    'window_size': args.window_size,
-    'context_size': args.context_size,
-    'alpha_threshold': args.alpha_threshold
-}
+for genome_id in sorted(genome_dirs):
+    log_print(f"\n  Processing {genome_id}...")
+    genome_dir = os.path.join(input_dir, genome_id)
+    
+    # Load summary
+    with open(os.path.join(genome_dir, 'summary.json'), 'r') as f:
+        summary = json.load(f)
+    
+    # Load metadata
+    metadata = pd.read_csv(os.path.join(genome_dir, 'metadata.csv'))
+    log_print(f"    Loaded metadata: {len(metadata)} entries")
+    
+    # Determine which sequences belong to train vs test
+    train_indices = []
+    test_indices = []
+    
+    for idx, row in metadata.iterrows():
+        gene_id = row['gene_id']
+        split = gene_split_mapping.get((genome_id, gene_id), None)
+        
+        if split == 'train':
+            train_indices.append(idx)
+        elif split == 'test':
+            test_indices.append(idx)
+    
+    log_print(f"    Train sequences: {len(train_indices)}")
+    log_print(f"    Test sequences: {len(test_indices)}")
+    
+    if len(train_indices) == 0 and len(test_indices) == 0:
+        log_print(f"    Skipping {genome_id} - no sequences assigned")
+        continue
+    
+    # Load sequences and labels
+    seq_shape = tuple(summary['sequence_shape'])
+    label_shape = tuple(summary['label_shape'])
+    seq_dtype = summary['dtypes']['sequences']
+    label_dtype = summary['dtypes']['labels']
+    
+    sequences = np.memmap(os.path.join(genome_dir, 'sequences.mmap'), 
+                         dtype=seq_dtype, mode='r', shape=seq_shape)
+    labels = np.memmap(os.path.join(genome_dir, 'labels.mmap'), 
+                      dtype=label_dtype, mode='r', shape=label_shape)
+    
+    # Extract and save train sequences
+    if train_indices:
+        train_seqs = sequences[train_indices]
+        train_lbls = labels[train_indices]
+        train_sequences_list.append(train_seqs)
+        train_labels_list.append(train_lbls)
+        total_train_seqs += len(train_indices)
+        
+        # Add metadata entries
+        for idx in train_indices:
+            seq_metadata = metadata.iloc[idx].to_dict()
+            train_metadata_list.append(seq_metadata)
+    
+    # Extract and save test sequences
+    if test_indices:
+        test_seqs = sequences[test_indices]
+        test_lbls = labels[test_indices]
+        test_sequences_list.append(test_seqs)
+        test_labels_list.append(test_lbls)
+        total_test_seqs += len(test_indices)
+        
+        # Add metadata entries
+        for idx in test_indices:
+            seq_metadata = metadata.iloc[idx].to_dict()
+            test_metadata_list.append(seq_metadata)
 
-with open(os.path.join(output_dir, "split_info.json"), 'w') as f:
-    json.dump(split_info, f, indent=2)
+log_print(f"\n  Total train sequences collected: {total_train_seqs}")
+log_print(f"  Total test sequences collected: {total_test_seqs}")
 
 step4_time = time.time() - step4_start
-log_print(f"  Gene lists saved in {step4_time:.2f} seconds")
+log_print(f"✓ Data loaded and split in {step4_time:.2f} seconds\n")
 
-# Summary timing report
+# Step 5: Combine and save train/test data
+log_print("Step 5: Combining and saving train/test data...")
+step5_start = time.time()
+
+# Combine train data
+log_print("  Combining train data...")
+train_sequences = np.concatenate(train_sequences_list, axis=0) if train_sequences_list else np.array([])
+train_labels = np.concatenate(train_labels_list, axis=0) if train_labels_list else np.array([])
+train_metadata_df = pd.DataFrame(train_metadata_list) if train_metadata_list else pd.DataFrame()
+
+log_print(f"    Train sequences shape: {train_sequences.shape}")
+log_print(f"    Train labels shape: {train_labels.shape}")
+
+# Combine test data
+log_print("  Combining test data...")
+test_sequences = np.concatenate(test_sequences_list, axis=0) if test_sequences_list else np.array([])
+test_labels = np.concatenate(test_labels_list, axis=0) if test_labels_list else np.array([])
+test_metadata_df = pd.DataFrame(test_metadata_list) if test_metadata_list else pd.DataFrame()
+
+log_print(f"    Test sequences shape: {test_sequences.shape}")
+log_print(f"    Test labels shape: {test_labels.shape}")
+
+# Save train data
+if len(train_sequences) > 0:
+    train_dir = os.path.join(output_dir, 'train')
+    os.makedirs(train_dir, exist_ok=True)
+    
+    log_print(f"  Saving train data to {train_dir}...")
+    train_seq_mmap = np.memmap(os.path.join(train_dir, 'sequences.mmap'), 
+                               dtype=train_sequences.dtype, mode='w+', 
+                               shape=train_sequences.shape)
+    train_seq_mmap[:] = train_sequences
+    del train_seq_mmap
+    
+    train_lbl_mmap = np.memmap(os.path.join(train_dir, 'labels.mmap'), 
+                               dtype=train_labels.dtype, mode='w+', 
+                               shape=train_labels.shape)
+    train_lbl_mmap[:] = train_labels
+    del train_lbl_mmap
+    
+    train_metadata_df.to_csv(os.path.join(train_dir, 'metadata.csv'), index=False)
+
+# Save test data
+if len(test_sequences) > 0:
+    test_dir = os.path.join(output_dir, 'test')
+    os.makedirs(test_dir, exist_ok=True)
+    
+    log_print(f"  Saving test data to {test_dir}...")
+    test_seq_mmap = np.memmap(os.path.join(test_dir, 'sequences.mmap'), 
+                              dtype=test_sequences.dtype, mode='w+', 
+                              shape=test_sequences.shape)
+    test_seq_mmap[:] = test_sequences
+    del test_seq_mmap
+    
+    test_lbl_mmap = np.memmap(os.path.join(test_dir, 'labels.mmap'), 
+                              dtype=test_labels.dtype, mode='w+', 
+                              shape=test_labels.shape)
+    test_lbl_mmap[:] = test_labels
+    del test_lbl_mmap
+    
+    test_metadata_df.to_csv(os.path.join(test_dir, 'metadata.csv'), index=False)
+
+# Save summary
+summary_data = {
+    'pov_genome': pov_genome,
+    'test_chromosomes': sorted(list(test_chromosomes)),
+    'n_genomes': len(genome_dirs),
+    'genomes': sorted(genome_dirs),
+    'train': {
+        'n_sequences': int(len(train_sequences)),
+        'shape': list(train_sequences.shape),
+    },
+    'test': {
+        'n_sequences': int(len(test_sequences)),
+        'shape': list(test_sequences.shape),
+    },
+    'created_at': datetime.now().isoformat()
+}
+
+with open(os.path.join(output_dir, 'summary.json'), 'w') as f:
+    json.dump(summary_data, f, indent=2)
+
+step5_time = time.time() - step5_start
+log_print(f"✓ Data saved in {step5_time:.2f} seconds\n")
+
+# Final summary
 total_time = time.time() - script_start_time
-log_print("")
 log_print("=" * 60)
-log_print("Timing Summary")
+log_print("SUMMARY")
 log_print("=" * 60)
-log_print(f"Step 1 - Load intermediate:     {format_time(step1_time):>12} ({100*step1_time/total_time:5.1f}%)")
-log_print(f"Step 2 - Determine split:       {format_time(step2_time):>12} ({100*step2_time/total_time:5.1f}%)")
-log_print(f"Step 3 - Create datasets:       {format_time(step3_time):>12} ({100*step3_time/total_time:5.1f}%)")
-log_print(f"Step 4 - Save gene lists:       {format_time(step4_time):>12} ({100*step4_time/total_time:5.1f}%)")
-log_print("-" * 60)
-log_print(f"Total time:                     {format_time(total_time):>12}")
-log_print(f"\nSplitting completed at {datetime.now()}")
+log_print(f"Total genomes processed: {len(genome_dirs)}")
+log_print(f"Train sequences: {len(train_sequences)}")
+log_print(f"Test sequences: {len(test_sequences)}")
+log_print(f"Output directory: {output_dir}")
+log_print(f"Total time: {format_time(total_time)}")
 log_print("=" * 60)
-log_print(f"Results saved to: {os.path.abspath(output_dir)}")
+
+log_print(f"\nData splitting completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 if args.quiet:
     sys.stdout = original_stdout
     sys.stderr = original_stderr
     log_file_handle.close()
-    print(f"Splitting complete. Log saved to: {log_file}")

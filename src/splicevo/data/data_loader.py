@@ -277,6 +277,7 @@ class MultiGenomeDataLoader:
         
         # Log initial memory
         mem_start, _ = get_memory_usage()
+        print(f"Memory before loading {genome_id}: {format_memory(mem_start)}")
         
         print(f"Processing GTF annotations for {genome_id}...")
         gtf_processor = GTFProcessor(str(genome_data.gtf_path))
@@ -315,6 +316,7 @@ class MultiGenomeDataLoader:
         """
         print("Loading data from all genomes...")
         mem_start, _ = get_memory_usage()
+        print(f"Memory before loading: {format_memory(mem_start)}")
         
         for genome_id in self.genomes:
             # Load all splice sites
@@ -323,6 +325,11 @@ class MultiGenomeDataLoader:
                 max_transcripts=max_transcripts_per_genome
             )
             self.loaded_data.extend(genome_examples)
+            
+            # Report per-genome memory after each load
+            mem_after_genome, _ = get_memory_usage()
+            self.max_memory_mb = max(self.max_memory_mb, mem_after_genome)
+            print(f"Memory after {genome_id}: {format_memory(mem_after_genome)}")
             
         mem_end, peak_mem = get_memory_usage()
         mem_delta = mem_end - mem_start
@@ -772,9 +779,10 @@ class MultiGenomeDataLoader:
             Tuple of (sequences, labels, usage_arrays, metadata_df, species_ids)
         """
         if not self.loaded_data:
-            raise ValueError("No data loaded. Call load_all_genomes_data() first.")
+            raise ValueError("No data loaded. Call load_all_genomes_data() or load_genome_data() first.")
 
         mem_start, _ = get_memory_usage()
+        print(f"Memory before array conversion: {format_memory(mem_start)}")
 
         if n_workers is None:
             n_workers = min(mp.cpu_count(), 8)
@@ -968,23 +976,18 @@ class MultiGenomeDataLoader:
                                     all_metadata_rows.extend(metadata_rows)
                                     current_idx = end_idx
                                     
-                                    # Periodic flush (every 100 windows)
+                                    # Periodic flush and memory check (every 100 windows)
                                     if current_idx % 100 < n_windows:
                                         sequences.flush()
                                         labels.flush()
                                         species_ids.flush()
                                         for key in usage_arrays:
                                             usage_arrays[key].flush()
-                            else:
-                                # Collect in memory
-                                all_sequences.extend(seq_list)
-                                all_labels.extend(lbl_list)
-                                all_usage['alpha'].extend(usage_dict['alpha'])
-                                all_usage['beta'].extend(usage_dict['beta'])
-                                all_usage['sse'].extend(usage_dict['sse'])
-                                all_metadata_rows.extend(metadata_rows)
-                                all_species_ids.extend(sp_ids)
-                                
+                                        
+                                        mem_check, _ = get_memory_usage()
+                                        self.max_memory_mb = max(self.max_memory_mb, mem_check)
+                                        if current_idx % 500 == 0:
+                                            print(f"    Progress: {current_idx} windows, memory={format_memory(mem_check)}, peak={format_memory(self.max_memory_mb)}")
                         except Exception as e:
                             gene_id = future_to_gene[future]
                             print(f"\n  Warning: Failed to process gene {gene_id}: {e}")

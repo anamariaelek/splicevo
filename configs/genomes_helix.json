@@ -1,5 +1,4 @@
 {
-  "orthology_file": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv",
   "genomes": [
     {
       "genome_id": "human_GRCh37",
@@ -22,6 +21,17 @@
         "assembly": "GRCm38"
       },
       "common_name": "mouse"
+    },
+    {
+      "genome_id": "rat_Rnor5.0",
+      "genome_path": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/fasta/Rattus_norvegicus.fa.gz",
+      "gtf_path": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/genomes/mazin/gtf/Rattus_norvegicus.gtf.gz",
+      "chromosomes": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "X", "Y", "MT"],
+      "metadata": {
+        "species": "rattus_norvegicus",
+        "assembly": "Rnor5.0"
+      },
+      "common_name": "rat"
     }
   ],
   "usage_files": {
@@ -33,6 +43,11 @@
     "mouse_GRCm38": {
       "pattern": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/spliser_for_splicevo/Mus_musculus/Mouse.{tissue}.{timepoint}.combined.tsv",
       "tissues": ["Brain", "Cerebellum", "Heart", "Kidney", "Liver", "Ovary", "Testis"],
+      "timepoints": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    },
+    "rat_Rnor5.0": {
+      "pattern": "/home/hd/hd_hd/hd_mf354/sds/sd17d003/Anamaria/spliser_for_splicevo/Rattus_norvegicus/Rat.{tissue}.{timepoint}.combined.tsv",
+      "tissues": ["Brain", "Cerebellum", "Heart", "Kidney", "Liver"],
       "timepoints": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     }
   }
