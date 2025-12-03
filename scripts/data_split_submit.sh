@@ -23,7 +23,7 @@ ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
 INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed
 
 # Split the data
-OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits/run1
+OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits/
 python ${SPLICEVO_DIR}/scripts/data_split.py \
     --input_dir ${INPUT_DIR} \
     --output_dir ${OUTPUT_DIR} \
