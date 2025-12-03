@@ -2,7 +2,7 @@
 #SBATCH --job-name=splicevo_data_rat
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=128G
+#SBATCH --mem=256G
 #SBATCH --time=10:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -20,8 +20,8 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Genome to process
 GENOME="rat_Rnor_5.0"
-GENOME="mouse_GRCm38"
-GENOME="human_GRCh37"
+#GENOME="mouse_GRCm38"
+#GENOME="human_GRCh37"
 
 # Load the genome
 OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_small/
