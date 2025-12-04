@@ -20,14 +20,14 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
 ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
-INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed
+INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_small/
 
 # Split the data
-OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits/
+OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_small/human_mouse_rat/
 python ${SPLICEVO_DIR}/scripts/data_split.py \
     --input_dir ${INPUT_DIR} \
     --output_dir ${OUTPUT_DIR} \
     --orthology_file ${ORTHOLOGY_FILE} \
     --pov_genome human_GRCh37 \
-    --test_chromosomes 1 3 5 \
+    --test_chromosomes 21 \
     --quiet

@@ -17,6 +17,8 @@ from pathlib import Path
 parser = argparse.ArgumentParser(description="Split loaded data into train/test sets")
 parser.add_argument("--input_dir", type=str, required=True, 
                     help="Base directory containing genome subdirectories")
+parser.add_argument("--genome_ids", type=str, nargs='*', default=None,
+                    help="Optional list of genome IDs to include (default: all found)")
 parser.add_argument("--output_dir", type=str, required=True, 
                     help="Directory to save split results")
 parser.add_argument("--orthology_file", type=str, required=True, 
@@ -30,6 +32,7 @@ parser.add_argument("--quiet", action='store_true', help="Suppress console outpu
 args = parser.parse_args()
 
 input_dir = args.input_dir
+genome_ids = args.genome_ids
 output_dir = args.output_dir
 pov_genome = args.pov_genome
 test_chromosomes = set(str(c) for c in args.test_chromosomes)
@@ -70,6 +73,7 @@ def format_time(seconds):
 log_print(f"Train/test splitting started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 log_print(f"Input directory: {input_dir}")
 log_print(f"Output directory: {output_dir}")
+log_print(f"Genomes to include: {genome_ids if genome_ids else 'All found'}")
 log_print(f"POV genome: {pov_genome}")
 log_print(f"Test chromosomes: {sorted(test_chromosomes)}")
 log_print("=" * 60)
@@ -82,9 +86,10 @@ genome_dirs = []
 for item in os.listdir(input_dir):
     item_path = os.path.join(input_dir, item)
     if os.path.isdir(item_path):
-        summary_file = os.path.join(item_path, 'summary.json')
-        if os.path.exists(summary_file):
-            genome_dirs.append(item)
+        meta_file = os.path.join(item_path, 'metadata.json')
+        if os.path.exists(meta_file):
+            if genome_ids is None or item in genome_ids:
+                genome_dirs.append(item)
 
 log_print(f"  Found {len(genome_dirs)} genome directories:")
 for gid in sorted(genome_dirs):
@@ -301,8 +306,8 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
     genome_dir = os.path.join(input_dir, genome_id)
     
     # Load summary
-    with open(os.path.join(genome_dir, 'summary.json'), 'r') as f:
-        summary = json.load(f)
+    with open(os.path.join(genome_dir, 'metadata.json'), 'r') as f:
+        meta = json.load(f)
     
     # Load metadata
     metadata = pd.read_csv(os.path.join(genome_dir, 'metadata.csv'), dtype={'genome_id': str, 'chromosome': str})
@@ -332,45 +337,45 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
         continue
     
     # Load sequences and labels
-    seq_shape = tuple(summary['sequence_shape'])
-    label_shape = tuple(summary['label_shape'])
-    seq_dtype = summary['dtypes']['sequences']
-    label_dtype = summary['dtypes']['labels']
+    seq_shape = tuple(meta['sequences_shape'])
+    labels_shape = tuple(meta['labels_shape'])
+    seq_dtype = meta['sequences_dtype']
+    label_dtype = meta['labels_dtype']
 
     log_print(f"    Loading {seq_shape[0]} sequences")
     sequences = np.memmap(os.path.join(genome_dir, 'sequences.mmap'), 
                          dtype=seq_dtype, mode='r', shape=seq_shape)
     
-    log_print(f"    Loading {label_shape[0]} labels")
+    log_print(f"    Loading {labels_shape[0]} labels")
     labels = np.memmap(os.path.join(genome_dir, 'labels.mmap'), 
-                      dtype=label_dtype, mode='r', shape=label_shape)
+                      dtype=label_dtype, mode='r', shape=labels_shape)
     
     # Load usage arrays if they exist
     usage_alpha = None
     usage_beta = None
     usage_sse = None
     
-    usage_columns = summary.get('usage_condition_mapping', {}).keys()
+    usage_columns = meta['usage_conditions']
     n_conditions = len(usage_columns)       
 
     usage_alpha_path = os.path.join(genome_dir, 'usage_alpha.mmap')
     if os.path.exists(usage_alpha_path):
-        usage_alpha_shape = tuple(list(summary['label_shape'][:2]) + [n_conditions])
-        usage_alpha_dtype = summary['dtypes'].get('usage_alpha', 'float32')
+        usage_alpha_shape = tuple(meta['alpha_shape'])
+        usage_alpha_dtype = meta.get('alpha_dtype', 'float32')
         log_print(f"    Loading usage_alpha with shape {usage_alpha_shape}")
         usage_alpha = np.memmap(usage_alpha_path, dtype=usage_alpha_dtype, mode='r', shape=usage_alpha_shape)
     
     usage_beta_path = os.path.join(genome_dir, 'usage_beta.mmap')
     if os.path.exists(usage_beta_path):
-        usage_beta_shape = tuple(list(summary['label_shape'][:2]) + [n_conditions])
-        usage_beta_dtype = summary['dtypes'].get('usage_beta', 'float32')
+        usage_beta_shape = tuple(meta['beta_shape'])
+        usage_beta_dtype = meta.get('beta_dtype', 'float32')
         log_print(f"    Loading usage_beta with shape {usage_beta_shape}")
         usage_beta = np.memmap(usage_beta_path, dtype=usage_beta_dtype, mode='r', shape=usage_beta_shape)
     
     usage_sse_path = os.path.join(genome_dir, 'usage_sse.mmap')
     if os.path.exists(usage_sse_path):
-        usage_sse_shape = tuple(list(summary['label_shape'][:2]) + [n_conditions])
-        usage_sse_dtype = summary['dtypes'].get('usage_sse', 'float32')
+        usage_sse_shape = tuple(meta['sse_shape'])
+        usage_sse_dtype = meta.get('sse_dtype', 'float32')
         log_print(f"    Loading usage_sse with shape {usage_sse_shape}")
         usage_sse = np.memmap(usage_sse_path, dtype=usage_sse_dtype, mode='r', shape=usage_sse_shape)
     
@@ -384,14 +389,14 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
         
         if usage_alpha is not None:
             train_usage_alpha_list.append(usage_alpha[train_indices])
-            train_usage_alpha_conds_list.append(list(summary.get('usage_condition_mapping', {}).keys()))
+            train_usage_alpha_conds_list.append(usage_columns)
         if usage_beta is not None:
             train_usage_beta_list.append(usage_beta[train_indices])
-            train_usage_beta_conds_list.append(list(summary.get('usage_condition_mapping', {}).keys()))
+            train_usage_beta_conds_list.append(usage_columns)
         if usage_sse is not None:
             train_usage_sse_list.append(usage_sse[train_indices])
-            train_usage_sse_conds_list.append(list(summary.get('usage_condition_mapping', {}).keys()))
-        
+            train_usage_sse_conds_list.append(usage_columns)
+
         # Add metadata entries
         for idx in train_indices:
             seq_metadata = metadata.iloc[idx].to_dict()
@@ -407,13 +412,13 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
         
         if usage_alpha is not None:
             test_usage_alpha_list.append(usage_alpha[test_indices])
-            test_usage_alpha_conds_list.append(list(summary.get('usage_condition_mapping', {}).keys()))
+            test_usage_alpha_conds_list.append(usage_columns)
         if usage_beta is not None:
             test_usage_beta_list.append(usage_beta[test_indices])
-            test_usage_beta_conds_list.append(list(summary.get('usage_condition_mapping', {}).keys()))
+            test_usage_beta_conds_list.append(usage_columns)
         if usage_sse is not None:
             test_usage_sse_list.append(usage_sse[test_indices])
-            test_usage_sse_conds_list.append(list(summary.get('usage_condition_mapping', {}).keys()))
+            test_usage_sse_conds_list.append(usage_columns)
         
         # Add metadata entries
         for idx in test_indices:
@@ -436,7 +441,7 @@ def create_split_metadata(sequences, labels, usage_alpha, usage_beta, usage_sse,
     """Create metadata.json for a train/test split."""
     
     # Load window_size and context_size from POV genome config
-    pov_summary_path = os.path.join(input_dir, pov_genome, 'summary.json')
+    pov_summary_path = os.path.join(input_dir, pov_genome, 'metadata.json')
     with open(pov_summary_path, 'r') as f:
         pov_summary = json.load(f)
     
@@ -456,24 +461,24 @@ def create_split_metadata(sequences, labels, usage_alpha, usage_beta, usage_sse,
     
     # Add usage array info if present
     if usage_alpha is not None:
-        metadata['usage_alpha_shape'] = list(usage_alpha.shape)
-        metadata['usage_alpha_dtype'] = str(usage_alpha.dtype)
+        metadata['alpha_shape'] = list(usage_alpha.shape)
+        metadata['alpha_dtype'] = str(usage_alpha.dtype)
     if usage_beta is not None:
-        metadata['usage_beta_shape'] = list(usage_beta.shape)
-        metadata['usage_beta_dtype'] = str(usage_beta.dtype)
+        metadata['beta_shape'] = list(usage_beta.shape)
+        metadata['beta_dtype'] = str(usage_beta.dtype)
     if usage_sse is not None:
-        metadata['usage_sse_shape'] = list(usage_sse.shape)
-        metadata['usage_sse_dtype'] = str(usage_sse.dtype)
+        metadata['sse_shape'] = list(usage_sse.shape)
+        metadata['sse_dtype'] = str(usage_sse.dtype)
     
     # Collect species mapping from all genomes
     species_mapping = {}
     species_id_counter = 0
     for genome_id in sorted(genome_dirs_list):
-        summary_path = os.path.join(input_dir, genome_id, 'summary.json')
-        with open(summary_path, 'r') as f:
-            summary = json.load(f)
+        meta_path = os.path.join(input_dir, genome_id, 'metadata.json')
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
         
-        common_name = summary.get('genome_config', {}).get('common_name', genome_id)
+        common_name = meta.get('genome_config', {}).get('common_name', genome_id)
         if common_name not in species_mapping:
             species_mapping[common_name] = species_id_counter
             species_id_counter += 1
@@ -494,10 +499,12 @@ def all_names(names_list):
         all_set.update(names)
     return sorted(all_set)
 
-def concat_usage(usage_list, usage_conds_list, target_names):
+def concat_usage(usage_list, usage_conds_list):
     """Concatenate usage arrays, reordering conditions to match target_names."""
-    if not usage_list or not target_names:
+    if not usage_list:
         return None
+    # All names to include in the final array
+    target_names = all_names(usage_conds_list)
     # Create mapping from condition name to final index
     cond_to_final_idx = {name: idx for idx, name in enumerate(target_names)}
     reordered_usage = []
@@ -513,12 +520,21 @@ def concat_usage(usage_list, usage_conds_list, target_names):
     combined = np.concatenate(reordered_usage, axis=0)
     return combined
 
-train_sequences = np.concatenate(train_sequences_list, axis=0) if train_sequences_list else np.array([])
-train_labels = np.concatenate(train_labels_list, axis=0) if train_labels_list else np.array([])
-train_conditions = all_names(train_usage_alpha_conds_list + train_usage_beta_conds_list + train_usage_sse_conds_list)
-train_usage_alpha = concat_usage(train_usage_alpha_list, train_usage_alpha_conds_list, train_conditions)
-train_usage_beta = concat_usage(train_usage_beta_list, train_usage_beta_conds_list, train_conditions)
-train_usage_sse = concat_usage(train_usage_sse_list, train_usage_sse_conds_list, train_conditions)
+if len(train_sequences_list) > 1:
+    log_print(f"    Concatenating {len(train_sequences_list)} train sequence arrays...")
+    train_sequences = np.concatenate(train_sequences_list, axis=0) if train_sequences_list else np.array([])
+    train_labels = np.concatenate(train_labels_list, axis=0) if train_labels_list else np.array([])
+    train_conditions = all_names(train_usage_alpha_conds_list) if train_usage_alpha_conds_list else []
+    train_usage_alpha = concat_usage(train_usage_alpha_list, train_usage_alpha_conds_list)
+    train_usage_beta = concat_usage(train_usage_beta_list, train_usage_beta_conds_list)
+    train_usage_sse = concat_usage(train_usage_sse_list, train_usage_sse_conds_list)
+else:
+    train_sequences = train_sequences_list[0] if train_sequences_list else np.array([])
+    train_labels = train_labels_list[0] if train_labels_list else np.array([])
+    train_conditions = train_usage_alpha_conds_list[0] if train_usage_alpha_conds_list else []
+    train_usage_alpha = train_usage_alpha_list[0] if train_usage_alpha_list else None
+    train_usage_beta = train_usage_beta_list[0] if train_usage_beta_list else None
+    train_usage_sse = train_usage_sse_list[0] if train_usage_sse_list else None
 
 # Convert metadata list to DataFrame
 train_metadata_df = pd.DataFrame(train_metadata_list) if train_metadata_list else pd.DataFrame()
@@ -533,13 +549,23 @@ if train_usage_sse is not None:
     log_print(f"    Train usage_sse shape: {train_usage_sse.shape}")
 
 # Combine test data
-log_print("  Combining test data...")
-test_sequences = np.concatenate(test_sequences_list, axis=0) if test_sequences_list else np.array([])
-test_labels = np.concatenate(test_labels_list, axis=0) if test_labels_list else np.array([])
-test_conditions = all_names(test_usage_alpha_conds_list + test_usage_beta_conds_list + test_usage_sse_conds_list)
-test_usage_alpha = concat_usage(test_usage_alpha_list, test_usage_alpha_conds_list, test_conditions)
-test_usage_beta = concat_usage(test_usage_beta_list, test_usage_beta_conds_list, test_conditions)
-test_usage_sse = concat_usage(test_usage_sse_list, test_usage_sse_conds_list, test_conditions)
+if len(test_sequences_list) > 1:
+    log_print(f"    Concatenating {len(test_sequences_list)} test sequence arrays...")
+    test_sequences = np.concatenate(test_sequences_list, axis=0) if test_sequences_list else np.array([])
+    test_labels = np.concatenate(test_labels_list, axis=0) if test_labels_list else np.array([])
+    test_conditions = all_names(test_usage_alpha_conds_list) if test_usage_alpha_conds_list else []
+    test_usage_alpha = concat_usage(test_usage_alpha_list, test_usage_alpha_conds_list)
+    test_usage_beta = concat_usage(test_usage_beta_list, test_usage_beta_conds_list)
+    test_usage_sse = concat_usage(test_usage_sse_list, test_usage_sse_conds_list)
+else:
+    test_sequences = test_sequences_list[0] if test_sequences_list else np.array([])
+    test_labels = test_labels_list[0] if test_labels_list else np.array([])
+    test_conditions = test_usage_alpha_conds_list[0] if test_usage_alpha_conds_list else []
+    test_usage_alpha = test_usage_alpha_list[0] if test_usage_alpha_list else None
+    test_usage_beta = test_usage_beta_list[0] if test_usage_beta_list else None
+    test_usage_sse = test_usage_sse_list[0] if test_usage_sse_list else None
+
+# Convert metadata list to DataFrame
 test_metadata_df = pd.DataFrame(test_metadata_list) if test_metadata_list else pd.DataFrame()
 
 log_print(f"    Test sequences shape: {test_sequences.shape}")
@@ -664,7 +690,7 @@ summary_data = {
     'created_at': datetime.now().isoformat()
 }
 
-with open(os.path.join(output_dir, 'summary.json'), 'w') as f:
+with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
     json.dump(summary_data, f, indent=2)
 
 step5_time = time.time() - step5_start
