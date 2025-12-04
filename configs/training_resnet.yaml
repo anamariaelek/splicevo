@@ -36,7 +36,7 @@ training:
   weight_decay: 1.0e-3 
 
   # Loss for splice site usage (SSE)
-  usage_loss_type: 'hybrid'  # 'mse' or 'bce' or 'weighted_mse' or 'hybrid'
+  usage_loss_type: 'weighted_mse'  # 'mse' or 'bce' or 'weighted_mse' or 'hybrid'
 
   # Weighted MSE parameters
   weighted_mse_extreme_low: 0.1        # Values < this are extreme near zero

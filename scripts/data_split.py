@@ -279,10 +279,12 @@ step4_start = time.time()
 train_sequences_list = []
 train_labels_list = []
 train_metadata_list = []
+train_species_ids_list = [] 
 
 test_sequences_list = []
 test_labels_list = []
 test_metadata_list = []
+test_species_ids_list = [] 
 
 train_usage_alpha_list = []
 train_usage_beta_list = []
@@ -385,6 +387,7 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
         train_lbls = labels[train_indices]
         train_sequences_list.append(train_seqs)
         train_labels_list.append(train_lbls)
+        train_species_ids_list.append(np.full(len(train_indices), genome_idx, dtype=np.int32)) 
         total_train_seqs += len(train_indices)
         
         if usage_alpha is not None:
@@ -408,6 +411,7 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
         test_lbls = labels[test_indices]
         test_sequences_list.append(test_seqs)
         test_labels_list.append(test_lbls)
+        test_species_ids_list.append(np.full(len(test_indices), genome_idx, dtype=np.int32)) 
         total_test_seqs += len(test_indices)
         
         if usage_alpha is not None:
@@ -485,12 +489,12 @@ def create_split_metadata(sequences, labels, usage_alpha, usage_beta, usage_sse,
     
     metadata['species_mapping'] = species_mapping
     metadata['n_species'] = len(species_mapping)
+    metadata['species_ids_dtype'] = 'int32' 
+    metadata['species_ids_shape'] = [sequences.shape[0]] 
     
     return metadata
 
-# Combine train data
-log_print("  Combining train data...")
-
+# Helpers to concatenate usage arrays
 def all_names(names_list):
     """Get the union of all condition names from a list of name lists."""
     # names_list items are lists of condition names in each element of usage_list
@@ -595,6 +599,16 @@ if len(train_sequences) > 0:
     train_lbl_mmap[:] = train_labels
     del train_lbl_mmap
     
+    # Save species_ids
+    if train_species_ids_list:
+        train_species_ids = np.concatenate(train_species_ids_list, axis=0)
+        train_species_mmap = np.memmap(os.path.join(train_dir, 'species_ids.mmap'), 
+                                       dtype=np.int32, mode='w+', 
+                                       shape=train_species_ids.shape)
+        train_species_mmap[:] = train_species_ids
+        del train_species_mmap
+        log_print(f"    Saved species_ids with shape {train_species_ids.shape}")
+    
     if train_usage_alpha is not None:
         train_alpha_mmap = np.memmap(os.path.join(train_dir, 'usage_alpha.mmap'), 
                                      dtype=train_usage_alpha.dtype, mode='w+', 
@@ -642,6 +656,16 @@ if len(test_sequences) > 0:
                               shape=test_labels.shape)
     test_lbl_mmap[:] = test_labels
     del test_lbl_mmap
+    
+    # Save species_ids
+    if test_species_ids_list:
+        test_species_ids = np.concatenate(test_species_ids_list, axis=0)
+        test_species_mmap = np.memmap(os.path.join(test_dir, 'species_ids.mmap'), 
+                                      dtype=np.int32, mode='w+', 
+                                      shape=test_species_ids.shape)
+        test_species_mmap[:] = test_species_ids
+        del test_species_mmap
+        log_print(f"    Saved species_ids with shape {test_species_ids.shape}")
     
     if test_usage_alpha is not None:
         test_alpha_mmap = np.memmap(os.path.join(test_dir, 'usage_alpha.mmap'), 

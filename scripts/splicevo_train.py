@@ -34,6 +34,7 @@ def load_config(config_path: str) -> dict:
     
     return config
 
+
 def setup_device(config: dict) -> str:
     """Setup compute device with optional resource limits."""
     device = config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
@@ -159,7 +160,8 @@ def load_data(config: dict, log_fn=print):
             # Parse dtypes from metadata
             seq_dtype = np.dtype(meta.get('sequences_dtype', 'float32'))
             lbl_dtype = np.dtype(meta.get('labels_dtype', 'int8'))
-            usage_dtype = np.dtype(meta.get('usage_dtype', 'float32'))
+            usage_dtype = np.dtype(meta.get('sse_dtype', 'float32'))
+            usage_shape = tuple(meta['sse_shape'])
             
             sequences = np.memmap(seq_file, dtype=seq_dtype, mode='r', shape=tuple(meta['sequences_shape']))
             labels = np.memmap(lbl_file, dtype=lbl_dtype, mode='r', shape=tuple(meta['labels_shape']))
@@ -170,7 +172,7 @@ def load_data(config: dict, log_fn=print):
                     sse_file, 
                     dtype=usage_dtype, 
                     mode='r', 
-                    shape=tuple(meta['usage_shape'])
+                    shape=usage_shape
                 )
             else:
                 log_fn("No SSE array file found. Usage prediction will be disabled.")
