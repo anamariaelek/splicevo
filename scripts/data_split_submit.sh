@@ -1,11 +1,16 @@
 #!/bin/bash
-#SBATCH --job-name=splicevo_data_split
+#SBATCH --job-name=split_mouse_rat_human
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
+
+# Memoory rules of thumb:
+# - 64G for small datasets (e.g., a few chromosome in a single genome, a few usage conditions)
+# - 128G for medium datasets (e.g., multiple chromosomes from multiple genomes, a few usage conditions)
+# - 256G or 512G for large datasets (e.g., whole genomes of multiple species, many usage conditions)
 
 set -e
 
@@ -23,11 +28,11 @@ ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
 INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_small/
 
 # Split the data
-OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_small/human_mouse_rat/
+OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_small/mouse_rat_human/
 python ${SPLICEVO_DIR}/scripts/data_split.py \
-    --input_dir ${INPUT_DIR} \
+    --input_dir ${INPUT_DIR} --genome_ids mouse_GRCm38 rat_Rnor_5.0 human_GRCh37 \
     --output_dir ${OUTPUT_DIR} \
     --orthology_file ${ORTHOLOGY_FILE} \
-    --pov_genome human_GRCh37 \
-    --test_chromosomes 21 \
+    --pov_genome mouse_GRCm38 \
+    --test_chromosomes 18 \
     --quiet

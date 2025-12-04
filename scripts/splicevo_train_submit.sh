@@ -1,7 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=train_mouse
+#SBATCH --job-name=train_mouse_rat
 #SBATCH --partition=gpu-single
-#SBATCH --cpus-per-task=8
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:1
 #SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_%j.log
@@ -17,17 +20,17 @@ conda activate splicevo
 
 # Cuda
 module load devel/cuda
-export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK}
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
 # Splicevo directory
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
 TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_resnet.yaml
-DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_small/mouse/train/
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/small_mouse_weighted_mse/
+DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_small/mouse_rat/train/
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/small_mouse_rat_weighted_mse/
 
-echo "Starting training job at \$(date)"
+echo "Starting training job at "$(date)
 echo "Training config: ${TRAINING_CONFIG}"
 echo "Training data: ${DATA_TRAIN_DIR}"
 echo "Model directory: ${MODEL_DIR}"
@@ -37,6 +40,6 @@ python ${SPLICEVO_DIR}/scripts/splicevo_train.py \
     --config ${TRAINING_CONFIG} \
     --data ${DATA_TRAIN_DIR} \
     --checkpoint-dir ${MODEL_DIR} \
-    --quiet &
+    --quiet
 
-echo "Training completed at \$(date)"
+echo "Training completed at "$(date)

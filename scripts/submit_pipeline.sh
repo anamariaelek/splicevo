@@ -17,12 +17,12 @@ SPLICEVO_DIR="/home/hd/hd_hd/hd_mf354/projects/splicevo"
 OUT_DIR="/home/hd/hd_hd/hd_mf354/projects/splicing/results"
 
 # Config files
-DATA_CONFIG="${SPLICEVO_DIR}/configs/data_helix_human_mouse_rat.json"
+DATA_CONFIG="${SPLICEVO_DIR}/configs/data_human_mouse.json"
 TRAINING_CONFIG="${SPLICEVO_DIR}/configs/training_resnet.yaml"
 
 # Data directories
-LOAD_DIR="${OUT_DIR}/data/load/hsap_mmus_rnor"
-SPLIT_DIR="${OUT_DIR}/data/split/hsap_mmus_rnor"
+LOAD_DIR="${OUT_DIR}/data/load/hsap_mmus"
+SPLIT_DIR="${OUT_DIR}/data/split/hsap_mmus"
 DATA_TRAIN_DIR="${SPLIT_DIR}/memmap_train"
 DATA_TEST_DIR="${SPLIT_DIR}/memmap_test"
 MODEL_DIR="${OUT_DIR}/models/resnet_hybridloss"
@@ -36,12 +36,12 @@ TIME_LOAD="24:00:00"
 TIME_SPLIT="24:00:00"
 TIME_TRAIN="72:00:00"
 TIME_PREDICT="12:00:00"
-MEM_LOAD="128G"
+MEM_LOAD="64G"
 MEM_SPLIT="128G"
 MEM_TRAIN="128G"
 MEM_PREDICT="32G"
-CPUS_LOAD="1"
-CPUS_SPLIT="1"
+CPUS_LOAD="16"
+CPUS_SPLIT="4"
 CPUS_TRAIN="8"
 CPUS_PREDICT="4"
 GPUS_TRAIN="1"
@@ -158,7 +158,10 @@ echo "Starting data load job at \$(date)"
 echo "Loading data from: ${DATA_CONFIG}"
 echo "Output directory: ${LOAD_DIR}"
 
-python ${SPLICEVO_DIR}/scripts/data_load.py --config ${DATA_CONFIG} --output_dir ${LOAD_DIR} --n_cpus ${CPUS_LOAD} --sequential
+python ${SPLICEVO_DIR}/scripts/data_load.py \\
+    --config ${DATA_CONFIG} \\
+    --output_dir ${LOAD_DIR} \\
+    --n_cpus ${CPUS_LOAD}
 
 echo "Data load completed at \$(date)"
 EOF
@@ -198,7 +201,15 @@ echo "Starting data split job at \$(date)"
 echo "Input directory: ${LOAD_DIR}"
 echo "Output directory: ${SPLIT_DIR}"
 
-python ${SPLICEVO_DIR}/scripts/data_split.py --input_dir ${LOAD_DIR} --output_dir ${SPLIT_DIR} --n_cpus ${CPUS_SPLIT} --pov_genome ${POV_GENOME} --test_chromosomes ${TEST_CHROMOSOMES} --window_size ${WINDOW_SIZE} --context_size ${CONTEXT_SIZE} --alpha_threshold ${ALPHA_THRESHOLD} --sequential --process-by-genome --chunk-size 1000
+python ${SPLICEVO_DIR}/scripts/data_split.py \\
+    --input_dir ${LOAD_DIR} \\
+    --output_dir ${SPLIT_DIR} \\
+    --n_cpus ${CPUS_SPLIT} \\
+    --pov_genome ${POV_GENOME} \\
+    --test_chromosomes ${TEST_CHROMOSOMES} \\
+    --window_size ${WINDOW_SIZE} \\
+    --context_size ${CONTEXT_SIZE} \\
+    --alpha_threshold ${ALPHA_THRESHOLD}
 
 echo "Data split completed at \$(date)"
 EOF
@@ -227,6 +238,8 @@ if [[ "$START_FROM" =~ ^(load|split|train)$ ]]; then
 #SBATCH --output=${LOG_DIR}/train_%j.out
 #SBATCH --error=${LOG_DIR}/train_%j.err
 #SBATCH --partition=${PARTITION_GPU}
+#SBATCH --ntasks-per-node=${NTASKS_PER_NODE_TRAIN}
+#SBATCH --gres=gpu:A40:1
 #SBATCH --time=${TIME_TRAIN}
 #SBATCH --mem=${MEM_TRAIN}
 #SBATCH --cpus-per-task=${CPUS_TRAIN}
@@ -242,12 +255,15 @@ source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate splicevo
 
 module load devel/cuda
-export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK}
+export OMP_NUM_THREADS=${SLURM_NTASKS}
 echo "Starting training job at \$(date)"
 echo "Training data: ${DATA_TRAIN_DIR}"
 echo "Model directory: ${MODEL_DIR}"
 
-python ${SPLICEVO_DIR}/scripts/splicevo_train.py --config ${TRAINING_CONFIG} --data ${DATA_TRAIN_DIR} --checkpoint-dir ${MODEL_DIR}
+python ${SPLICEVO_DIR}/scripts/splicevo_train.py \\
+    --config ${TRAINING_CONFIG} \\
+    --data ${DATA_TRAIN_DIR} \\
+    --checkpoint-dir ${MODEL_DIR}
 
 echo "Training completed at \$(date)"
 EOF
@@ -275,6 +291,8 @@ PREDICT_SCRIPT=$(cat <<EOF
 #SBATCH --output=${LOG_DIR}/predict_%j.out
 #SBATCH --error=${LOG_DIR}/predict_%j.err
 #SBATCH --partition=${PARTITION_GPU}
+#SBATCH --ntasks-per-node=${NTASKS_PER_NODE_PREDICT}
+#SBATCH --gres=gpu:A40:1
 #SBATCH --time=${TIME_PREDICT}
 #SBATCH --mem=${MEM_PREDICT}
 #SBATCH --cpus-per-task=${CPUS_PREDICT}
