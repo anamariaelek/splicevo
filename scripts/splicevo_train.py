@@ -249,10 +249,10 @@ def load_data(config: dict, log_fn=print):
     else:
         log_fn("  No SSE array present.")
 
-    return sequences, labels, usage_sse, None, species_ids, species_mapping  # NEW
+    return sequences, labels, usage_sse, None, species_ids, species_mapping
 
 
-def create_datasets(sequences, labels, usage_sse, species_ids, config: dict, log_fn=print):  # NEW: species_ids
+def create_datasets(sequences, labels, usage_sse, species_ids, config: dict, log_fn=print):
     """Create train/val datasets."""
     split_ratio = config['data'].get('train_split', 0.8)
     n_samples = len(sequences)
@@ -262,21 +262,21 @@ def create_datasets(sequences, labels, usage_sse, species_ids, config: dict, log
     
     train_sse = usage_sse[:n_train] if usage_sse is not None else None
     val_sse = usage_sse[n_train:] if usage_sse is not None else None
-    train_species = species_ids[:n_train] if species_ids is not None else None  # NEW
-    val_species = species_ids[n_train:] if species_ids is not None else None  # NEW
+    train_species = species_ids[:n_train] if species_ids is not None else None
+    val_species = species_ids[n_train:] if species_ids is not None else None
 
     train_dataset = SpliceDataset(
         sequences[:n_train],
         labels[:n_train],
         train_sse,
-        train_species  # NEW
+        train_species
     )
     
     val_dataset = SpliceDataset(
         sequences[n_train:],
         labels[n_train:],
         val_sse,
-        val_species  # NEW
+        val_species
     )
     
     return train_dataset, val_dataset
@@ -306,7 +306,7 @@ def compute_class_weights(labels, config: dict, log_fn=print):
     return class_weights
 
 
-def create_model(config: dict, usage_sse: Optional[np.ndarray], species_mapping: Dict[str, int], log_fn=print):  # NEW: species_mapping
+def create_model(config: dict, usage_sse: Optional[np.ndarray], species_mapping: Dict[str, int], log_fn=print):
     """Create model from config and return model with usage info."""
     model_config = config['model']
     training_config = config['training']
@@ -321,7 +321,7 @@ def create_model(config: dict, usage_sse: Optional[np.ndarray], species_mapping:
     # Get usage loss type from training config
     usage_loss_type = training_config.get('usage_loss_type', 'weighted_mse')
     
-    n_species = len(species_mapping) if species_mapping else 1  # NEW
+    n_species = len(species_mapping) if species_mapping else 1  
     
     model_params = {
         'embed_dim': model_config.get('embed_dim', 128),
@@ -333,8 +333,7 @@ def create_model(config: dict, usage_sse: Optional[np.ndarray], species_mapping:
         'context_len': model_config.get('context_len', 4500),
         'dropout': model_config.get('dropout', 0.5),
         'usage_loss_type': usage_loss_type,
-        'n_species': n_species,  # NEW
-        'species_embed_dim': model_config.get('species_embed_dim', 16)  # NEW
+        'n_species': n_species
     }
     model = SplicevoModel(**model_params)
     
@@ -346,9 +345,8 @@ def create_model(config: dict, usage_sse: Optional[np.ndarray], species_mapping:
     log_fn(f"  num_classes: {model_params['num_classes']}")
     log_fn(f"  n_conditions: {model_params['n_conditions']}")
     log_fn(f"  usage_loss_type: {usage_loss_type}")
-    log_fn(f"  n_species: {model_params['n_species']}")  # NEW
+    log_fn(f"  n_species: {model_params['n_species']}")
     if n_species > 1:
-        log_fn(f"  species_embed_dim: {model_params['species_embed_dim']}")
         log_fn(f"  species_mapping: {species_mapping}")
     
     # Return model and n_conditions for trainer setup
@@ -488,17 +486,22 @@ def main():
         # If user provided condition info in config
         condition_info = config['data']['usage_info']
     else:
-        # Try to load from usage_info file created during data processing
-        data_dir = Path(config['data']['path']).parent
-        usage_info_file = data_dir / 'usage_info_train.json'
-        if usage_info_file.exists():
-            log_print(f"Loading condition info from {usage_info_file}")
-            with open(usage_info_file, 'r') as f:
-                usage_info = json.load(f)
-                condition_info = usage_info.get('conditions', None)
-                log_print(f"Loaded {len(condition_info)} conditions")
+        # Try to load from train metadata
+        data_dir = Path(config['data']['path'])
+        if data_dir.is_dir():
+            train_meta_file = data_dir / 'metadata.json'
         else:
-            log_print("Warning: No condition info found. Predictions won't have tissue/timepoint labels.")
+            train_meta_file = data_dir.parent / 'train' / 'metadata.json'
+        
+        if train_meta_file.exists():
+            log_print(f"Loading condition info from {train_meta_file}")
+            with open(train_meta_file, 'r') as f:
+                train_meta = json.load(f)
+                condition_info = train_meta.get('usage_conditions', None)
+                if condition_info:
+                    log_print(f"Loaded {len(condition_info)} conditions: {condition_info}")
+        else:
+            log_print("Warning: No condition info found in train metadata. Predictions won't have tissue/timepoint labels.")
     
     # Save normalization stats if alpha and beta were normalized
     if usage_stats is not None:
@@ -511,7 +514,7 @@ def main():
     # Create datasets
     dataset_start = time.time()
     train_dataset, val_dataset = create_datasets(
-        sequences, labels, usage_sse, species_ids, config, log_print  # NEW: species_ids
+        sequences, labels, usage_sse, species_ids, config, log_print
     )
     dataset_time = time.time() - dataset_start
     
@@ -521,7 +524,7 @@ def main():
     
     # Create model (pass usage_sse to determine n_conditions)
     model_start = time.time()
-    model, n_conditions = create_model(config, usage_sse, species_mapping, log_print)  # NEW: species_mapping
+    model, n_conditions = create_model(config, usage_sse, species_mapping, log_print)
     model_time = time.time() - model_start
     
     # Create dataloaders
