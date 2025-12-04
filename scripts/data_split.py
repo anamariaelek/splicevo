@@ -556,6 +556,7 @@ if len(test_sequences_list) > 1:
     test_conditions = all_names(test_usage_alpha_conds_list) if test_usage_alpha_conds_list else []
     test_usage_alpha = concat_usage(test_usage_alpha_list, test_usage_alpha_conds_list)
     test_usage_beta = concat_usage(test_usage_beta_list, test_usage_beta_conds_list)
+    test_usage_sse = concat_usage(test_usage_sse_list, test_usage_sse_conds_list)
 else:
     test_sequences = test_sequences_list[0] if test_sequences_list else np.array([])
     test_labels = test_labels_list[0] if test_labels_list else np.array([])
