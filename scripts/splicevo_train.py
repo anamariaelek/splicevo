@@ -126,6 +126,7 @@ def load_data(config: dict, log_fn=print):
     usage_sse = None
     species_ids = None
     species_mapping = {}
+    usage_conditions = []  # NEW: track conditions
 
     if use_mmap:
         # Resolve mmap directory from config path
@@ -162,6 +163,10 @@ def load_data(config: dict, log_fn=print):
             lbl_dtype = np.dtype(meta.get('labels_dtype', 'int8'))
             usage_dtype = np.dtype(meta.get('sse_dtype', 'float32'))
             usage_shape = tuple(meta['sse_shape'])
+            
+            # Extract usage conditions from metadata
+            usage_conditions = meta.get('usage_conditions', [])
+            log_fn(f"  Usage conditions from metadata: {len(usage_conditions)} conditions")
             
             sequences = np.memmap(seq_file, dtype=seq_dtype, mode='r', shape=tuple(meta['sequences_shape']))
             labels = np.memmap(lbl_file, dtype=lbl_dtype, mode='r', shape=tuple(meta['labels_shape']))
@@ -218,25 +223,29 @@ def load_data(config: dict, log_fn=print):
             else:
                 species_ids = None
         
-        # Try to load species mapping from metadata
+        # Try to load species mapping and conditions from metadata
         metadata_path = data_path.parent / 'metadata.json'
         if metadata_path.exists():
             with open(metadata_path, 'r') as f:
                 meta = json.load(f)
                 species_mapping = meta.get('species_mapping', {})
+                usage_conditions = meta.get('usage_conditions', [])
         else:
             species_mapping = {}
 
     # Check if SSE is available and log once
     if usage_sse is None:
         log_fn("No SSE array loaded, training without usage prediction.")
+        usage_conditions = []  # No conditions if no SSE
     elif np.all(usage_sse == 0):
         log_fn("SSE array is all zeros, training without usage prediction.")
         usage_sse = None
+        usage_conditions = []  # No conditions if all zeros
     else:
         # SSE is already in [0,1] range, no normalization needed
         log_fn(f"Loaded SSE array:")
         log_fn(f"  shape={usage_sse.shape}, dtype={usage_sse.dtype}")
+        log_fn(f"  conditions={usage_conditions}")
         sse_clean = usage_sse[~np.isnan(usage_sse)]
         if len(sse_clean) > 0:
             log_fn(f"  range=[{sse_clean.min():.3f}, {sse_clean.max():.3f}], mean={sse_clean.mean():.3f}")
@@ -317,6 +326,12 @@ def create_model(config: dict, usage_sse: Optional[np.ndarray], species_mapping:
         n_conditions = usage_sse.shape[2]
     else:
         n_conditions = 0
+    
+    log_fn(f"\nDetermining model configuration:")
+    log_fn(f"  Usage SSE present: {usage_sse is not None}")
+    if usage_sse is not None:
+        log_fn(f"  SSE shape: {usage_sse.shape}")
+        log_fn(f"  Inferred n_conditions: {n_conditions}")
     
     # Get usage loss type from training config
     usage_loss_type = training_config.get('usage_loss_type', 'weighted_mse')

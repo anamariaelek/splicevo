@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=human1
+#SBATCH --job-name=human
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=512G
@@ -31,5 +31,5 @@ python ${SPLICEVO_DIR}/scripts/data_load.py \
     --output_dir ${OUT_DIR} \
     --window_size 1000 \
     --context_size 450 \
-    --n_cpus 1 \
+    --n_cpus 2 \
     --quiet
