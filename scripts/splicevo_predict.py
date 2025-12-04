@@ -56,7 +56,7 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
             condition_info = training_config['condition_info']
             log_fn(f"Loaded condition mapping: {len(condition_info)} conditions")
             for i, cond in enumerate(condition_info[:3]):  # Show first 3
-                log_fn(f"  Condition {i}: {cond.get('display_name', 'unknown')}")
+                log_fn(f"  Condition {i}: {cond}")
             if len(condition_info) > 3:
                 log_fn(f"  ... and {len(condition_info) - 3} more")
     else:
@@ -69,15 +69,30 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
             usage_loss_type = 'hybrid'
             log_fn("Detected usage_classifier in checkpoint -> using hybrid loss mode")
     
+    #log_fn("\n" + "="*60)
+    #log_fn("State dict keys:")
+    #log_fn("="*60)
+    #for key in sorted(state_dict.keys()):
+    #    log_fn(f"  {key}: {state_dict[key].shape}")
+    
     # Infer n_conditions from checkpoint state_dict
-    usage_predictor_weight = state_dict.get('encoder.usage_predictor.weight')
-    if usage_predictor_weight is not None:
-        n_conditions = usage_predictor_weight.shape[0]  # Direct output channels = n_conditions
+    usage_predictor_keys = [k for k in state_dict.keys() if 'usage_predictor' in k]
+    
+    if usage_predictor_keys:
+        log_fn(f"\nFound usage_predictor keys: {usage_predictor_keys}")
+        # Look for species-specific usage predictors
+        species_keys = [k for k in usage_predictor_keys if 'species_' in k and 'weight' in k]
         
-        log_fn(f"Inferred n_conditions from checkpoint: {n_conditions}")
-        log_fn(f"  (usage_predictor shape: {usage_predictor_weight.shape})")
-        
-        model_config['n_conditions'] = n_conditions
+        if species_keys:
+            # Get shape from first species predictor
+            sample_key = species_keys[0]
+            weight_shape = state_dict[sample_key].shape
+            n_conditions = weight_shape[0]
+            log_fn(f"Inferred n_conditions from {sample_key}: shape={weight_shape} -> n_conditions={n_conditions}")
+            model_config['n_conditions'] = n_conditions
+        else:
+            log_fn("Warning: Found usage_predictor but no species-specific predictors")
+            model_config.setdefault('n_conditions', 0)
     else:
         log_fn("Warning: Could not find usage_predictor in checkpoint")
         model_config.setdefault('n_conditions', 0)
@@ -138,8 +153,9 @@ def load_test_data(data_path: str, use_memmap: bool = False, log_fn=print) -> Di
         # Load memmap arrays
         seq_dtype = np.dtype(meta.get('sequences_dtype', 'float32'))
         lbl_dtype = np.dtype(meta.get('labels_dtype', 'int8'))
-        usage_dtype = np.dtype(meta.get('usage_dtype', 'float32'))
-        
+        usage_dtype = np.dtype(meta.get('alpha_dtype', 'float32'))
+        usage_shape = tuple(meta['alpha_shape'])
+
         sequences = np.memmap(
             mmap_dir / 'sequences.mmap',
             dtype=seq_dtype,
@@ -164,7 +180,7 @@ def load_test_data(data_path: str, use_memmap: bool = False, log_fn=print) -> Di
             'usage_alpha': mmap_dir / 'usage_alpha.mmap',
             'usage_beta': mmap_dir / 'usage_beta.mmap',
             'usage_sse': mmap_dir / 'usage_sse.mmap'
-        };
+        }
         
         for key, filepath in usage_files.items():
             if filepath.exists():
@@ -172,7 +188,7 @@ def load_test_data(data_path: str, use_memmap: bool = False, log_fn=print) -> Di
                     filepath,
                     dtype=usage_dtype,
                     mode='r',
-                    shape=tuple(meta['usage_shape'])
+                    shape=usage_shape
                 )
         
         log_fn(f"Available keys: {list(data.keys())}")

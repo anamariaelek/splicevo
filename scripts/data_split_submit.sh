@@ -25,7 +25,7 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
 ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
-INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_small/
+INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_smallest/
 
 # Split the data
 OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_small/mouse_rat_human/
