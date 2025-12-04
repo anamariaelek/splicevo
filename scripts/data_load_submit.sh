@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=splicevo_data_rat
+#SBATCH --job-name=human1
 #SBATCH --partition=cpu-single
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=128G
-#SBATCH --time=10:00:00
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=512G
+#SBATCH --time=24:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 
@@ -19,17 +19,17 @@ conda activate splicevo
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Genome to process
-GENOME="rat_Rnor_5.0"
-GENOME="mouse_GRCm38"
+#GENOME="rat_Rnor_5.0"
+#GENOME="mouse_GRCm38"
 GENOME="human_GRCh37"
 
 # Load the genome
-OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_small/
+OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_helix/
 python ${SPLICEVO_DIR}/scripts/data_load.py \
-    --config ${SPLICEVO_DIR}/configs/genomes_small.json \
+    --config ${SPLICEVO_DIR}/configs/genomes_helix.json \
     --genome_id ${GENOME} \
     --output_dir ${OUT_DIR} \
     --window_size 1000 \
     --context_size 450 \
     --n_cpus 1 \
-    --quiet &
+    --quiet
