@@ -108,7 +108,7 @@ class GTFProcessor:
 
     def load_gtf(self, chromosomes: List[str]) -> pd.DataFrame:
         """Load and parse GTF file"""
-        print("Loading GTF file...")
+        print(f"Loading GTF file {self.gtf_file}")
         
         # Handle gzipped files
         opener = gzip.open if self.gtf_file.endswith('.gz') else open

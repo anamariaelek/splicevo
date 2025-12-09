@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Dict
-
+import numpy as np
 
 class ResBlock(nn.Module):
     """Residual block with pre-activation design (BN-ReLU-Conv)."""
@@ -385,7 +385,7 @@ class SplicevoModel(nn.Module):
                  dropout: float = 0.3,
                  usage_loss_type: str = 'weighted_mse',
                  n_species: int = 1,
-                 species_names: Optional[list] = None  # CHANGED
+                 species_names: Optional[list] = None
         ):
         """
         Initialize model with encoder for splice site and SSE prediction.
@@ -402,6 +402,8 @@ class SplicevoModel(nn.Module):
         self.usage_loss_type = usage_loss_type
         self.n_species = n_species
         self.species_names = species_names or [f"species_{i}" for i in range(n_species)]
+        self.output_type = 'splice'  # For gReLU compatibility
+        self.prediction_transform = None  # For gReLU compatibility
         
         # Encoder module with output heads
         self.encoder = EncoderModule(
@@ -433,7 +435,20 @@ class SplicevoModel(nn.Module):
         Returns:
             Dictionary with predictions for central region only
         """
-        return self.encoder(sequences, species_ids=species_ids, return_features=return_features)
+        output = self.encoder(sequences, species_ids=species_ids, return_features=return_features)
+        
+        # Always return full dictionary - Captum will handle gradient computation
+        return output
+    
+    def add_transform(self, transform):
+        """Add a prediction transform function (for GRELU compatibility)."""
+        self.prediction_transform = transform
+    
+    def set_output_type(self, output_type: str = 'splice'):
+        """Set which output to use for predictions (for GRELU compatibility)."""
+        if output_type not in ['splice', 'usage']:
+            raise ValueError(f"Unknown output_type: {output_type}")
+        self.output_type = output_type
     
     def predict(self, sequences, species_ids=None, batch_size: int = 32):
         """

@@ -10,5 +10,6 @@ configure_warnings()
 # Import main functionality
 from . import data
 from . import io
+from . import attributions
 
-__all__ = ['data', 'io']
+__all__ = ['data', 'io', 'attributions']

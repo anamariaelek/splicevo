@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_mouse_rat
+#SBATCH --job-name=train_mouse_rat_human
 #SBATCH --partition=gpu-single
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -26,10 +26,11 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
+SUBSET="full"
+SPECIES="mouse_rat_human"
 TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_resnet.yaml
-DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_small/mouse_rat/train/
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/small_mouse_rat_weighted_mse/
-
+DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/train/
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/${SUBSET}_${SPECIES}_weighted_mse/
 echo "Starting training job at "$(date)
 echo "Training config: ${TRAINING_CONFIG}"
 echo "Training data: ${DATA_TRAIN_DIR}"
@@ -40,6 +41,6 @@ python ${SPLICEVO_DIR}/scripts/splicevo_train.py \
     --config ${TRAINING_CONFIG} \
     --data ${DATA_TRAIN_DIR} \
     --checkpoint-dir ${MODEL_DIR} \
-    --quiet
+    --quiet &
 
 echo "Training completed at "$(date)
