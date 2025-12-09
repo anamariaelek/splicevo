@@ -2,7 +2,7 @@
 #SBATCH --job-name=split_mouse_rat_human
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=64G
+#SBATCH --mem=512G
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -25,14 +25,17 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
 ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
-INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_smallest/
 
 # Split the data
-OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_small/mouse_rat_human/
+SUBSET="full"
+SPECIES="mouse_rat_human"
+INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_${SUBSET}/
+OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/
+
 python ${SPLICEVO_DIR}/scripts/data_split.py \
     --input_dir ${INPUT_DIR} --genome_ids mouse_GRCm38 rat_Rnor_5.0 human_GRCh37 \
     --output_dir ${OUTPUT_DIR} \
     --orthology_file ${ORTHOLOGY_FILE} \
     --pov_genome mouse_GRCm38 \
-    --test_chromosomes 18 \
+    --test_chromosomes 2 4 \
     --quiet
