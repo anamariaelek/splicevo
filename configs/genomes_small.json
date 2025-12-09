@@ -37,18 +37,18 @@
   "usage_files": {
     "human_GRCh37": {
       "pattern": "/home/elek/sds/sd17d003/Anamaria/spliser_for_splicevo/Homo_sapiens/Human.{tissue}.{timepoint}.combined.tsv",
-      "tissues": ["Brain", "Cerebellum", "Heart", "Kidney", "Liver"],
-      "timepoints": [1, 3, 5, 8, 10, 12]
+      "tissues": ["Brain", "Cerebellum", "Heart"],
+      "timepoints": [1, 5, 10]
     },
     "mouse_GRCm38": {
       "pattern": "/home/elek/sds/sd17d003/Anamaria/spliser_for_splicevo/Mus_musculus/Mouse.{tissue}.{timepoint}.combined.tsv",
-      "tissues": ["Brain", "Cerebellum", "Heart", "Kidney", "Liver"],
-      "timepoints": [1, 3, 5, 8, 10, 12]
+      "tissues": ["Brain", "Cerebellum", "Heart"],
+      "timepoints": [1, 5, 10]
     },
     "rat_Rnor_5.0": {
       "pattern": "/home/elek/sds/sd17d003/Anamaria/spliser_for_splicevo/Rattus_norvegicus/Rat.{tissue}.{timepoint}.combined.tsv",
-      "tissues": ["Brain", "Cerebellum", "Heart", "Kidney", "Liver"],
-      "timepoints": [1, 3, 5, 8, 10, 12]
+      "tissues": ["Brain", "Cerebellum", "Heart"],
+      "timepoints": [1, 5, 10]
     }
   }
 }

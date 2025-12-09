@@ -28,12 +28,12 @@ ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
 
 # Split the data
 SUBSET="full"
-SPECIES="mouse_rat_human"
+SPECIES="mouse_rat"
 INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_${SUBSET}/
 OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/
 
 python ${SPLICEVO_DIR}/scripts/data_split.py \
-    --input_dir ${INPUT_DIR} --genome_ids mouse_GRCm38 rat_Rnor_5.0 human_GRCh37 \
+    --input_dir ${INPUT_DIR} --genome_ids mouse_GRCm38 rat_Rnor_5.0 \
     --output_dir ${OUTPUT_DIR} \
     --orthology_file ${ORTHOLOGY_FILE} \
     --pov_genome mouse_GRCm38 \

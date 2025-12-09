@@ -14,6 +14,23 @@ from ..io.gene_annotation import GTFProcessor, Transcript
 from ..io.splice_sites import SpliceSite
 
 
+def complement_sequence(seq: str) -> str:
+    """
+    Generate the complement of a DNA sequence (not reverse complement).
+    
+    For negative strand genes, we keep the sequence reversed but apply
+    nucleotide complementation: A<->T, C<->G.
+    
+    Args:
+        seq: DNA sequence string
+        
+    Returns:
+        Complemented sequence
+    """
+    comp_map = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N'}
+    return ''.join(comp_map.get(nuc.upper(), 'N') for nuc in seq)
+
+
 class MultiGenomeDataLoader:
     """
     Data loader for multi-genome splice site prediction.
@@ -503,8 +520,10 @@ class MultiGenomeDataLoader:
         right_pad = requested_end - actual_end
         
         # Get sequence with valid coordinates
+        # Always get forward strand sequence - the windowing and labeling logic
+        # works with genomic coordinates regardless of actual strand orientation
         try:
-            seq = genome.get_seq(chrom, actual_start + 1, actual_end, strand == '-')
+            seq = genome.get_seq(chrom, actual_start + 1, actual_end, rc=False)
         except Exception:
             return sequences, labels_list, usage_dict, metadata_rows
         
@@ -513,6 +532,11 @@ class MultiGenomeDataLoader:
             seq = str(seq).upper()
         else:
             seq = seq.upper()
+        
+        # For negative strand genes, reverse the sequence and apply complement
+        # This preserves the biological meaning while keeping genomic coordinates
+        if strand == '-':
+            seq = complement_sequence(seq)  # Apply complement (not reverse complement)
         
         # Add padding with 'N' if needed
         if left_pad > 0:
