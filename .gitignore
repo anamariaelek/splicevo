@@ -108,7 +108,6 @@ ENV/
 .idea/
 
 # Data
-*.py
 data
 slurm*
 scripts/slurm*
