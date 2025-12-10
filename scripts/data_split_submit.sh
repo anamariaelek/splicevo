@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=split_mouse_rat_human
+#SBATCH --job-name=split_mouse_rat
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=512G
@@ -9,8 +9,8 @@
 
 # Memoory rules of thumb:
 # - 64G for small datasets (e.g., a few chromosome in a single genome, a few usage conditions)
-# - 128G for medium datasets (e.g., multiple chromosomes from multiple genomes, a few usage conditions)
-# - 256G or 512G for large datasets (e.g., whole genomes of multiple species, many usage conditions)
+# - 128G or 256G for medium datasets (e.g., multiple chromosomes from multiple genomes, a few usage conditions)
+# - 512G for large datasets (e.g., whole genomes of multiple species, many usage conditions)
 
 set -e
 
@@ -33,7 +33,7 @@ INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_${SUBSET}/
 OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/
 
 python ${SPLICEVO_DIR}/scripts/data_split.py \
-    --input_dir ${INPUT_DIR} --genome_ids mouse_GRCm38 rat_Rnor_5.0 \
+    --input_dir ${INPUT_DIR} --genome_ids mouse_GRCm38 rat_Rnor_5.0 human_GRCh37 \
     --output_dir ${OUTPUT_DIR} \
     --orthology_file ${ORTHOLOGY_FILE} \
     --pov_genome mouse_GRCm38 \

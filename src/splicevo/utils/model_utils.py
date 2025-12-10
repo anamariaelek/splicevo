@@ -1,3 +1,5 @@
+"""Utility functions for model handling."""
+
 import json
 from pathlib import Path
 import torch

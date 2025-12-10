@@ -12,23 +12,7 @@ import json
 from ..io.genome import GenomeData
 from ..io.gene_annotation import GTFProcessor, Transcript
 from ..io.splice_sites import SpliceSite
-
-
-def complement_sequence(seq: str) -> str:
-    """
-    Generate the complement of a DNA sequence (not reverse complement).
-    
-    For negative strand genes, we keep the sequence reversed but apply
-    nucleotide complementation: A<->T, C<->G.
-    
-    Args:
-        seq: DNA sequence string
-        
-    Returns:
-        Complemented sequence
-    """
-    comp_map = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N'}
-    return ''.join(comp_map.get(nuc.upper(), 'N') for nuc in seq)
+from ..utils.sequence_utils import complement_sequence
 
 
 class MultiGenomeDataLoader:
