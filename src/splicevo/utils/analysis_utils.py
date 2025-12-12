@@ -4,6 +4,11 @@ import numpy as np
 import pandas as pd
 from typing import Optional, Tuple, List, Dict, Union
 from .sequence_utils import one_hot_decode, complement_sequence
+from .window_utils import (
+    resolve_window_indices,
+    build_genomic_coords_dict,
+    filter_splice_sites_by_genomic_coords
+)
 
 
 def analyze_splice_sites(
@@ -35,7 +40,7 @@ def analyze_splice_sites(
         genome: Optional GenomeData object for retrieving FASTA sequences
         usage_conditions: List of condition dicts with 'condition_key', 'tissue', 'timepoint', 'display_name'
         window_indices: Array of row indices to analyze from test_meta_df
-        genomic_coords: List of (chromosome, start, end, strand) tuples to find overlapping windows
+        genomic_coords: List of (genome_id, chromosome, start, end, strand) tuples to find overlapping windows
         context_size: Size of context used in the data
         show_usage: Whether to display usage statistics
         return_data: If True, return analysis data instead of printing
@@ -45,31 +50,29 @@ def analyze_splice_sites(
         List of analysis data dicts if return_data=True, else None
     """
     
-    genomic_coords_dict = {}  # Store for later filtering
+    # Resolve window indices from either explicit indices or genomic coordinates
+    try:
+        window_indices = resolve_window_indices(
+            test_meta_df,
+            window_indices=window_indices,
+            genomic_coords=genomic_coords,
+            default_n=5
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        return [] if return_data else None
     
-    # Determine which windows to analyze
+    if verbose and genomic_coords is not None:
+        print(f"Found {len(window_indices)} windows overlapping specified coordinates:")
+        for idx in window_indices:
+            row = test_meta_df.iloc[idx]
+            print(f"  Window {idx}: {row['genome_id']}:{row['chromosome']}:{row['window_start']}-{row['window_end']} ({row['strand']})")
+        print()
+    
+    # Build genomic coordinate dictionary for filtering splice sites if provided
+    genomic_coords_dict = None
     if genomic_coords is not None:
-        window_indices = _find_overlapping_windows(test_meta_df, genomic_coords)
-        # Store genomic coords for filtering splice sites
-        for chrom, coord_start, coord_end, strand in genomic_coords:
-            key = (str(chrom), str(strand))
-            if key not in genomic_coords_dict:
-                genomic_coords_dict[key] = []
-            genomic_coords_dict[key].append((coord_start, coord_end))
-        
-        if len(window_indices) == 0:
-            print("No windows found overlapping the specified genomic coordinates.")
-            return [] if return_data else None
-        if verbose:
-            print(f"Found {len(window_indices)} windows overlapping specified coordinates:")
-            for idx in window_indices:
-                row = test_meta_df.iloc[idx]
-                print(f"  Window {idx}: {row['chromosome']}:{row['window_start']}-{row['window_end']} ({row['strand']})")
-            print()
-    elif window_indices is None:
-        # Default: use evenly spaced windows
-        n_examples = min(5, len(test_seq))
-        window_indices = np.linspace(0, len(test_meta_df)-1, n_examples, dtype=int)
+        genomic_coords_dict = build_genomic_coords_dict(genomic_coords)
     
     if verbose:
         print(f"{'='*80}")
@@ -88,6 +91,7 @@ def analyze_splice_sites(
             print(f"\n{'='*80}")
             print(f"Window {idx + 1} (index {row_idx}): {row.get('gene_id', 'unknown')} on chromosome {row['chromosome']} ({row['strand']} strand)")
             print(f"{'='*80}")
+            print(f"Genome ID: {row.get('genome_id', 'unknown')}")
             print(f"Genomic location: {row['chromosome']}:{row['window_start']}-{row['window_end']}")
             print(f"Donor sites: {row.get('n_donor_sites', '?')}, Acceptor sites: {row.get('n_acceptor_sites', '?')}")
         
@@ -128,43 +132,30 @@ def analyze_splice_sites(
         acceptor_positions = np.where(labels_row == 2)[0]
         
         # Filter splice sites by genomic coordinates if provided
-        if genomic_coords_dict:
-            coord_key = (chrom, strand)
-            if coord_key in genomic_coords_dict:
-                coord_ranges = genomic_coords_dict[coord_key]
-                filtered_donors = []
-                filtered_acceptors = []
-                
-                for pos in donor_positions:
-                    if strand == '+':
-                        genomic_pos = start + pos - 1
-                    else:
-                        genomic_pos = start + pos + 1
-                    # Check if this position overlaps with any provided coordinate range
-                    for coord_start, coord_end in coord_ranges:
-                        if coord_start <= genomic_pos <= coord_end:
-                            filtered_donors.append(pos)
-                            break
-                
-                for pos in acceptor_positions:
-                    if strand == '+':
-                        genomic_pos = start + pos + 1
-                    else:
-                        genomic_pos = start + pos - 1
-                    # Check if this position overlaps with any provided coordinate range
-                    for coord_start, coord_end in coord_ranges:
-                        if coord_start <= genomic_pos <= coord_end:
-                            filtered_acceptors.append(pos)
-                            break
-                
-                donor_positions = np.array(filtered_donors)
-                acceptor_positions = np.array(filtered_acceptors)
+        if genomic_coords_dict is not None:
+            donor_pos_filtered, acceptor_pos_filtered = filter_splice_sites_by_genomic_coords(
+                donor_positions, acceptor_positions,
+                window_start=start,
+                window_strand=strand,
+                genomic_coords_dict=genomic_coords_dict,
+                genome_id=row.get('genome_id', ''),
+                chromosome=chrom
+            )
+            
+            if verbose:
+                print(f"\nFiltering splice sites using genomic coordinates...")
+                print(f"Filtered donor sites: {donor_pos_filtered}")
+                print(f"Filtered acceptor sites: {acceptor_pos_filtered}")
+            
+            donor_positions = donor_pos_filtered
+            acceptor_positions = acceptor_pos_filtered
         
         if verbose:
             print(f"\nDonor site positions in sequence: {donor_positions}")
             if len(donor_positions) > 0:
                 print("Sequences around donor sites (±5bp):")
                 for pos in donor_positions[:3]:
+                    pos = pos + context_size  # Adjust for context
                     start_seq = max(0, pos - 5)
                     end_seq = min(len(seq_string), pos + 7)
                     context_seq = seq_string[start_seq:end_seq]
@@ -176,6 +167,7 @@ def analyze_splice_sites(
             if len(acceptor_positions) > 0:
                 print("Sequences around acceptor sites (±5bp):")
                 for pos in acceptor_positions[:3]:
+                    pos = pos + context_size  # Adjust for context
                     start_seq = max(0, pos - 5)
                     end_seq = min(len(seq_string), pos + 7)
                     context_seq = seq_string[start_seq:end_seq]
@@ -217,41 +209,6 @@ def analyze_splice_sites(
         return analysis_results
     
     return None
-
-
-def _find_overlapping_windows(
-    meta_df: pd.DataFrame,
-    genomic_coords: List[Tuple[str, int, int, str]]
-) -> np.ndarray:
-    """
-    Find all windows overlapping with specified genomic coordinates.
-    
-    Args:
-        meta_df: DataFrame with window metadata containing 'chromosome', 'window_start', 'window_end', 'strand'
-        genomic_coords: List of (chromosome, start, end, strand) tuples
-        
-    Returns:
-        Array of window indices that overlap with any of the specified coordinates
-    """
-    overlapping_indices = []
-    
-    for chrom, coord_start, coord_end, strand in genomic_coords:
-        # Find windows on the same chromosome and strand
-        matches = meta_df[
-            (meta_df['chromosome'].astype(str) == str(chrom)) &
-            (meta_df['strand'].astype(str) == str(strand))
-        ]
-        
-        # Find overlapping windows
-        for idx, row in matches.iterrows():
-            window_start = int(row['window_start'])
-            window_end = int(row['window_end'])
-            
-            # Check for overlap
-            if window_start < coord_end and window_end > coord_start:
-                overlapping_indices.append(idx)
-    
-    return np.array(sorted(set(overlapping_indices)))
 
 
 def _extract_usage_data(

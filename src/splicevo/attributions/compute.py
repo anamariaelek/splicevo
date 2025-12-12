@@ -8,9 +8,11 @@ Negative gradients indicate inputs that hurt predictions.
 
 import torch
 import numpy as np
-from typing import Optional, Tuple, Dict
+import pandas as pd
+from typing import Optional, Tuple, Dict, List
 
 from splicevo.model import SplicevoModel
+from splicevo.attributions.attributions import AttributionCalculator
 
 
 def compute_attribution_splice(
@@ -316,3 +318,150 @@ def compute_attributions_batch(
         total_calculated += count_calculated
     
     return combined_attrs_dict, total_skipped, total_calculated
+
+
+# High-level convenience API for flexible attributions calculation
+
+
+def compute_attributions_splice(
+    model: SplicevoModel,
+    sequences: np.ndarray,
+    labels: np.ndarray,
+    meta_df: pd.DataFrame,
+    window_indices: Optional[np.ndarray] = None,
+    positions: Optional[List[int]] = None,
+    genomic_coords: Optional[List[Tuple[str, str, int, int, str]]] = None,
+    predictions: Optional[np.ndarray] = None,
+    filter_by_correct: bool = False,
+    device: str = 'cuda',
+    verbose: bool = False
+) -> Dict:
+    """
+    Compute splice site attributions using flexible window/coordinate specification.
+    
+    High-level convenience function for the AttributionCalculator. Supports either:
+    - Explicit window indices
+    - Specific window and splice site positions
+    - Genomic coordinates (automatically finds overlapping windows)
+    
+    Args:
+        model: SplicevoModel instance
+        sequences: One-hot encoded sequences (n_windows, seq_len, 4)
+        labels: Splice site labels (n_windows, seq_len) with values 0/1/2
+        meta_df: Metadata DataFrame with window information
+        window_indices: Optional explicit window indices to process
+        genomic_coords: Optional list of (genome_id, chromosome, start, end, strand) tuples
+        positions: Optional list of position integers paired with window_indices (same length required)
+        predictions: Optional model predictions for filtering correct predictions
+        filter_by_correct: If True, only compute for correctly predicted sites
+        device: Device to use ('cuda' or 'cpu')
+        verbose: Whether to print debug information
+        
+    Returns:
+        Dictionary with 'attributions', 'metadata', and 'summary' keys
+        
+    Examples:
+        >>> # Compute for specific windows
+        >>> result = compute_attributions_splice(
+        ...     model, sequences, labels, meta_df,
+        ...     window_indices=np.array([0, 5, 10])
+        ... )
+        
+        >>> # Compute for specific splice sites in specific windows
+        >>> result = compute_attributions_splice(
+        ...     model, sequences, labels, meta_df,
+        ...     window_indices=np.array([0, 5, 10]),
+        ...     positions=[100, 95, 120]  # Each position pairs with corresponding window_index
+        ... )
+        
+        >>> # Compute for genomic region
+        >>> coords = [('human_GRCh37', '3', 142740160, 142740259, '+')]
+        >>> result = compute_attributions_splice(
+        ...     model, sequences, labels, meta_df,
+        ...     genomic_coords=coords
+        ... )
+    """
+    calc = AttributionCalculator(model, device=device, verbose=verbose)
+    return calc.compute_splice_attributions(
+        sequences, labels, meta_df,
+        window_indices=window_indices,
+        positions=positions,
+        genomic_coords=genomic_coords,
+        predictions=predictions,
+        filter_by_correct=filter_by_correct
+    )
+
+
+def compute_attributions_usage(
+    model: SplicevoModel,
+    sequences: np.ndarray,
+    labels: np.ndarray,
+    usage: np.ndarray,
+    meta_df: pd.DataFrame,
+    window_indices: Optional[np.ndarray] = None,
+    genomic_coords: Optional[List[Tuple[str, str, int, int, str]]] = None,
+    positions: Optional[List[int]] = None,
+    predictions: Optional[np.ndarray] = None,
+    filter_by_correct: bool = False,
+    condition_names: Optional[List[str]] = None,
+    device: str = 'cuda',
+    verbose: bool = False
+) -> Dict:
+    """
+    Compute usage (condition) attributions using flexible window/coordinate specification.
+    
+    High-level convenience function for the AttributionCalculator. Supports either:
+    - Explicit window indices
+    - Specific window and splice site positions
+    - Genomic coordinates (automatically finds overlapping windows)
+    - Default evenly-spaced windows
+    
+    Args:
+        model: SplicevoModel instance
+        sequences: One-hot encoded sequences (n_windows, seq_len, 4)
+        labels: Splice site labels (n_windows, seq_len) with values 0/1/2
+        usage: Usage values (n_windows, seq_len, n_conditions)
+        meta_df: Metadata DataFrame with window information
+        window_indices: Optional explicit window indices to process
+        positions: Optional list of position integers paired with window_indices (same length required)
+        genomic_coords: Optional list of (genome_id, chromosome, start, end, strand) tuples
+        predictions: Optional model predictions for filtering
+        filter_by_correct: If True, only compute for correctly predicted sites
+        condition_names: Optional list of condition names for labeling
+        device: Device to use ('cuda' or 'cpu')
+        verbose: Whether to print debug information
+        
+    Returns:
+        Dictionary with 'attributions', 'metadata', and 'summary' keys
+        
+    Examples:
+        >>> # Compute for specific windows
+        >>> result = compute_attributions_usage(
+        ...     model, sequences, labels, usage, meta_df,
+        ...     window_indices=np.array([0, 5, 10])
+        ... )
+        
+        >>> # Compute for specific splice sites in specific windows
+        >>> result = compute_attributions_usage(
+        ...     model, sequences, labels, usage, meta_df,
+        ...     window_indices=np.array([0, 5, 10]),
+        ...     positions=[100, 95, 120]  # Each position pairs with corresponding window_index
+        ... )
+        
+        >>> # Compute for genomic region
+        >>> coords = [('human_GRCh37', '3', 142740160, 142740259, '+')]
+        >>> result = compute_attributions_usage(
+        ...     model, sequences, labels, usage, meta_df,
+        ...     genomic_coords=coords
+        ... )
+    """
+    calc = AttributionCalculator(model, device=device, verbose=verbose)
+    return calc.compute_usage_attributions(
+        sequences, labels, usage, meta_df,
+        window_indices=window_indices,
+        positions=positions,
+        genomic_coords=genomic_coords,
+        predictions=predictions,
+        filter_by_correct=filter_by_correct,
+        condition_names=condition_names
+    )

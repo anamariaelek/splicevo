@@ -10,11 +10,19 @@ from .compute import (
     compute_attribution_usage,
     compute_attributions_for_sequence,
     compute_attributions_batch,
+    compute_attributions_splice,
+    compute_attributions_usage,
+)
+
+from .attributions import (
+    AttributionCalculator,
 )
 
 from .plot import (
     plot_attributions_splice,
     plot_attributions_usage,
+    plot_attributions_splice_from_result,
+    plot_attributions_usage_from_result,
     create_attribution_logo,
     extract_attribution_values,
     BASE_COLORS,
@@ -22,14 +30,23 @@ from .plot import (
 )
 
 __all__ = [
-    # Computation
+    # Computation - low-level
     'compute_attribution_splice',
     'compute_attribution_usage',
     'compute_attributions_for_sequence',
     'compute_attributions_batch',
-    # Plotting
+    # Computation - high-level flexible API
+    'compute_attributions_splice',
+    'compute_attributions_usage',
+    # Calculator class
+    'AttributionCalculator',
+    # Plotting - legacy format
     'plot_attributions_splice',
     'plot_attributions_usage',
+    # Plotting - flexible API format (new)
+    'plot_attributions_splice_from_result',
+    'plot_attributions_usage_from_result',
+    # Plotting utilities
     'create_attribution_logo',
     'extract_attribution_values',
     'BASE_COLORS',

@@ -23,7 +23,7 @@ export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK}
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
-SUBSET="middle"
+SUBSET="full"
 LOSS="weighted_mse"
 for SPECIES in mouse mouse_rat mouse_rat_human; do
 MODEL=${SUBSET}_${SPECIES}_${LOSS}

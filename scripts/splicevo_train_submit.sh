@@ -27,7 +27,7 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
 SUBSET="full"
-SPECIES="mouse"
+SPECIES="mouse_rat"
 TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_resnet.yaml
 DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/train/
 MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/${SUBSET}_${SPECIES}_weighted_mse/
