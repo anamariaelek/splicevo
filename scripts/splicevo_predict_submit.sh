@@ -1,4 +1,7 @@
 #!/bin/bash
+# 
+# This script runs predictions on test data using pre-trained Splicevo models.
+#
 #SBATCH --job-name=predict_mouse_rat_human
 #SBATCH --partition=gpu-single
 #SBATCH --cpus-per-task=8

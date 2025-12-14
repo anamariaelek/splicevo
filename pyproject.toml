@@ -49,6 +49,18 @@ test = [
   "mypy>=1.0.0,<2.0.0",
   "ipdb>=0.13.0,<0.14.0"
 ]
+modisco = [
+  "modisco>=2.0.0",
+  "h5py>=3.0.0",
+  "logomaker>=0.8"
+]
+analysis = [
+  "modisco>=2.0.0",
+  "h5py>=3.0.0",
+  "logomaker>=0.8",
+  "jupyter>=1.0.0",
+  "ipython>=8.0.0"
+]
 
 [project.urls]
 homepage = "https://github.com/anamariaelek/splicevo"

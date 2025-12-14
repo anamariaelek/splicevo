@@ -465,3 +465,172 @@ def compute_attributions_usage(
         filter_by_correct=filter_by_correct,
         condition_names=condition_names
     )
+
+
+def save_attributions_for_modisco(
+    attrs_dict: Dict,
+    output_path: str,
+    window: int = 100,
+    condition_idx: Optional[int] = None,
+    verbose = False
+) -> Dict:
+    """
+    Save sequences and attributions around splice sites for TensorFlow Modisco analysis.
+    
+    Extracts sequences and attributions in a window around each splice site and saves
+    them as numpy arrays in the format expected by tfmodisco-lite.
+    
+    Args:
+        attrs_dict: Dictionary of attribution data from compute_attributions_for_sequence
+                    or from result['attributions'] from flexible API. Each entry should have:
+                    - 'sequence': One-hot encoded sequence (seq_len, 4)
+                    - 'attribution': Attribution array (seq_len, 4) or (seq_len, 4, n_conditions)
+                    - 'position': Relative position within window (without context)
+                    - 'context': Length of the context at the begining and end of the window
+                    - 'metadata': Dictionary with genomic coordinates metadata
+        output_path: Path to save output files (without extension). Will create:
+                     - {output_path}_sequences.npy
+                     - {output_path}_attributions.npy
+                     - {output_path}_metadata.json
+        window: Window size around splice site (bases on each side, so total width = 2*window + 1)
+                Used for filtering: only saves sites with complete windows.
+        condition_idx: For usage attributions with shape (seq_len, 4, n_conditions),
+                       specify which condition to extract. If None, uses first condition or
+                       full 3D array if only 2D.
+        
+    Returns:
+        Dictionary with:
+        - 'sequences': Saved sequences array shape (n_sites, 2*window+1, 4)
+        - 'attributions': Saved attributions array shape (n_sites, 2*window+1, 4)
+        - 'n_sites': Number of sites saved
+        - 'window': Window size used
+        - 'metadata': List of site metadata
+        - 'sequences_path': Path to sequences file
+        - 'attributions_path': Path to attributions file
+        - 'metadata_path': Path to metadata file
+    """
+    import json
+    from pathlib import Path
+    
+    sequences_list = []
+    attributions_list = []
+    metadata_list = []
+    
+    for site_id, info in attrs_dict.items():
+        if verbose:
+            print(f"Processing {site_id}")
+        sequence = info['sequence']  # (seq_len, 4)
+        attr = info['attribution']  # (seq_len, 4) or (seq_len, 4, n_conditions)
+        position = info['position']
+        meta = info['metadata']
+        genome_id = meta['genome_id']
+        chromosome = meta['chromosome']
+        genomic_coord = meta['genomic_coord']
+        window_start = meta['window_start']
+        window_end = meta['window_end']
+        strand = meta['strand']
+        # Determine context (number of bases at each end not part of the window)
+        try:
+            context = info['context']
+        except KeyError:
+            # Infer context if not provided
+            # context = number of bases at each end not part of the window
+            context = (sequence.shape[0] - (window_end - window_start)) / 2
+            context = int(context)
+            if verbose:
+                print(f"Inferred context {context}")
+
+        # Calcualte range to extract
+        start = context + position - window
+        end = context + position + window + 1
+        if verbose:
+            print(f"I will extract sequence and attributions range {start}-{end}")
+
+        # Extract sequences and attributions for the window
+        seq_window = sequence[start:end, :]
+        if verbose:
+            print(f"Sequene shape: {seq_window.shape}")
+
+        # Handle attributions with different shapes
+        if len(attr.shape) == 3:
+            # Usage attributions with conditions: (seq_len, 4, n_conditions)
+            if condition_idx is not None:
+                attr_window = attr[start:end, :, condition_idx]
+            else:
+                # Use first condition
+                attr_window = attr[start:end, :, 0]
+        else:
+            # Standard splice attributions: (seq_len, 4)
+            attr_window = attr[start:end, :]
+        if verbose:
+            print(f"Attributions shape: {attr_window.shape}")
+
+        # Only save if we have a complete window
+        # (Skip if splice site is too close to sequence boundaries)
+        if seq_window.shape[0] == 2 * window + 1 and attr_window.shape[0] == 2 * window + 1:
+            sequences_list.append(seq_window)
+            attributions_list.append(attr_window)
+            
+            # Store metadata - preserve all metadata from attrs_dict
+            metadata_entry = {
+                'site_id': site_id,
+                'seq_idx': info.get('seq_idx'),
+                'position': position,
+                'site_type': info.get('site_type', 'unknown'),
+                'site_class': info.get('site_class', -1),
+                'strand': strand,
+                'window_start': window_start,
+                'window_end': window_end,
+            }
+            
+            # Include genomic metadata if available
+            metadata_obj = info.get('metadata', {})
+            if isinstance(metadata_obj, dict):
+                metadata_entry['genome_id'] = genome_id
+                metadata_entry['genomic_coord'] = genomic_coord
+                metadata_entry['chromosome'] = chromosome
+                # Preserve any other metadata fields
+                for key, value in metadata_obj.items():
+                    if key not in ['genomic_coord', 'chromosome', 'genome_id']:
+                        metadata_entry[f'metadata_{key}'] = value
+            
+            metadata_list.append(metadata_entry)
+    
+    # Convert lists to numpy arrays
+    sequences_array = np.array(sequences_list, dtype=np.float32)  # (n_sites, 2*window+1, 4)
+    attributions_array = np.array(attributions_list, dtype=np.float32)  # (n_sites, 2*window+1, 4)
+    
+    # Create output directory if needed
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Save arrays
+    sequences_path = str(output_path) + "_sequences.npy"
+    attributions_path = str(output_path) + "_attributions.npy"
+    metadata_path = str(output_path) + "_metadata.json"
+    
+    np.save(sequences_path, sequences_array)
+    np.save(attributions_path, attributions_array)
+    
+    # Save metadata as JSON
+    with open(metadata_path, 'w') as f:
+        json.dump({
+            'n_sites': len(metadata_list),
+            'window': window,
+            'condition_idx': condition_idx,
+            'sequences_shape': tuple(sequences_array.shape),
+            'attributions_shape': tuple(attributions_array.shape),
+            'sites': metadata_list
+        }, f, indent=2, default=str)
+    
+    return {
+        'sequences': sequences_array,
+        'attributions': attributions_array,
+        'n_sites': len(metadata_list),
+        'window': window,
+        'metadata': metadata_list,
+        'sequences_path': sequences_path,
+        'attributions_path': attributions_path,
+        'metadata_path': metadata_path,
+    }
+

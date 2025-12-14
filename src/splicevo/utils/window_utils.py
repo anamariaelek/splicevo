@@ -59,8 +59,7 @@ def find_overlapping_windows(
 def resolve_window_indices(
     meta_df: pd.DataFrame,
     window_indices: Optional[np.ndarray] = None,
-    genomic_coords: Optional[List[Tuple[str, str, int, int, str]]] = None,
-    default_n: int = 5
+    genomic_coords: Optional[List[Tuple[str, str, int, int, str]]] = None
 ) -> np.ndarray:
     """
     Resolve window indices from either explicit indices or genomic coordinates.
@@ -102,9 +101,8 @@ def resolve_window_indices(
             raise ValueError("No windows found overlapping the specified genomic coordinates.")
         return indices
     
-    # Default: use evenly spaced windows
-    n_examples = min(default_n, len(meta_df))
-    return np.linspace(0, len(meta_df)-1, n_examples, dtype=int)
+    # Default: use all windows
+    return np.asarray(range(meta_df.shape[0]))
 
 
 def build_genomic_coords_dict(

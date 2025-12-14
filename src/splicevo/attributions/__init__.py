@@ -12,6 +12,7 @@ from .compute import (
     compute_attributions_batch,
     compute_attributions_splice,
     compute_attributions_usage,
+    save_attributions_for_modisco,
 )
 
 from .attributions import (
@@ -27,6 +28,14 @@ from .plot import (
     extract_attribution_values,
     BASE_COLORS,
     BASE_NAMES,
+)
+
+from .modisco_analysis import (
+    ModiscoConfig,
+    ModiscoInput,
+    AttributionAggregator,
+    ModiscoAnalyzer,
+    analyze_attributions_quick,
 )
 
 __all__ = [
@@ -49,6 +58,13 @@ __all__ = [
     # Plotting utilities
     'create_attribution_logo',
     'extract_attribution_values',
+    'save_attributions_for_modisco',
     'BASE_COLORS',
     'BASE_NAMES',
+    # TF-MoDisco analysis - flexible API
+    'ModiscoConfig',
+    'ModiscoInput',
+    'AttributionAggregator',
+    'ModiscoAnalyzer',
+    'analyze_attributions_quick',
 ]
