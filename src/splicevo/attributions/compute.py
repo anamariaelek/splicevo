@@ -472,6 +472,7 @@ def save_attributions_for_modisco(
     output_path: str,
     window: int = 100,
     condition_idx: Optional[int] = None,
+    condition_names: Optional[List[str]] = None,
     verbose = False
 ) -> Dict:
     """
@@ -479,6 +480,10 @@ def save_attributions_for_modisco(
     
     Extracts sequences and attributions in a window around each splice site and saves
     them as numpy arrays in the format expected by tfmodisco-lite.
+    
+    When condition_idx is None and attributions have multiple conditions, expands all conditions
+    into separate entries, combining 3D array (n_sites, seq_len, n_conditions) into 
+    2D array (n_sites*n_conditions, seq_len, 4) with condition tracking in metadata.
     
     Args:
         attrs_dict: Dictionary of attribution data from compute_attributions_for_sequence
@@ -495,19 +500,23 @@ def save_attributions_for_modisco(
         window: Window size around splice site (bases on each side, so total width = 2*window + 1)
                 Used for filtering: only saves sites with complete windows.
         condition_idx: For usage attributions with shape (seq_len, 4, n_conditions),
-                       specify which condition to extract. If None, uses first condition or
-                       full 3D array if only 2D.
+                       specify which condition to extract. If None, expands all conditions
+                       into separate entries with condition tracking.
+        condition_names: Optional list of condition names (e.g., ['alpha', 'beta', 'sse']).
+                        If provided and condition_idx is None, used for labeling in metadata.
+        verbose: Whether to print debug information
         
     Returns:
         Dictionary with:
-        - 'sequences': Saved sequences array shape (n_sites, 2*window+1, 4)
-        - 'attributions': Saved attributions array shape (n_sites, 2*window+1, 4)
-        - 'n_sites': Number of sites saved
+        - 'sequences': Saved sequences array shape (n_expanded_sites, 2*window+1, 4)
+        - 'attributions': Saved attributions array shape (n_expanded_sites, 2*window+1, 4)
+        - 'n_sites': Number of expanded sites (n_original_sites * n_conditions if multi-condition)
         - 'window': Window size used
-        - 'metadata': List of site metadata
+        - 'metadata': List of site metadata with 'condition_idx' and 'condition_name' fields
         - 'sequences_path': Path to sequences file
         - 'attributions_path': Path to attributions file
         - 'metadata_path': Path to metadata file
+        - 'n_conditions': Number of conditions (if expanded, else 1)
     """
     import json
     from pathlib import Path
@@ -515,6 +524,7 @@ def save_attributions_for_modisco(
     sequences_list = []
     attributions_list = []
     metadata_list = []
+    n_conditions = None
     
     for site_id, info in attrs_dict.items():
         if verbose:
@@ -541,65 +551,87 @@ def save_attributions_for_modisco(
                 print(f"Inferred context {context}")
 
         # Calcualte range to extract
-        start = context + position - window
-        end = context + position + window + 1
+        start = context + position - int(window/2)
+        end = context + position + int(window/2) + 1
         if verbose:
             print(f"I will extract sequence and attributions range {start}-{end}")
 
-        # Extract sequences and attributions for the window
+        # Extract sequences for the window
         seq_window = sequence[start:end, :]
         if verbose:
-            print(f"Sequene shape: {seq_window.shape}")
+            print(f"Sequence shape: {seq_window.shape}")
 
         # Handle attributions with different shapes
         if len(attr.shape) == 3:
             # Usage attributions with conditions: (seq_len, 4, n_conditions)
+            n_cond = attr.shape[2]
+            if n_conditions is None:
+                n_conditions = n_cond
+            
             if condition_idx is not None:
+                # Extract specific condition
                 attr_window = attr[start:end, :, condition_idx]
+                attr_windows_list = [attr_window]
+                condition_indices = [condition_idx]
             else:
-                # Use first condition
-                attr_window = attr[start:end, :, 0]
+                # Extract all conditions separately
+                attr_windows_list = []
+                condition_indices = []
+                for cond_idx in range(n_cond):
+                    attr_window = attr[start:end, :, cond_idx]
+                    attr_windows_list.append(attr_window)
+                    condition_indices.append(cond_idx)
         else:
             # Standard splice attributions: (seq_len, 4)
-            attr_window = attr[start:end, :]
-        if verbose:
-            print(f"Attributions shape: {attr_window.shape}")
-
-        # Only save if we have a complete window
-        # (Skip if splice site is too close to sequence boundaries)
-        if seq_window.shape[0] == 2 * window + 1 and attr_window.shape[0] == 2 * window + 1:
-            sequences_list.append(seq_window)
-            attributions_list.append(attr_window)
+            attr_windows_list = [attr[start:end, :]]
+            condition_indices = [None]
             
-            # Store metadata - preserve all metadata from attrs_dict
-            metadata_entry = {
-                'site_id': site_id,
-                'seq_idx': info.get('seq_idx'),
-                'position': position,
-                'site_type': info.get('site_type', 'unknown'),
-                'site_class': info.get('site_class', -1),
-                'strand': strand,
-                'window_start': window_start,
-                'window_end': window_end,
-            }
-            
-            # Include genomic metadata if available
-            metadata_obj = info.get('metadata', {})
-            if isinstance(metadata_obj, dict):
-                metadata_entry['genome_id'] = genome_id
-                metadata_entry['genomic_coord'] = genomic_coord
-                metadata_entry['chromosome'] = chromosome
-                # Preserve any other metadata fields
-                for key, value in metadata_obj.items():
-                    if key not in ['genomic_coord', 'chromosome', 'genome_id']:
-                        metadata_entry[f'metadata_{key}'] = value
-            
-            metadata_list.append(metadata_entry)
+        # Process each condition's attribution
+        for attr_window, cond_idx in zip(attr_windows_list, condition_indices):
+            # Only save if we have a complete window
+            # (Skip if splice site is too close to sequence boundaries)
+            if seq_window.shape[0] == window + 1 and attr_window.shape[0] == window + 1:
+                sequences_list.append(seq_window)
+                attributions_list.append(attr_window)
+                
+                # Store metadata - preserve all metadata from attrs_dict
+                metadata_entry = {
+                    'site_id': site_id,
+                    'seq_idx': info.get('seq_idx'),
+                    'position': position,
+                    'site_type': info.get('site_type', 'unknown'),
+                    'site_class': info.get('site_class', -1),
+                    'strand': strand,
+                    'window_start': window_start,
+                    'window_end': window_end,
+                }
+                
+                # Add condition tracking
+                if cond_idx is not None:
+                    metadata_entry['condition_idx'] = cond_idx
+                    if condition_names is not None and cond_idx < len(condition_names):
+                        metadata_entry['condition_name'] = condition_names[cond_idx]
+                
+                # Include genomic metadata if available
+                metadata_obj = info.get('metadata', {})
+                if isinstance(metadata_obj, dict):
+                    metadata_entry['genome_id'] = genome_id
+                    metadata_entry['genomic_coord'] = genomic_coord
+                    metadata_entry['chromosome'] = chromosome
+                    # Preserve any other metadata fields
+                    for key, value in metadata_obj.items():
+                        if key not in ['genomic_coord', 'chromosome', 'genome_id']:
+                            metadata_entry[f'metadata_{key}'] = value
+                
+                metadata_list.append(metadata_entry)
     
     # Convert lists to numpy arrays
     sequences_array = np.array(sequences_list, dtype=np.float32)  # (n_sites, 2*window+1, 4)
     attributions_array = np.array(attributions_list, dtype=np.float32)  # (n_sites, 2*window+1, 4)
     
+    if verbose:
+        print(f"Attributions shapes: {attributions_array.shape}")
+
     # Create output directory if needed
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -618,6 +650,8 @@ def save_attributions_for_modisco(
             'n_sites': len(metadata_list),
             'window': window,
             'condition_idx': condition_idx,
+            'n_conditions': n_conditions,
+            'condition_names': condition_names,
             'sequences_shape': tuple(sequences_array.shape),
             'attributions_shape': tuple(attributions_array.shape),
             'sites': metadata_list
@@ -628,9 +662,9 @@ def save_attributions_for_modisco(
         'attributions': attributions_array,
         'n_sites': len(metadata_list),
         'window': window,
+        'n_conditions': n_conditions,
         'metadata': metadata_list,
         'sequences_path': sequences_path,
         'attributions_path': attributions_path,
         'metadata_path': metadata_path,
     }
-

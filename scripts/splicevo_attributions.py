@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from splicevo.utils.data_utils import load_processed_data, load_predictions
 from splicevo.utils.model_utils import load_model_and_config
-from splicevo.attributions.compute import compute_attributions_splice
+from splicevo.attributions.compute import compute_attributions_splice, compute_attributions_usage, save_attributions_for_modisco
 
 
 def setup_paths(model_path, data_path, predictions_path, output_dir):
@@ -112,107 +112,7 @@ def compute_attributions(model, sequences, labels, metadata, window_indices, pre
     print(f"  - Donor sites: {n_donor}")
     print(f"  - Acceptor sites: {n_acceptor}")
     
-    # Show sample
-    print(f"\nSample attributions:")
-    for i, (site_id, attr_data) in enumerate(result_splice['attributions'].items()):
-        if i >= 3:
-            break
-        print(f"  {site_id}: {attr_data['site_type']:8s} {attr_data['attribution'].shape}")
-    
     return result_splice
-
-
-def save_attributions(result_splice, output_dir):
-    """Save attribution results to disk in a reusable format."""
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Separate donor and acceptor attributions
-    donor_attrs = {}
-    acceptor_attrs = {}
-    
-    for site_id, attr_data in result_splice['attributions'].items():
-        if attr_data['site_type'] == 'donor':
-            donor_attrs[site_id] = attr_data
-        else:
-            acceptor_attrs[site_id] = attr_data
-    
-    # Save donor attributions
-    donor_file = output_dir / "donor_attributions.npz"
-    donor_data = {}
-    donor_metadata = {}
-    for site_id, attr_data in donor_attrs.items():
-        donor_data[f"{site_id}_attribution"] = attr_data['attribution']
-        donor_metadata[site_id] = {
-            'sequence_idx': int(attr_data.get('sequence_idx', -1)),
-            'position': int(attr_data.get('position', -1)),
-            'site_type': 'donor'
-        }
-    
-    np.savez_compressed(donor_file, **donor_data)
-    with open(output_dir / "donor_metadata.json", 'w') as f:
-        json.dump(donor_metadata, f, indent=2)
-    print(f"Saved {len(donor_attrs)} donor attributions to: {donor_file}")
-    
-    # Save acceptor attributions
-    acceptor_file = output_dir / "acceptor_attributions.npz"
-    acceptor_data = {}
-    acceptor_metadata = {}
-    for site_id, attr_data in acceptor_attrs.items():
-        acceptor_data[f"{site_id}_attribution"] = attr_data['attribution']
-        acceptor_metadata[site_id] = {
-            'sequence_idx': int(attr_data.get('sequence_idx', -1)),
-            'position': int(attr_data.get('position', -1)),
-            'site_type': 'acceptor'
-        }
-    
-    np.savez_compressed(acceptor_file, **acceptor_data)
-    with open(output_dir / "acceptor_metadata.json", 'w') as f:
-        json.dump(acceptor_metadata, f, indent=2)
-    print(f"Saved {len(acceptor_attrs)} acceptor attributions to: {acceptor_file}")
-    
-    # Save complete result dict (for TF-MoDISco)
-    result_file = output_dir / "result_splice.npz"
-    result_data = {}
-    result_metadata = {}
-    
-    for site_id, attr_data in result_splice['attributions'].items():
-        result_data[f"{site_id}_attribution"] = attr_data['attribution']
-        result_metadata[site_id] = {
-            'sequence_idx': int(attr_data.get('sequence_idx', -1)),
-            'position': int(attr_data.get('position', -1)),
-            'site_type': attr_data['site_type']
-        }
-    
-    np.savez_compressed(result_file, **result_data)
-    with open(output_dir / "result_metadata.json", 'w') as f:
-        json.dump(result_metadata, f, indent=2)
-    print(f"Saved complete result dict to: {result_file}")
-    
-    # Save summary
-    summary = {
-        'timestamp': datetime.now().isoformat(),
-        'total_sites': len(result_splice['attributions']),
-        'donor_sites': len(donor_attrs),
-        'acceptor_sites': len(acceptor_attrs),
-        'attribution_shape': str(list(result_splice['attributions'].values())[0]['attribution'].shape)
-    }
-    
-    summary_file = output_dir / "attribution_summary.json"
-    with open(summary_file, 'w') as f:
-        json.dump(summary, f, indent=2)
-    print(f"Saved summary to: {summary_file}")
-    
-    return {
-        'donor_file': str(donor_file),
-        'acceptor_file': str(acceptor_file),
-        'result_file': str(result_file),
-        'donor_metadata': str(output_dir / "donor_metadata.json"),
-        'acceptor_metadata': str(output_dir / "acceptor_metadata.json"),
-        'result_metadata': str(output_dir / "result_metadata.json"),
-        'summary': summary
-    }
 
 
 def main():
@@ -232,13 +132,27 @@ def main():
         help='Path to predictions directory'
     )
     parser.add_argument(
-        '--windows', required=False,
+        '--sequences', required=False,
         help='Indices of sequences to compute attributions for (optional). ' \
         'It should look like "0,1,2" or "0:10" (default: all sequences)'
     )
     parser.add_argument(
+        '--window', type=int, default=200,
+        help='Window size around splice site for attributions (default: 200)'
+    )
+    parser.add_argument(
         '--output', required=True, default=None,
         help='Output directory for attribution results'
+    )
+    parser.add_argument(
+        '--skip-splice-attributions', 
+        action='store_true', dest='skip_splice_attributions',
+        help="Set this flag to skip splice attribution calculation"
+    )
+    parser.add_argument(
+        '--skip-usage-attributions', 
+        action='store_true', dest='skip_usage_attributions',
+        help="Set this flag to skip usage attribution calculation"
     )
     parser.add_argument(
         '--device', default='cuda',
@@ -262,34 +176,68 @@ def main():
         )
         
         # Get indices of sequences to compute attributions for
-        if args.windows:
-            if ':' in args.windows:
-                start, end = args.windows.split(':')
+        if args.sequences:
+            if ':' in args.sequences:
+                start, end = args.sequences.split(':')
                 start = int(start) if start else None
                 end = int(end) if end else None
                 window_indices = list(range(sequences.shape[0]))[start:end]
             else:
-                window_indices = args.windows.split(',')
+                window_indices = args.sequences.split(',')
                 window_indices = [int(idx) for idx in window_indices]
             print(f"Computing attributions for {len(window_indices)} specified sequences.")
         else:
             window_indices = None
             print("Computing attributions for all sequences.")
+        
+        if not args.skip_splice_attributions:
+            
+            # Compute splice attributions
+            result_splice = compute_attributions_splice(
+                model, sequences, labels, metadata,
+                window_indices=window_indices,
+                predictions=pred_preds,
+                filter_by_correct=True,
+                device=args.device,
+                verbose=True
+            )
+            
+            # Save splice attributions
+            save_splice = save_attributions_for_modisco(
+                result_splice['attributions'], 
+                output_path = f"{output_dir}/splice",
+                window=args.window,
+                verbose=False)
+            print(f"Attributions for splice site classification saved to: {output_dir}")
 
-        # Compute attributions
-        result_splice = compute_attributions(
-            model, sequences, labels, metadata, window_indices, pred_preds, device=args.device
-        )
+        else:
+            print("Skipped calculating splice classification attributions.")
+            
+        if not args.skip_usage_attributions:
+
+            # Compute usage attributions
+            result_usage = compute_attributions_usage(
+                model, sequences, labels, usage, metadata,
+                window_indices=window_indices,
+                predictions=pred_preds,
+                filter_by_correct=True,
+                condition_names=condition_names,
+                device=args.device,
+                verbose=True
+            )
+            
+            # Save usage attributions
+            save_usage = save_attributions_for_modisco(
+                result_usage['attributions'], 
+                output_path = f"{output_dir}/usage",
+                window=args.window,
+                condition_names=condition_names,
+                verbose=False)
+            print(f"Attributions for splice site usage saved to: {output_dir}")      
         
-        # Save attributions
-        save_info = save_attributions(result_splice, output_dir)
-        
-        print(f"Results saved to: {output_dir}")
-        print(f"Files created:")
-        print(f"  - Donor attributions: donor_attributions.npz")
-        print(f"  - Acceptor attributions: acceptor_attributions.npz")
-        print(f"  - Complete result dict: result_splice.npz")
-        print(f"Summary: {save_info['summary']}")
+        else:
+            print("Skipped calculating splice usage attributions.")
+
         print(f"Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         return 0

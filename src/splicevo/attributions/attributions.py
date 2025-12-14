@@ -393,8 +393,8 @@ class AttributionCalculator:
                 
                 # Skip if predictions filter is enabled
                 if filter_by_correct and predictions is not None:
-                    # For usage, we might check if any condition prediction is correct
-                    if predictions[seq_idx, position].max() > 0:  # Heuristic check
+                    # For usage, filter by splice site classification correctness (same as splice)
+                    if predictions[seq_idx, position] != site_class:
                         count_skipped += 1
                         continue
                 

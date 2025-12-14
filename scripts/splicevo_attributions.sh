@@ -31,16 +31,21 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 # Configuration
 SUBSET="full"
 SPECIES="mouse_rat_human"
-N_SEQS="all"
-TRIM_FLANK=15
+WINDOW=400
 N_CORES=4
 
 # Paths
 BASE_DIR="/home/elek/sds/sd17d003/Anamaria/splicevo"
-MODEL_PATH="${BASE_DIR}/models/${SUBSET}_${SPECIES}_weighted_mse/best_model.pt"
-DATA_PATH="${BASE_DIR}/data/splits_${SUBSET}/${SPECIES}/test"
-PREDICTIONS_PATH="${BASE_DIR}/predictions/${SUBSET}_${SPECIES}_weighted_mse"
-OUTPUT_DIR="${BASE_DIR}/attributions/${SUBSET}_${SPECIES}_weighted_mse"
+MODEL_PATH="${BASE_DIR}/models/full_${SPECIES}_weighted_mse/best_model.pt"
+DATA_PATH="${BASE_DIR}/data/splits_full/${SPECIES}/test"
+PREDICTIONS_PATH="${BASE_DIR}/predictions/full_${SPECIES}_weighted_mse"
+OUTPUT_DIR="${BASE_DIR}/attributions/${SPECIES}_weighted_mse_window_${WINDOW}"
+
+SUBSET="0:100"
+if [ "$SUBSET" != "" ]; then
+    OUTPUT_DIR="${OUTPUT_DIR}_subset_${SUBSET//:/-}"
+fi
+echo "Attribution output directory: $OUTPUT_DIR"
 
 # Create logs directory
 mkdir -p logs
@@ -58,7 +63,6 @@ echo "  Predictions: $PREDICTIONS_PATH"
 echo "  Output directory: $OUTPUT_DIR"
 echo ""
 echo "Parameters:"
-echo "  n_seqs: $N_SEQS"
 echo "  n_cores: $N_CORES"
 echo ""
 
@@ -81,9 +85,21 @@ if [ ! -d "$PREDICTIONS_PATH" ]; then
 fi
 
 # Run analysis
-python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
-    --model $MODEL_PATH \
-    --data $DATA_PATH \
-    --predictions $PREDICTIONS_PATH \
-    --windows '0:1000' \
-    --output $OUTPUT_DIR
+# To skip some calculations, set --skip-splice-attributions or --skip-usage-attributions
+# Setting both flag will skip all calculations i.e. dry run.
+if [ "$SUBSET" != "" ]; then
+    python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
+        --model $MODEL_PATH \
+        --data $DATA_PATH \
+        --predictions $PREDICTIONS_PATH \
+        --sequences $SUBSET \
+        --window $WINDOW \
+        --output $OUTPUT_DIR
+else
+    python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
+        --model $MODEL_PATH \
+        --data $DATA_PATH \
+        --predictions $PREDICTIONS_PATH \
+        --window $WINDOW \
+        --output $OUTPUT_DIR 
+fi

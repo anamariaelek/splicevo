@@ -35,7 +35,7 @@ from .modisco_analysis import (
     ModiscoInput,
     AttributionAggregator,
     ModiscoAnalyzer,
-    analyze_attributions_quick,
+    analyze_saved_attributions_quick,
 )
 
 __all__ = [
@@ -66,5 +66,5 @@ __all__ = [
     'ModiscoInput',
     'AttributionAggregator',
     'ModiscoAnalyzer',
-    'analyze_attributions_quick',
+    'analyze_saved_attributions_quick',
 ]
