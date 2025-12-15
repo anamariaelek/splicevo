@@ -29,7 +29,6 @@ export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK}
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Configuration
-SUBSET="full"
 SPECIES="mouse_rat_human"
 WINDOW=400
 N_CORES=4
@@ -41,7 +40,7 @@ DATA_PATH="${BASE_DIR}/data/splits_full/${SPECIES}/test"
 PREDICTIONS_PATH="${BASE_DIR}/predictions/full_${SPECIES}_weighted_mse"
 OUTPUT_DIR="${BASE_DIR}/attributions/${SPECIES}_weighted_mse_window_${WINDOW}"
 
-SUBSET="0:100"
+SUBSET=""
 if [ "$SUBSET" != "" ]; then
     OUTPUT_DIR="${OUTPUT_DIR}_subset_${SUBSET//:/-}"
 fi
@@ -101,5 +100,7 @@ else
         --data $DATA_PATH \
         --predictions $PREDICTIONS_PATH \
         --window $WINDOW \
-        --output $OUTPUT_DIR 
+        --output $OUTPUT_DIR \
+        --share-attributions-across-conditions \
+        --skip-splice-attributions
 fi

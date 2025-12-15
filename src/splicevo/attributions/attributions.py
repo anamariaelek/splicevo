@@ -269,7 +269,8 @@ class AttributionCalculator:
         positions: Optional[List[Tuple[int, int]]] = None,
         predictions: Optional[np.ndarray] = None,
         filter_by_correct: bool = False,
-        condition_names: Optional[List[str]] = None
+        condition_names: Optional[List[str]] = None,
+        share_attributions_across_conditions: bool = False
     ) -> Dict:
         """
         Compute input gradient attributions for usage (condition) predictions.
@@ -285,6 +286,8 @@ class AttributionCalculator:
             predictions: Optional model predictions (n_windows, seq_len, n_conditions) to filter
             filter_by_correct: If True, only process sites with correct predictions
             condition_names: Optional list of condition names for labeling
+            share_attributions_across_conditions: If True, compute all conditions in a single forward pass
+                                                 using shared input gradients (faster, ~N_CONDITIONS speedup)
             
         Returns:
             Dictionary with attributions, metadata, and summary statistics
@@ -399,7 +402,8 @@ class AttributionCalculator:
                         continue
                 
                 attr = self._compute_usage_attribution(
-                    sequence, target, position
+                    sequence, target, position,
+                    share_attributions_across_conditions=share_attributions_across_conditions
                 )
                 
                 site_id = f"{seq_idx}_{position}"
@@ -489,7 +493,8 @@ class AttributionCalculator:
         self,
         sequence: np.ndarray,
         target: np.ndarray,
-        position: int
+        position: int,
+        share_attributions_across_conditions: bool = False
     ) -> np.ndarray:
         """
         Compute input gradient attribution for usage prediction at a single site.
@@ -498,6 +503,8 @@ class AttributionCalculator:
             sequence: One-hot encoded sequence (seq_len, 4)
             target: Target values (seq_len, n_conditions)
             position: Position to compute attributions for
+            share_attributions_across_conditions: If True, compute all conditions in a single forward pass.
+                                                  Faster but assumes shared input gradients across conditions.
             
         Returns:
             Attribution array (seq_len, 4, n_conditions)
@@ -511,26 +518,54 @@ class AttributionCalculator:
         seq_tensor = torch.from_numpy(sequence.copy()).float().to(self.device).unsqueeze(0)
         target_tensor = torch.from_numpy(target.copy()).float().to(self.device)
         
-        for col in range(n_conditions):
+        if share_attributions_across_conditions:
+            # Optimized: single forward pass for all conditions
             seq_tensor.requires_grad = True
             self.model.zero_grad()
             
             with torch.enable_grad():
                 output = self.model(seq_tensor)
                 usage_pred = output['usage_predictions']  # (1, seq_len, n_conditions)
-                pos_pred = usage_pred[:, position, col]  # (1,)
-                target_val = target_tensor[position, col]
+                pos_pred = usage_pred[:, position, :]  # (1, n_conditions)
+                target_vals = target_tensor[position, :]  # (n_conditions,)
                 
+                # Compute loss for all conditions at once
                 loss = torch.nn.functional.mse_loss(
                     pos_pred,
-                    target_val.unsqueeze(0),
+                    target_vals.unsqueeze(0),
                     reduction='mean'
                 )
                 
                 loss.backward()
             
-            attributions[:, :, col] = seq_tensor.grad.detach().cpu().numpy()[0, :, :]
-            seq_tensor.grad.zero_()
-            seq_tensor.requires_grad = False
+            # Extract gradients once for all conditions
+            grad_all = seq_tensor.grad.detach().cpu().numpy()[0, :, :]  # (seq_len, 4)
+            
+            # Replicate gradient across all conditions (all conditions share same input gradients)
+            for col in range(n_conditions):
+                attributions[:, :, col] = grad_all
+        else:
+            # Original: separate forward pass per condition
+            for col in range(n_conditions):
+                seq_tensor.requires_grad = True
+                self.model.zero_grad()
+                
+                with torch.enable_grad():
+                    output = self.model(seq_tensor)
+                    usage_pred = output['usage_predictions']  # (1, seq_len, n_conditions)
+                    pos_pred = usage_pred[:, position, col]  # (1,)
+                    target_val = target_tensor[position, col]
+                    
+                    loss = torch.nn.functional.mse_loss(
+                        pos_pred,
+                        target_val.unsqueeze(0),
+                        reduction='mean'
+                    )
+                    
+                    loss.backward()
+                
+                attributions[:, :, col] = seq_tensor.grad.detach().cpu().numpy()[0, :, :]
+                seq_tensor.grad.zero_()
+                seq_tensor.requires_grad = False
         
         return attributions

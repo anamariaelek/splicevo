@@ -404,6 +404,7 @@ def compute_attributions_usage(
     predictions: Optional[np.ndarray] = None,
     filter_by_correct: bool = False,
     condition_names: Optional[List[str]] = None,
+    share_attributions_across_conditions: bool = False,
     device: str = 'cuda',
     verbose: bool = False
 ) -> Dict:
@@ -428,6 +429,8 @@ def compute_attributions_usage(
         predictions: Optional model predictions for filtering
         filter_by_correct: If True, only compute for correctly predicted sites
         condition_names: Optional list of condition names for labeling
+        share_attributions_across_conditions: If True, compute all conditions in a single forward pass
+                                             using shared input gradients
         device: Device to use ('cuda' or 'cpu')
         verbose: Whether to print debug information
         
@@ -448,11 +451,12 @@ def compute_attributions_usage(
         ...     positions=[100, 95, 120]  # Each position pairs with corresponding window_index
         ... )
         
-        >>> # Compute for genomic region
+        >>> # Compute for genomic region with optimized computation
         >>> coords = [('human_GRCh37', '3', 142740160, 142740259, '+')]
         >>> result = compute_attributions_usage(
         ...     model, sequences, labels, usage, meta_df,
-        ...     genomic_coords=coords
+        ...     genomic_coords=coords,
+        ...     share_attributions_across_conditions=True  # Fast mode
         ... )
     """
     calc = AttributionCalculator(model, device=device, verbose=verbose)
@@ -463,7 +467,8 @@ def compute_attributions_usage(
         genomic_coords=genomic_coords,
         predictions=predictions,
         filter_by_correct=filter_by_correct,
-        condition_names=condition_names
+        condition_names=condition_names,
+        share_attributions_across_conditions=share_attributions_across_conditions
     )
 
 

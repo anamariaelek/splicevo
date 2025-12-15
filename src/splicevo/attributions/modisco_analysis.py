@@ -760,15 +760,15 @@ class ModiscoAnalyzer:
                 report.report_motifs(
                     modisco_h5py=str(h5_path),
                     output_dir=str(output_dir),
-                    img_path_suffix=str(output_dir) + "/",
+                    img_path_suffix="./",
                     meme_motif_db=None,
                     is_writing_tomtom_matrix=False,
                 )
                 if self.verbose:
-                    print(f"✓ Reports generated in {output_dir}")
+                    print(f"  Reports generated in {output_dir}")
             except Exception as e:
                 if self.verbose:
-                    print(f"⚠ Could not generate full report: {str(e)}")
+                    print(f"  Could not generate full report: {str(e)}")
                 print(f"Note: You can generate reports manually using:")
                 print(f"  modisco report -i {h5_path} -o {output_dir}")
         

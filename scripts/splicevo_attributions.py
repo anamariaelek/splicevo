@@ -155,6 +155,11 @@ def main():
         help="Set this flag to skip usage attribution calculation"
     )
     parser.add_argument(
+        '--share-attributions-across-conditions',
+        action='store_true', dest='share_attributions_across_conditions',
+        help="Optimize usage attribution computation by computing all conditions in a single forward pass. ~N_CONDITIONS speedup"
+    )
+    parser.add_argument(
         '--device', default='cuda',
         help='Device: cuda or cpu (default: cuda)'
     )
@@ -222,6 +227,7 @@ def main():
                 predictions=pred_preds,
                 filter_by_correct=True,
                 condition_names=condition_names,
+                share_attributions_across_conditions=args.share_attributions_across_conditions,
                 device=args.device,
                 verbose=True
             )
