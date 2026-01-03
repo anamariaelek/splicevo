@@ -57,7 +57,7 @@ class EncoderModule(nn.Module):
     """Encoder module with residual blocks that works directly on one-hot encoded sequences."""
     
     def __init__(self, 
-                 embed_dim: int = 256, 
+                 embed_dim: int = 128, 
                  num_resblocks: int = 4,
                  dilation_strategy: str = 'exponential',
                  alternate: Optional[int] = 4,
@@ -157,7 +157,7 @@ class EncoderModule(nn.Module):
         # Dropout layer
         self.dropout = nn.Dropout(dropout)
         
-        # Optional output heads - CREATE SEPARATE HEADS PER SPECIES
+        # Optional output heads
         if add_output_heads:
             # Splice site classification heads (one per species)
             self.splice_classifiers = nn.ModuleDict({
@@ -345,8 +345,8 @@ class EncoderModule(nn.Module):
         splice_logits = splice_logits.transpose(1, 2)
         usage_predictions = usage_predictions.transpose(1, 2)
         
-        # Apply sigmoid activation to SSE
-        usage_predictions = torch.sigmoid(usage_predictions)
+        # Removed sigmoid activation for SSE - with it we loose the gradients at the extremes of the prediction range,
+        # usage_predictions = torch.sigmoid(usage_predictions)
         
         output = {
             'splice_logits': splice_logits,
@@ -437,15 +437,15 @@ class SplicevoModel(nn.Module):
         """
         output = self.encoder(sequences, species_ids=species_ids, return_features=return_features)
         
-        # Always return full dictionary - Captum will handle gradient computation
+        # Always return full dictionary
         return output
     
     def add_transform(self, transform):
-        """Add a prediction transform function (for GRELU compatibility)."""
+        """Add a prediction transform function"""
         self.prediction_transform = transform
     
     def set_output_type(self, output_type: str = 'splice'):
-        """Set which output to use for predictions (for GRELU compatibility)."""
+        """Set which output to use for predictions"""
         if output_type not in ['splice', 'usage']:
             raise ValueError(f"Unknown output_type: {output_type}")
         self.output_type = output_type
