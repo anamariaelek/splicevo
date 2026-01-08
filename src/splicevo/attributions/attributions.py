@@ -67,7 +67,9 @@ class AttributionCalculator:
             window_indices: Optional explicit indices of windows to process
             genomic_coords: Optional list of (genome_id, chromosome, start, end, strand) tuples
                            to find overlapping windows
-            positions: Optional list of position integers specifying exact splice sites to compute.
+            positions: Optional list of (seq_idx, position) tuples specifying exact splice sites to compute.
+                      Each tuple is (seq_idx, position) where seq_idx identifies the sequence window
+                      and position is the genomic position within that window.
                       Must be paired with window_indices - each position pairs with corresponding window_index.
                       If provided, only compute attributions for these specific sites.
             predictions: Optional model predictions (n_windows, seq_len) to filter for correct sites

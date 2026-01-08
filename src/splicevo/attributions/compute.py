@@ -351,7 +351,7 @@ def compute_attributions_splice(
         meta_df: Metadata DataFrame with window information
         window_indices: Optional explicit window indices to process
         genomic_coords: Optional list of (genome_id, chromosome, start, end, strand) tuples
-        positions: Optional list of position integers paired with window_indices (same length required)
+        positions: Optional list of (seq_idx, position) tuples paired with window_indices (same length required)
         predictions: Optional model predictions for filtering correct predictions
         filter_by_correct: If True, only compute for correctly predicted sites
         device: Device to use ('cuda' or 'cpu')
@@ -424,7 +424,7 @@ def compute_attributions_usage(
         usage: Usage values (n_windows, seq_len, n_conditions)
         meta_df: Metadata DataFrame with window information
         window_indices: Optional explicit window indices to process
-        positions: Optional list of position integers paired with window_indices (same length required)
+        positions: Optional list of (seq_idx, position) tuples paired with window_indices (same length required)
         genomic_coords: Optional list of (genome_id, chromosome, start, end, strand) tuples
         predictions: Optional model predictions for filtering
         filter_by_correct: If True, only compute for correctly predicted sites

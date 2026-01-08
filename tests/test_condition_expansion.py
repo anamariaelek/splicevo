@@ -7,12 +7,20 @@ import numpy as np
 import json
 import sys
 from pathlib import Path
+import pytest
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from splicevo.attributions.compute import save_attributions_for_modisco
 from splicevo.attributions.modisco_analysis import AttributionAggregator
+
+
+@pytest.fixture
+def expanded_result():
+    """Fixture that runs condition expansion and returns the result."""
+    result, result_single = test_condition_expansion()
+    return result
 
 
 def test_condition_expansion():
@@ -167,7 +175,7 @@ def test_aggregator_integration(expanded_result):
         attributions_4d,
         sequences_unique,
         condition_names,
-        metadata={
+        base_metadata={
             'source': 'test',
             'n_sites_expanded': n_sites_expanded,
         }

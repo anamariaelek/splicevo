@@ -175,7 +175,8 @@ class TestPositionsWithMockModel:
         
         calc = AttributionCalculator(mock_model, device='cpu', verbose=False)
         
-        # Prepare positions
+        # Prepare positions with corresponding window indices
+        window_indices = np.array([0, 0])
         positions = [(0, 50), (0, 100)]
         
         # Mock the internal computation methods
@@ -184,6 +185,7 @@ class TestPositionsWithMockModel:
                 # This will fail because model is mocked, but we can verify parameter acceptance
                 result = calc.compute_splice_attributions(
                     sequences, labels, meta_df,
+                    window_indices=window_indices,
                     positions=positions
                 )
             except (AttributeError, TypeError):
