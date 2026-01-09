@@ -34,7 +34,6 @@ MODEL=${SUBSET}_${SPECIES}_${LOSS}
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/test/
 MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/${MODEL}
 PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/${MODEL}/
-
 echo "Starting training job at "$(date)
 echo "Test data: ${DATA_TEST_DIR}"
 echo "Model directory: ${MODEL_DIR}"

@@ -26,11 +26,11 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
-SUBSET="full"
+SUBSET="small"
 SPECIES="mouse_rat_human"
-TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_resnet.yaml
+TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_transformer.yaml
 DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/train/
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/${SUBSET}_${SPECIES}_nosigmoid/
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${SUBSET}_${SPECIES}/
 echo "Starting training job at "$(date)
 echo "Training config: ${TRAINING_CONFIG}"
 echo "Training data: ${DATA_TRAIN_DIR}"
@@ -41,6 +41,6 @@ python ${SPLICEVO_DIR}/scripts/splicevo_train.py \
     --config ${TRAINING_CONFIG} \
     --data ${DATA_TRAIN_DIR} \
     --checkpoint-dir ${MODEL_DIR} \
-    --quiet &
+    --quiet
 
 echo "Training completed at "$(date)

@@ -198,92 +198,91 @@ Name: fused_skip
 
 ---
 
-## 6. Multi-Head Self-Attention Layer
+## 6. Central Region Extraction (Before Transformer)
+
+### Extract Central Region from Fused Features
+```
+Input:  fused_skip = (16, 1900, 128)
+        [:, 450:-450, :]
+Output: central_features = (16, 1000, 128)
+Description: Extract only the middle 1000 positions (prediction region)
+Memory: ~0.8 MB (16 * 1000 * 128 * 4 bytes)
+Why here: Transformer attention is O(seq_len²), so applying to central region
+          saves ~3.6x memory: (1000² vs 1900²)
+Context removed: 450 positions on each side (used as context in encoder/attention)
+```
+
+---
+
+## 7. Multi-Head Self-Attention Layer
 
 ### Input to Attention
 ```
-Shape: (16, 1900, 128)
-Description: Fused multi-scale features (sequence-first format)
-Name: fused_skip (input to attention)
+Shape: (16, 1000, 128)
+Description: Central region features (sequence-first format)
+Name: central_features
+Memory: ~0.8 MB (16 * 1000 * 128 * 4 bytes)
 ```
 
 ### Multi-Head Self-Attention
 ```
 Query, Key, Value projections:
-- Input: (16, 1900, 128)
-- Output: (16, 1900, 128) per projection
+- Input: (16, 1000, 128)
+- Output: (16, 1000, 128) per projection
 - num_heads = 8
 - head_dim = 128 / 8 = 16
 
 Attention computation per head:
-- Q: (16, 1900, 16) after split into 8 heads
-- K: (16, 1900, 16) after split into 8 heads
-- V: (16, 1900, 16) after split into 8 heads
-- Attention scores: (16, 1900, 1900) per head [seq_len x seq_len]
+- Q: (16, 1000, 16) after split into 8 heads
+- K: (16, 1000, 16) after split into 8 heads
+- V: (16, 1000, 16) after split into 8 heads
+- Attention scores: (16, 1000, 1000) per head [central_len x central_len]
+  * This is ~3.6x smaller than (1900 x 1900) full sequence attention!
 - Attention weights: softmax applied across sequence dimension
-- Attention output per head: (16, 1900, 16)
+- Attention output per head: (16, 1000, 16)
+Memory for attention: ~51 MB per head for (16, 1000, 1000) float32
+Total for 8 heads: ~51 MB (shared computation)
+vs. Full sequence would be: ~183 MB (3.6x larger!)
 ```
 
 ### After Head Concatenation
 ```
-Shape: (16, 1900, 128)
+Shape: (16, 1000, 128)
 Description: Concatenated outputs from 8 attention heads
-Memory: ~1.6 MB (16 * 1900 * 128 * 4 bytes)
+Memory: ~0.8 MB (16 * 1000 * 128 * 4 bytes)
 ```
 
 ### After Output Projection (1x1 linear)
 ```
-Shape: (16, 1900, 128)
+Shape: (16, 1000, 128)
 Description: Final attention output
 ```
 
 ### After Residual Connection (add input)
 ```
-Shape: (16, 1900, 128)
-Description: fused_skip + attention_output
+Shape: (16, 1000, 128)
+Description: central_features + attention_output
 Preserves original features while integrating attention-weighted information
-Memory: ~1.6 MB
+Memory: ~0.8 MB
 ```
 
 ### After Layer Normalization
 ```
-Shape: (16, 1900, 128)
+Shape: (16, 1000, 128)
 Description: Normalized attention output
-Name: attention_out
+Name: transformer_output
 ```
 
 ### After Dropout (p=0.5)
 ```
-Shape: (16, 1900, 128)
+Shape: (16, 1000, 128)
 Description: Regularization applied (50% of activations zeroed during training)
-Name: attention_out (final)
+Name: transformer_output (final)
 ```
 
 ---
 
-## 7. Central Region Extraction
-
-### Extract Central Region (remove context)
-```
-Input:  attention_out = (16, 1900, 128)
-        [:, 450:-450, :]
-Output: central_skip = (16, 1000, 128)
-Description: Only the middle 1000 positions (predictions region)
-Memory: ~0.8 MB (16 * 1000 * 128 * 4 bytes)
-Context removed: 450 positions on each side are discarded
-```
-
-### Also extract from encoder_features
-```
-Input:  encoder_features = (16, 1900, 128)
-        [:, 450:-450, :]
-Output: central_features = (16, 1000, 128)
-Description: Alternative features (not used for predictions by default)
-```
-
----
-
-## 8. Output Heads (Applied to Central Region Only)
+## 8. Output Heads (Applied to Central Region)
 
 ### Transpose central_skip for Conv1d
 ```

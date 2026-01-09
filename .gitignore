@@ -109,6 +109,7 @@ ENV/
 
 # Data
 data
+logs/
 slurm*
 scripts/slurm*
 notebooks/plots

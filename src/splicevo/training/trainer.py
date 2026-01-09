@@ -406,6 +406,9 @@ class SpliceTrainer:
         total_splice_loss = 0
         total_usage_loss = 0
         n_batches = 0
+        batch_count = 0  # DEBUG counter
+        train_epoch_count = getattr(self, 'train_epoch_count', 0) + 1  # DEBUG counter
+        self.train_epoch_count = train_epoch_count
         
         # Track SSE losses for this epoch
         epoch_sse_tracking = {
@@ -434,32 +437,41 @@ class SpliceTrainer:
             usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
             species_ids = batch['species_id'].to(self.device, non_blocking=self.non_blocking)
             
-            # Extract central region from labels to match model output
-            if self.context_len > 0:
-                splice_labels = splice_labels[:, self.context_len:-self.context_len]
-                usage_targets = usage_targets[:, self.context_len:-self.context_len, :]
-            
             # Forward pass with mixed precision
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 output = self.model(sequences, species_ids=species_ids)
                 
+                # Dataset already returns central-region labels (not full-length)
+                # Model outputs central-region predictions
+                # So we can use labels directly without extraction
+                splice_labels_central = splice_labels
+                usage_targets_central = usage_targets
+                
                 # Compute splice classification loss
                 splice_logits = output['splice_logits']
+                
+                # DEBUG: Log shapes on first batch
+                if self.train_epoch_count == 1 and batch_idx == 0:
+                    print(f"[DEBUG] First batch shapes (epoch={self.train_epoch_count}, batch={batch_idx}):")
+                    print(f"  splice_logits: {splice_logits.shape}")
+                    print(f"  splice_labels: {splice_labels.shape}")
+                    print(f"  model.context_len: {self.model.context_len}")
+                
                 splice_loss = self.splice_criterion(
                     splice_logits.reshape(-1, splice_logits.size(-1)),
-                    splice_labels.reshape(-1)
+                    splice_labels_central.reshape(-1)
                 )
                 
-                # Track splice class losses
+                # Track splice class losses (using central region labels)
                 splice_class_losses = self._track_splice_class_losses(
-                    splice_logits, splice_labels, is_training=True
+                    splice_logits, splice_labels_central, is_training=True
                 )
                 for class_name, loss_val in splice_class_losses.items():
                     epoch_splice_class[class_name].append(loss_val)
                 
-                # Mask for valid splice positions
-                splice_mask = (splice_labels > 0)  # shape: [batch, positions]
-                usage_targets = torch.nan_to_num(usage_targets, nan=0.0)
+                # Mask for valid splice positions (central region only)
+                splice_mask = (splice_labels_central > 0)  # shape: [batch, central_positions]
+                usage_targets_central = torch.nan_to_num(usage_targets_central, nan=0.0)
                 
                 # Compute usage loss based on loss type
                 if self.usage_loss_type == 'hybrid':
@@ -475,7 +487,7 @@ class SpliceTrainer:
                         # Flatten first two dims (batch, central_len), keep n_conditions
                         usage_preds_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
                         usage_class_flat = usage_class_logits.reshape(-1, usage_class_logits.shape[-2], usage_class_logits.shape[-1])
-                        usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+                        usage_targets_flat = usage_targets_central.reshape(-1, usage_targets_central.shape[-1])
                         
                         # Get component losses
                         original_reduction = self.usage_criterion.reduction
@@ -493,7 +505,7 @@ class SpliceTrainer:
                         
                         # Track classification loss by SSE range
                         hybrid_class_losses = self._track_hybrid_class_losses(
-                            usage_predictions, usage_class_logits, usage_targets, splice_mask, is_training=True
+                            usage_predictions, usage_class_logits, usage_targets_central, splice_mask, is_training=True
                         )
                         epoch_hybrid_tracking['class_zeros'].append(hybrid_class_losses['zeros'])
                         epoch_hybrid_tracking['class_ones'].append(hybrid_class_losses['ones'])
@@ -508,7 +520,7 @@ class SpliceTrainer:
                         
                         # Track SSE losses (pass class logits for hybrid)
                         sse_tracking = self._track_sse_losses(
-                            usage_predictions, usage_targets, splice_mask, 
+                            usage_predictions, usage_targets_central, splice_mask, 
                             usage_class_logits=usage_class_logits,
                             is_training=True
                         )
@@ -528,7 +540,7 @@ class SpliceTrainer:
                     usage_predictions = output['usage_predictions']  # (batch, central_len, n_conditions)
                     if splice_mask.sum() > 0:
                         mask_flat = splice_mask.reshape(-1)
-                        usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+                        usage_targets_flat = usage_targets_central.reshape(-1, usage_targets_central.shape[-1])
                         usage_predictions_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
                         usage_loss = self.usage_criterion(
                             usage_predictions_flat[mask_flat],
@@ -537,7 +549,7 @@ class SpliceTrainer:
                         
                         # Track SSE losses (no class logits for weighted MSE)
                         sse_tracking = self._track_sse_losses(
-                            usage_predictions, usage_targets, splice_mask, 
+                            usage_predictions, usage_targets_central, splice_mask, 
                             usage_class_logits=None,
                             is_training=True
                         )
@@ -557,7 +569,7 @@ class SpliceTrainer:
                     usage_predictions = output['usage_predictions']  # (batch, central_len, n_conditions)
                     if splice_mask.sum() > 0:
                         mask_flat = splice_mask.reshape(-1)
-                        usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+                        usage_targets_flat = usage_targets_central.reshape(-1, usage_targets_central.shape[-1])
                         usage_predictions_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
                         usage_loss = self.usage_criterion(
                             usage_predictions_flat[mask_flat],
@@ -761,31 +773,31 @@ class SpliceTrainer:
                 usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
                 species_ids = batch['species_id'].to(self.device, non_blocking=self.non_blocking)  # NEW
                 
-                # Extract central region from labels to match model output
-                if self.context_len > 0:
-                    splice_labels = splice_labels[:, self.context_len:-self.context_len]
-                    usage_targets = usage_targets[:, self.context_len:-self.context_len, :]
-                
                 # Forward pass with mixed precision
                 with torch.amp.autocast('cuda', enabled=self.use_amp):
                     output = self.model(sequences, species_ids=species_ids)
+                    
+                    # Dataset already returns central-region labels
+                    # Model outputs central-region predictions
+                    splice_labels_central = splice_labels
+                    usage_targets_central = usage_targets
                     
                     # Compute losses (same as training)
                     splice_logits = output['splice_logits']
                     splice_loss = self.splice_criterion(
                         splice_logits.reshape(-1, splice_logits.size(-1)),
-                        splice_labels.reshape(-1)
+                        splice_labels_central.reshape(-1)
                     )
                     
                     # Track splice class losses
                     splice_class_losses = self._track_splice_class_losses(
-                        splice_logits, splice_labels, is_training=False
+                        splice_logits, splice_labels_central, is_training=False
                     )
                     for class_name, loss_val in splice_class_losses.items():
                         epoch_splice_class[class_name].append(loss_val)
                     
-                    splice_mask = (splice_labels > 0)
-                    usage_targets = torch.nan_to_num(usage_targets, nan=0.0)
+                    splice_mask = (splice_labels_central > 0)
+                    usage_targets_central = torch.nan_to_num(usage_targets_central, nan=0.0)
                     
                     # Compute usage loss based on type (SAME AS TRAINING)
                     if self.usage_loss_type == 'hybrid':
@@ -799,7 +811,7 @@ class SpliceTrainer:
                             mask_flat = splice_mask.reshape(-1)
                             usage_preds_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
                             usage_class_flat = usage_class_logits.reshape(-1, usage_class_logits.shape[-2], usage_class_logits.shape[-1])
-                            usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+                            usage_targets_flat = usage_targets_central.reshape(-1, usage_targets_central.shape[-1])
                             
                             # Get component losses
                             original_reduction = self.usage_criterion.reduction
@@ -817,7 +829,7 @@ class SpliceTrainer:
                             
                             # Track classification loss by SSE range
                             hybrid_class_losses = self._track_hybrid_class_losses(
-                                usage_predictions, usage_class_logits, usage_targets, splice_mask, is_training=False
+                                usage_predictions, usage_class_logits, usage_targets_central, splice_mask, is_training=False
                             )
                             epoch_hybrid_tracking['class_zeros'].append(hybrid_class_losses['zeros'])
                             epoch_hybrid_tracking['class_ones'].append(hybrid_class_losses['ones'])
@@ -832,7 +844,7 @@ class SpliceTrainer:
                             
                             # Track SSE losses
                             sse_tracking = self._track_sse_losses(
-                                usage_predictions, usage_targets, splice_mask,
+                                usage_predictions, usage_targets_central, splice_mask,
                                 usage_class_logits=usage_class_logits,
                                 is_training=False
                             )
@@ -851,7 +863,7 @@ class SpliceTrainer:
                         usage_predictions = output['usage_predictions']
                         if splice_mask.sum() > 0:
                             mask_flat = splice_mask.reshape(-1)
-                            usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+                            usage_targets_flat = usage_targets_central.reshape(-1, usage_targets_central.shape[-1])
                             usage_predictions_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
                             usage_loss = self.usage_criterion(
                                 usage_predictions_flat[mask_flat],
@@ -860,7 +872,7 @@ class SpliceTrainer:
                             
                             # Track SSE losses
                             sse_tracking = self._track_sse_losses(
-                                usage_predictions, usage_targets, splice_mask,
+                                usage_predictions, usage_targets_central, splice_mask,
                                 usage_class_logits=None,
                                 is_training=False
                             )
@@ -879,7 +891,7 @@ class SpliceTrainer:
                         usage_predictions = output['usage_predictions']
                         if splice_mask.sum() > 0:
                             mask_flat = splice_mask.reshape(-1)
-                            usage_targets_flat = usage_targets.reshape(-1, usage_targets.shape[-1])
+                            usage_targets_flat = usage_targets_central.reshape(-1, usage_targets_central.shape[-1])
                             usage_predictions_flat = usage_predictions.reshape(-1, usage_predictions.shape[-1])
                             usage_loss = self.usage_criterion(
                                 usage_predictions_flat[mask_flat],
