@@ -126,7 +126,7 @@ def load_data(config: dict, log_fn=print):
     usage_sse = None
     species_ids = None
     species_mapping = {}
-    usage_conditions = []  # NEW: track conditions
+    usage_conditions = []
 
     if use_mmap:
         # Resolve mmap directory from config path
@@ -490,7 +490,7 @@ def main():
     
     # Load and normalize data
     data_start = time.time()
-    sequences, labels, usage_sse, usage_stats, species_ids, species_mapping = load_data(  # NEW
+    sequences, labels, usage_sse, usage_stats, species_ids, species_mapping = load_data(
         config, log_print
     )
     data_time = time.time() - data_start

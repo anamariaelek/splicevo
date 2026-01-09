@@ -350,17 +350,11 @@ class EncoderModule(nn.Module):
             return_features: Whether to return intermediate features
             
         Returns:
-            If add_output_heads=True:
-                Dictionary with predictions only for the central region:
-                    - 'splice_logits': (batch_size, central_len, num_classes)
-                    - 'usage_predictions': (batch_size, central_len, n_conditions)
-                    - 'usage_class_logits': (batch_size, central_len, n_conditions, 3) [if usage_loss_type='hybrid']
+            Dictionary with features for the full sequence:
+                - 'features': Full sequence features (batch_size, seq_len, embed_dim)
                 If return_features=True, also includes:
-                    - 'encoder_features': Full features (batch_size, seq_len, embed_dim)
-                    - 'central_features': Central region features (batch_size, central_len, embed_dim)
+                    - 'encoder_features': Encoder features (batch_size, seq_len, embed_dim)
                     - 'skip_features': Fused skip features (batch_size, seq_len, embed_dim)
-            If add_output_heads=False:
-                Central region features of shape (batch_size, central_len, embed_dim)
         """
         batch_size, seq_len, _ = sequences.shape
         
@@ -407,18 +401,9 @@ class EncoderModule(nn.Module):
         # Apply dropout
         fused_skip = self.dropout(fused_skip)
         
-        # Extract central region (remove context from both ends)
-        if self.context_len > 0:
-            central_skip = fused_skip[:, self.context_len:-self.context_len, :]
-            central_features = encoder_features[:, self.context_len:-self.context_len, :]
-        else:
-            central_skip = fused_skip
-            central_features = encoder_features
-        
-        # Return fused features for central region
+        # Return full sequence features (central extraction will happen in model)
         output = {
-            'central_features': central_skip,  # (batch_size, central_len, embed_dim)
-            'full_features': fused_skip,        # (batch_size, seq_len, embed_dim)
+            'features': fused_skip,        # (batch_size, seq_len, embed_dim)
         }
         
         if return_features:
@@ -510,7 +495,7 @@ class SplicevoModel(nn.Module):
         
     def forward(self, sequences, species_ids=None, return_features: bool = False):
         """
-        Forward pass through the model: Encoder → Transformer → Output Heads.
+        Forward pass through the model: Encoder → Transformer → Central Extraction → Output Heads.
         
         Args:
             sequences: One-hot encoded DNA sequences of shape (batch_size, seq_len, 4)
@@ -520,14 +505,24 @@ class SplicevoModel(nn.Module):
             return_features: Whether to return intermediate features
             
         Returns:
-            Dictionary with predictions for central region
+            Dictionary with predictions for central region:
+                - 'splice_logits': (batch_size, central_len, num_classes)
+                - 'usage_predictions': (batch_size, central_len, n_conditions)
+                - 'usage_class_logits': (batch_size, central_len, n_conditions, 3) [if usage_loss_type='hybrid']
+            If return_features=True, also includes intermediate features
         """
         # Encoder: Conv blocks + multi-scale fusion
         encoder_output = self.encoder(sequences, return_features=return_features)
-        central_features = encoder_output['central_features']  # (batch_size, central_len, embed_dim)
+        full_features = encoder_output['features']  # (batch_size, seq_len, embed_dim)
         
-        # Transformer: Multi-head self-attention on central region
-        transformer_output = self.transformer(central_features)  # (batch_size, central_len, embed_dim)
+        # Transformer: Multi-head self-attention on full sequence
+        transformer_output = self.transformer(full_features)  # (batch_size, seq_len, embed_dim)
+        
+        # Extract central region after transformer (remove context from both ends)
+        if self.context_len > 0:
+            central_features = transformer_output[:, self.context_len:-self.context_len, :]  # (batch_size, central_len, embed_dim)
+        else:
+            central_features = transformer_output
         
         # Get species ID for output head selection
         if species_ids is None:
