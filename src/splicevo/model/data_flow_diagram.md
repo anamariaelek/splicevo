@@ -9,6 +9,7 @@ Based on `configs/training_full.yaml` (with reduced batch_size for clarity):
 - `context_len = 450` (positions on each end)
 - `central_len = 1000` (seq_len - 2*context_len)
 - `embed_dim = 128`
+- `num_heads = 8`
 - `num_classes = 3` (none, donor, acceptor)
 - `n_conditions = 5` (tissue/timepoint conditions)
 - `num_resblocks = 16` 
@@ -197,11 +198,74 @@ Name: fused_skip
 
 ---
 
-## 6. Central Region Extraction
+## 6. Multi-Head Self-Attention Layer
+
+### Input to Attention
+```
+Shape: (16, 1900, 128)
+Description: Fused multi-scale features (sequence-first format)
+Name: fused_skip (input to attention)
+```
+
+### Multi-Head Self-Attention
+```
+Query, Key, Value projections:
+- Input: (16, 1900, 128)
+- Output: (16, 1900, 128) per projection
+- num_heads = 8
+- head_dim = 128 / 8 = 16
+
+Attention computation per head:
+- Q: (16, 1900, 16) after split into 8 heads
+- K: (16, 1900, 16) after split into 8 heads
+- V: (16, 1900, 16) after split into 8 heads
+- Attention scores: (16, 1900, 1900) per head [seq_len x seq_len]
+- Attention weights: softmax applied across sequence dimension
+- Attention output per head: (16, 1900, 16)
+```
+
+### After Head Concatenation
+```
+Shape: (16, 1900, 128)
+Description: Concatenated outputs from 8 attention heads
+Memory: ~1.6 MB (16 * 1900 * 128 * 4 bytes)
+```
+
+### After Output Projection (1x1 linear)
+```
+Shape: (16, 1900, 128)
+Description: Final attention output
+```
+
+### After Residual Connection (add input)
+```
+Shape: (16, 1900, 128)
+Description: fused_skip + attention_output
+Preserves original features while integrating attention-weighted information
+Memory: ~1.6 MB
+```
+
+### After Layer Normalization
+```
+Shape: (16, 1900, 128)
+Description: Normalized attention output
+Name: attention_out
+```
+
+### After Dropout (p=0.5)
+```
+Shape: (16, 1900, 128)
+Description: Regularization applied (50% of activations zeroed during training)
+Name: attention_out (final)
+```
+
+---
+
+## 7. Central Region Extraction
 
 ### Extract Central Region (remove context)
 ```
-Input:  fused_skip = (16, 1900, 128)
+Input:  attention_out = (16, 1900, 128)
         [:, 450:-450, :]
 Output: central_skip = (16, 1000, 128)
 Description: Only the middle 1000 positions (predictions region)
@@ -219,7 +283,7 @@ Description: Alternative features (not used for predictions by default)
 
 ---
 
-## 7. Output Heads (Applied to Central Region Only)
+## 8. Output Heads (Applied to Central Region Only)
 
 ### Transpose central_skip for Conv1d
 ```
@@ -295,7 +359,7 @@ Memory: ~960 KB (16 * 1000 * 5 * 3 * 4 bytes)
 
 ---
 
-## 8. Final Output Dictionary
+## 9. Final Output Dictionary
 
 ```python
 # Without hybrid loss:

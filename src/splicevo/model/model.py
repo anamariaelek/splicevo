@@ -4,6 +4,131 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Dict
 import numpy as np
 
+class MultiHeadAttention(nn.Module):
+    """Multi-head self-attention layer with residual connection."""
+    
+    def __init__(self, embed_dim: int, num_heads: int = 8, dropout: float = 0.0):
+        """
+        Initialize multi-head attention.
+        
+        Args:
+            embed_dim: Embedding dimension (must be divisible by num_heads)
+            num_heads: Number of attention heads
+            dropout: Dropout rate for attention weights
+        """
+        super().__init__()
+        
+        if embed_dim % num_heads != 0:
+            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
+        
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        
+        # Scaling factor for attention scores
+        self.scale = self.head_dim ** -0.5
+        
+        # Linear projections for Q, K, V
+        self.query_proj = nn.Linear(embed_dim, embed_dim)
+        self.key_proj = nn.Linear(embed_dim, embed_dim)
+        self.value_proj = nn.Linear(embed_dim, embed_dim)
+        
+        # Output projection
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        
+        # Attention dropout
+        self.attn_dropout = nn.Dropout(dropout)
+        
+        # Layer normalization
+        self.norm = nn.LayerNorm(embed_dim)
+        
+        # Output dropout
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        """
+        Forward pass of multi-head attention with residual connection.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, embed_dim)
+            
+        Returns:
+            Output tensor of shape (batch_size, seq_len, embed_dim)
+        """
+        batch_size, seq_len, embed_dim = x.shape
+        
+        # Save residual connection
+        residual = x
+        
+        # Linear projections and reshape for multi-head attention
+        # (batch_size, seq_len, embed_dim) -> (batch_size, seq_len, num_heads, head_dim)
+        Q = self.query_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        K = self.key_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        V = self.value_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        
+        # Transpose for multi-head computation: (batch_size, num_heads, seq_len, head_dim)
+        Q = Q.transpose(1, 2)
+        K = K.transpose(1, 2)
+        V = V.transpose(1, 2)
+        
+        # Compute attention scores: (batch_size, num_heads, seq_len, seq_len)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+        
+        # Apply softmax to get attention weights
+        attn_weights = F.softmax(scores, dim=-1)
+        
+        # Apply dropout to attention weights
+        attn_weights = self.attn_dropout(attn_weights)
+        
+        # Apply attention weights to values: (batch_size, num_heads, seq_len, head_dim)
+        attn_out = torch.matmul(attn_weights, V)
+        
+        # Transpose back: (batch_size, seq_len, num_heads, head_dim)
+        attn_out = attn_out.transpose(1, 2).contiguous()
+        
+        # Reshape: (batch_size, seq_len, embed_dim)
+        attn_out = attn_out.view(batch_size, seq_len, embed_dim)
+        
+        # Output projection
+        attn_out = self.out_proj(attn_out)
+        
+        # Residual connection and layer normalization
+        out = self.norm(attn_out + residual)
+        
+        # Apply output dropout
+        out = self.dropout(out)
+        
+        return out
+
+
+class TransformerModule(nn.Module):
+    """Transformer module with multi-head self-attention."""
+    
+    def __init__(self, embed_dim: int, num_heads: int = 8, dropout: float = 0.0):
+        """
+        Initialize transformer module.
+        
+        Args:
+            embed_dim: Embedding dimension
+            num_heads: Number of attention heads (embed_dim must be divisible by num_heads)
+            dropout: Dropout rate
+        """
+        super().__init__()
+        self.attention = MultiHeadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
+    
+    def forward(self, x):
+        """
+        Forward pass through transformer.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, embed_dim)
+            
+        Returns:
+            Output tensor of shape (batch_size, seq_len, embed_dim)
+        """
+        return self.attention(x)
+
+
 class ResBlock(nn.Module):
     """Residual block with pre-activation design (BN-ReLU-Conv)."""
     
@@ -63,15 +188,14 @@ class EncoderModule(nn.Module):
                  alternate: Optional[int] = 4,
                  num_classes: int = 3,
                  n_conditions: int = 5,
-                 add_output_heads: bool = True,
-                 context_len: int = 4500,
+                 context_len: int = 450,
                  dropout: float = 0.0,
                  usage_loss_type: str = 'weighted_mse',
                  n_species: int = 1,
-                 species_names: Optional[list] = None  # CHANGED: add species names
+                 species_names: Optional[list] = None
         ):
         """
-        Initialize encoder module.
+        Initialize encoder module (convolutional encoder with multi-scale fusion).
         
         Args:
             embed_dim: Embedding dimension (number of channels)
@@ -79,17 +203,15 @@ class EncoderModule(nn.Module):
             dilation_strategy: Strategy for dilation rates
             num_classes: Number of splice site classes (3: none, donor, acceptor)
             n_conditions: Number of tissue/timepoint conditions for usage prediction
-            add_output_heads: Whether to add classification and usage prediction heads
             context_len: Number of positions on each end to treat as context (removed from output)
             dropout: Dropout rate (default: 0.0)
             usage_loss_type: Type of usage loss ('mse', 'weighted_mse', 'hybrid')
-            n_species: Number of species (creates separate heads per species)
+            n_species: Number of species (for tracking)
             species_names: Optional list of species names for tracking
         """
         super().__init__()
         
         self.n_conditions = n_conditions
-        self.add_output_heads = add_output_heads
         self.context_len = context_len
         self.usage_loss_type = usage_loss_type
         self.n_species = n_species
@@ -156,27 +278,6 @@ class EncoderModule(nn.Module):
         
         # Dropout layer
         self.dropout = nn.Dropout(dropout)
-        
-        # Optional output heads
-        if add_output_heads:
-            # Splice site classification heads (one per species)
-            self.splice_classifiers = nn.ModuleDict({
-                name: nn.Conv1d(embed_dim, num_classes, kernel_size=1)
-                for name in self.species_names
-            })
-            
-            # Usage prediction heads - SSE only (one per species)
-            self.usage_predictors = nn.ModuleDict({
-                name: nn.Conv1d(embed_dim, n_conditions, kernel_size=1)
-                for name in self.species_names
-            })
-            
-            # Hybrid loss: add classification head for SSE (one per species)
-            if usage_loss_type == 'hybrid':
-                self.usage_classifiers = nn.ModuleDict({
-                    name: nn.Conv1d(embed_dim, n_conditions * 3, kernel_size=1)
-                    for name in self.species_names
-                })
 
     def _get_kernel_sizes(self, num_blocks: int):
         """
@@ -314,65 +415,21 @@ class EncoderModule(nn.Module):
             central_skip = fused_skip
             central_features = encoder_features
         
-        # If no output heads, just return central skip features
-        if not self.add_output_heads:
-            return central_skip
-        
-        # Transpose central_skip for conv1d: (batch_size, embed_dim, central_len)
-        central_skip_conv = central_skip.transpose(1, 2)
-        
-        # SPECIES-SPECIFIC HEADS: Select appropriate head based on species_ids
-        # During training, all sequences in batch should be from same species
-        # During inference, can process mixed batches by grouping
-        
-        if species_ids is None:
-            # Default to first species if not specified
-            species_id = 0
-        else:
-            # Get species ID from batch (should be same for all in training batch)
-            if isinstance(species_ids, torch.Tensor):
-                species_id = species_ids[0].item()
-            else:
-                species_id = species_ids[0] if hasattr(species_ids, '__getitem__') else species_ids
-        
-        species_name = self.species_names[species_id]
-        
-        # Apply species-specific output heads
-        splice_logits = self.splice_classifiers[species_name](central_skip_conv)
-        usage_predictions = self.usage_predictors[species_name](central_skip_conv)
-        
-        # Transpose back: (batch, central_len, num_classes/n_conditions)
-        splice_logits = splice_logits.transpose(1, 2)
-        usage_predictions = usage_predictions.transpose(1, 2)
-        
-        # Removed sigmoid activation for SSE - with it we loose the gradients at the extremes of the prediction range,
-        # usage_predictions = torch.sigmoid(usage_predictions)
-        
+        # Return fused features for central region
         output = {
-            'splice_logits': splice_logits,
-            'usage_predictions': usage_predictions
+            'central_features': central_skip,  # (batch_size, central_len, embed_dim)
+            'full_features': fused_skip,        # (batch_size, seq_len, embed_dim)
         }
-        
-        # Output 3: Classify SSE values (for hybrid loss)
-        if self.usage_loss_type == 'hybrid':
-            usage_class_logits = self.usage_classifiers[species_name](central_skip_conv)
-            usage_class_logits = usage_class_logits.transpose(1, 2)
-            
-            # Reshape: (batch, central_len, n_conditions, 3)
-            batch_size, central_len, _ = usage_class_logits.shape
-            usage_class_logits = usage_class_logits.view(batch_size, central_len, self.n_conditions, 3)
-            output['usage_class_logits'] = usage_class_logits
         
         if return_features:
             output['encoder_features'] = encoder_features
-            output['central_features'] = central_features
             output['skip_features'] = fused_skip
             
         return output
 
 
 class SplicevoModel(nn.Module):
-    """Simple model with encoder and dual decoders for splice site and usage prediction."""
+    """Model with encoder, transformer, and output heads for splice site and usage prediction."""
     
     def __init__(self, 
                  embed_dim: int = 256, 
@@ -381,23 +438,32 @@ class SplicevoModel(nn.Module):
                  alternate: Optional[int] = 4,
                  num_classes: int = 3,
                  n_conditions: int = 5,
-                 context_len: int = 4500,
+                 context_len: int = 450,
+                 num_heads: int = 8,
                  dropout: float = 0.3,
                  usage_loss_type: str = 'weighted_mse',
                  n_species: int = 1,
                  species_names: Optional[list] = None
         ):
         """
-        Initialize model with encoder for splice site and SSE prediction.
+        Initialize model with encoder, transformer, and output heads.
         
         Args:
+            embed_dim: Embedding dimension
+            num_resblocks: Number of residual blocks in encoder
+            dilation_strategy: Dilation strategy for residual blocks
+            num_classes: Number of splice site classes
             n_conditions: Number of conditions (tissues/timepoints) for SSE prediction
+            context_len: Number of positions on each end as context
+            num_heads: Number of attention heads in transformer
+            dropout: Dropout rate
             usage_loss_type: Type of usage loss ('mse', 'weighted_mse', 'hybrid')
             n_species: Number of species (creates separate output heads per species)
             species_names: Optional list of species names
         """
         super().__init__()
         
+        self.embed_dim = embed_dim
         self.context_len = context_len
         self.usage_loss_type = usage_loss_type
         self.n_species = n_species
@@ -405,7 +471,7 @@ class SplicevoModel(nn.Module):
         self.output_type = 'splice'  # For gReLU compatibility
         self.prediction_transform = None  # For gReLU compatibility
         
-        # Encoder module with output heads
+        # Encoder module (convolutional encoder with multi-scale fusion)
         self.encoder = EncoderModule(
             embed_dim=embed_dim,
             num_resblocks=num_resblocks,
@@ -413,7 +479,6 @@ class SplicevoModel(nn.Module):
             alternate=alternate,
             num_classes=num_classes,
             n_conditions=n_conditions,
-            add_output_heads=True,
             context_len=context_len,
             dropout=dropout,
             usage_loss_type=usage_loss_type,
@@ -421,9 +486,31 @@ class SplicevoModel(nn.Module):
             species_names=species_names
         )
         
+        # Transformer module (multi-head self-attention)
+        self.transformer = TransformerModule(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
+        
+        # Output heads for splice site classification (one per species)
+        self.splice_classifiers = nn.ModuleDict({
+            name: nn.Conv1d(embed_dim, num_classes, kernel_size=1)
+            for name in self.species_names
+        })
+        
+        # Output heads for usage prediction (SSE) (one per species)
+        self.usage_predictors = nn.ModuleDict({
+            name: nn.Conv1d(embed_dim, n_conditions, kernel_size=1)
+            for name in self.species_names
+        })
+        
+        # Hybrid loss: add classification head for SSE (one per species)
+        if usage_loss_type == 'hybrid':
+            self.usage_classifiers = nn.ModuleDict({
+                name: nn.Conv1d(embed_dim, n_conditions * 3, kernel_size=1)
+                for name in self.species_names
+            })
+        
     def forward(self, sequences, species_ids=None, return_features: bool = False):
         """
-        Forward pass through the model.
+        Forward pass through the model: Encoder → Transformer → Output Heads.
         
         Args:
             sequences: One-hot encoded DNA sequences of shape (batch_size, seq_len, 4)
@@ -433,11 +520,56 @@ class SplicevoModel(nn.Module):
             return_features: Whether to return intermediate features
             
         Returns:
-            Dictionary with predictions for central region only
+            Dictionary with predictions for central region
         """
-        output = self.encoder(sequences, species_ids=species_ids, return_features=return_features)
+        # Encoder: Conv blocks + multi-scale fusion
+        encoder_output = self.encoder(sequences, return_features=return_features)
+        central_features = encoder_output['central_features']  # (batch_size, central_len, embed_dim)
         
-        # Always return full dictionary
+        # Transformer: Multi-head self-attention on central region
+        transformer_output = self.transformer(central_features)  # (batch_size, central_len, embed_dim)
+        
+        # Get species ID for output head selection
+        if species_ids is None:
+            species_id = 0
+        else:
+            if isinstance(species_ids, torch.Tensor):
+                species_id = species_ids[0].item()
+            else:
+                species_id = species_ids[0] if hasattr(species_ids, '__getitem__') else species_ids
+        
+        species_name = self.species_names[species_id]
+        
+        # Transpose for Conv1d: (batch_size, embed_dim, central_len)
+        transformer_conv = transformer_output.transpose(1, 2)
+        
+        # Apply output heads
+        splice_logits = self.splice_classifiers[species_name](transformer_conv)
+        usage_predictions = self.usage_predictors[species_name](transformer_conv)
+        
+        # Transpose back: (batch_size, central_len, num_classes/n_conditions)
+        splice_logits = splice_logits.transpose(1, 2)
+        usage_predictions = usage_predictions.transpose(1, 2)
+        
+        output = {
+            'splice_logits': splice_logits,
+            'usage_predictions': usage_predictions
+        }
+        
+        # Hybrid loss: classification head for SSE
+        if self.usage_loss_type == 'hybrid':
+            usage_class_logits = self.usage_classifiers[species_name](transformer_conv)
+            usage_class_logits = usage_class_logits.transpose(1, 2)
+            batch_size, central_len, _ = usage_class_logits.shape
+            usage_class_logits = usage_class_logits.view(batch_size, central_len, self.n_conditions, 3)
+            output['usage_class_logits'] = usage_class_logits
+        
+        if return_features:
+            output['encoder_features'] = encoder_output.get('encoder_features')
+            output['central_features'] = central_features
+            output['transformer_features'] = transformer_output
+            output['skip_features'] = encoder_output.get('skip_features')
+            
         return output
     
     def add_transform(self, transform):
