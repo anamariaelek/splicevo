@@ -535,12 +535,12 @@ class SplicevoModel(nn.Module):
         
         species_name = self.species_names[species_id]
         
-        # Transpose for Conv1d: (batch_size, embed_dim, central_len)
-        transformer_conv = transformer_output.transpose(1, 2)
+        # Transpose central features for Conv1d: (batch_size, embed_dim, central_len)
+        central_conv = central_features.transpose(1, 2)
         
-        # Apply output heads
-        splice_logits = self.splice_classifiers[species_name](transformer_conv)
-        usage_predictions = self.usage_predictors[species_name](transformer_conv)
+        # Apply output heads to central region only
+        splice_logits = self.splice_classifiers[species_name](central_conv)
+        usage_predictions = self.usage_predictors[species_name](central_conv)
         
         # Transpose back: (batch_size, central_len, num_classes/n_conditions)
         splice_logits = splice_logits.transpose(1, 2)
@@ -553,7 +553,7 @@ class SplicevoModel(nn.Module):
         
         # Hybrid loss: classification head for SSE
         if self.usage_loss_type == 'hybrid':
-            usage_class_logits = self.usage_classifiers[species_name](transformer_conv)
+            usage_class_logits = self.usage_classifiers[species_name](central_conv)
             usage_class_logits = usage_class_logits.transpose(1, 2)
             batch_size, central_len, _ = usage_class_logits.shape
             usage_class_logits = usage_class_logits.view(batch_size, central_len, self.n_conditions, 3)

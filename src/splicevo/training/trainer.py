@@ -91,6 +91,9 @@ class SpliceTrainer:
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.usage_loss_type = usage_loss_type
         
+        # Get context_len from model for label extraction during training
+        self.context_len = model.context_len if hasattr(model, 'context_len') else 0
+        
         # Mixed precision training
         self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
         
@@ -431,6 +434,11 @@ class SpliceTrainer:
             usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
             species_ids = batch['species_id'].to(self.device, non_blocking=self.non_blocking)
             
+            # Extract central region from labels to match model output
+            if self.context_len > 0:
+                splice_labels = splice_labels[:, self.context_len:-self.context_len]
+                usage_targets = usage_targets[:, self.context_len:-self.context_len, :]
+            
             # Forward pass with mixed precision
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 output = self.model(sequences, species_ids=species_ids)
@@ -752,6 +760,11 @@ class SpliceTrainer:
                 splice_labels = batch['splice_labels'].to(self.device, non_blocking=self.non_blocking)
                 usage_targets = batch['usage_targets'].to(self.device, non_blocking=self.non_blocking)
                 species_ids = batch['species_id'].to(self.device, non_blocking=self.non_blocking)  # NEW
+                
+                # Extract central region from labels to match model output
+                if self.context_len > 0:
+                    splice_labels = splice_labels[:, self.context_len:-self.context_len]
+                    usage_targets = usage_targets[:, self.context_len:-self.context_len, :]
                 
                 # Forward pass with mixed precision
                 with torch.amp.autocast('cuda', enabled=self.use_amp):
