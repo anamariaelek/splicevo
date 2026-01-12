@@ -26,7 +26,7 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
-SUBSET="small"
+SUBSET="full"
 SPECIES="mouse_rat_human"
 TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_transformer.yaml
 DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/train/

@@ -26,13 +26,12 @@ export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK}
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
-SUBSET="small"
-LOSS="nosigmoid"
+SUBSET="full"
 SPECIES="mouse_rat_human"
-MODEL=${SUBSET}_${SPECIES}_${LOSS}
+MODEL=${SUBSET}_${SPECIES}
 
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/test/
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/${MODEL}
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${MODEL}
 PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/${MODEL}/
 echo "Starting training job at "$(date)
 echo "Test data: ${DATA_TEST_DIR}"

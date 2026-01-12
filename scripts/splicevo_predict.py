@@ -68,13 +68,7 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
         if 'encoder.usage_classifier.weight' in state_dict:
             usage_loss_type = 'hybrid'
             log_fn("Detected usage_classifier in checkpoint -> using hybrid loss mode")
-    
-    #log_fn("\n" + "="*60)
-    #log_fn("State dict keys:")
-    #log_fn("="*60)
-    #for key in sorted(state_dict.keys()):
-    #    log_fn(f"  {key}: {state_dict[key].shape}")
-    
+
     # Infer n_conditions from checkpoint state_dict
     usage_predictor_keys = [k for k in state_dict.keys() if 'usage_predictor' in k]
     

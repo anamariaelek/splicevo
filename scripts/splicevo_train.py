@@ -161,8 +161,8 @@ def load_data(config: dict, log_fn=print):
             # Parse dtypes from metadata
             seq_dtype = np.dtype(meta.get('sequences_dtype', 'float32'))
             lbl_dtype = np.dtype(meta.get('labels_dtype', 'int8'))
-            usage_dtype = np.dtype(meta.get('sse_dtype', 'float32'))
-            usage_shape = tuple(meta['sse_shape'])
+            usage_dtype = np.dtype(meta.get('usage_dtype', meta.get('sse_dtype', 'float32')))
+            usage_shape = tuple(meta.get('usage_shape', meta.get('sse_shape', [])))
             
             # Extract usage conditions from metadata
             usage_conditions = meta.get('usage_conditions', [])

@@ -3,7 +3,7 @@
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=512G
-#SBATCH --time=24:00:00
+#SBATCH --time=36:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 
@@ -24,14 +24,14 @@ GENOME="mouse_GRCm38"
 #GENOME="human_GRCh37"
 
 # Where to save
-OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_small/
+OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_full_5kb/
 
 # Load the genome
 python ${SPLICEVO_DIR}/scripts/data_load.py \
-    --config ${SPLICEVO_DIR}/configs/genomes_small.json \
+    --config ${SPLICEVO_DIR}/configs/genomes_helix.json \
     --genome_id ${GENOME} \
     --output_dir ${OUT_DIR} \
-    --window_size 1000 \
+    --window_size 5000 \
     --context_size 450 \
     --n_cpus 4 \
     --quiet
