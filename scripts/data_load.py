@@ -119,14 +119,14 @@ if genome_config is None:
     log_print(f"ERROR: Genome {genome_id} not found in config file!")
     sys.exit(1)
 
-log_print(f"  Found genome configuration for {genome_id}")
-log_print(f"  Genome path: {genome_config['genome_path']}")
-log_print(f"  GTF path: {genome_config['gtf_path']}")
+log_print(f"Found genome configuration for {genome_id}")
+log_print(f"Genome path: {genome_config['genome_path']}")
+log_print(f"GTF path: {genome_config['gtf_path']}")
 
 step1_time = time.time() - step1_start
 mem_after_step1 = get_memory_usage()
-log_print(f"  Configuration loaded in {step1_time:.2f} seconds")
-log_print(f"  Memory usage: {mem_after_step1:.2f} GB\n")
+log_print(f"Configuration loaded in {step1_time:.2f} seconds")
+log_print(f"Memory usage: {mem_after_step1:.2f} GB\n")
 
 # Step 2: Initialize loader and add this genome
 log_print( "\nStep 2: Adding genome data...")
@@ -143,8 +143,8 @@ loader.add_genome(
 
 step2_time = time.time() - step2_start
 mem_after_step2 = get_memory_usage()
-log_print(f"  Genome added in {step2_time:.2f} seconds")
-log_print(f"  Memory usage: {mem_after_step2:.2f} GB\n")
+log_print(f"Genome added in {step2_time:.2f} seconds")
+log_print(f"Memory usage: {mem_after_step2:.2f} GB\n")
 
 # Step 3: Add usage files from config
 log_print( "\nStep 3: Adding usage data...")
@@ -157,7 +157,7 @@ for genome_name, usage_config in usage_files_config.items():
         continue
     
     usage_start = time.time()
-    log_print(f"  Adding usage files for {genome_name}...")
+    log_print(f"Adding usage files for {genome_name}...")
     
     usage_pattern = usage_config.get('pattern', None)
     usage_list = usage_config.get('files', [])
@@ -169,16 +169,16 @@ for genome_name, usage_config in usage_files_config.items():
         tissues = usage_config.get('tissues', [])
         timepoints = usage_config.get('timepoints', [])
         
-        log_print(f"    pattern: {usage_pattern}")
-        log_print(f"    tissues: {tissues}")
-        log_print(f"    timepoints: {timepoints}")
+        log_print(f"  pattern: {usage_pattern}")
+        log_print(f"  tissues: {tissues}")
+        log_print(f"  timepoints: {timepoints}")
         
         for tissue in tissues:
             for timepoint in timepoints:
                 usage_file = usage_pattern.format(tissue=tissue, timepoint=timepoint)
                 
                 if not os.path.exists(usage_file):
-                    log_print(f"    Warning: {usage_file} not found")
+                    log_print(f"  Warning: {usage_file} not found")
                     continue
                 
                 try:
@@ -190,14 +190,14 @@ for genome_name, usage_config in usage_files_config.items():
                     )
                     usage_count += 1
                 except Exception as e:
-                    log_print(f"    Error loading {usage_file}: {e}")
+                    log_print(f"  Error loading {usage_file}: {e}")
     else:
         # Use explicit file list
         for usage_entry in usage_list:
             usage_file = usage_entry['file']
             
             if not os.path.exists(usage_file):
-                log_print(f"    Warning: {usage_file} not found")
+                log_print(f"  Warning: {usage_file} not found")
                 continue
             
             try:
@@ -209,16 +209,16 @@ for genome_name, usage_config in usage_files_config.items():
                 )
                 usage_count += 1
             except Exception as e:
-                log_print(f"    Error loading {usage_file}: {e}")
+                log_print(f"  Error loading {usage_file}: {e}")
     
     usage_time = time.time() - usage_start
     usage_times[genome_name] = usage_time
-    log_print(f"    {usage_count} usage files added for {genome_name} in {usage_time:.2f} seconds")
+    log_print(f"  {usage_count} usage files added for {genome_name} in {usage_time:.2f} seconds")
 
 step3_time = time.time() - step3_start
 mem_after_step3 = get_memory_usage()
-log_print(f"  Usage files processed in {step3_time:.2f} seconds")
-log_print(f"  Memory usage: {mem_after_step3:.2f} GB")
+log_print(f"Usage files processed in {step3_time:.2f} seconds")
+log_print(f"Memory usage: {mem_after_step3:.2f} GB")
 
 # Step 4: Load the genome data
 log_print(f"\nStep 4: Loading splice sites from {genome_id}...")
@@ -227,29 +227,29 @@ loader.load_all_genomes_data()
 loader_df = loader.get_dataframe()
 loader_df.to_csv(os.path.join(genome_output_dir, 'splice_sites.csv'), index=False)
 
-log_print(f"  Loaded {len(loader.loaded_data)} splice sites")
+log_print(f"Loaded {len(loader.loaded_data)} splice sites")
 
 # Get available usage conditions
 conditions_df = loader.get_available_conditions()
-log_print(f"  Available conditions: {len(conditions_df)}")
+log_print(f"Available conditions: {len(conditions_df)}")
 
 # Add summary of loaded usage data
 usage_summary = loader.get_usage_summary()
 if len(usage_summary) > 0:
     log_print(f"\n  Usage data loaded:")
     for _, row in usage_summary.iterrows():
-        log_print(f"    {row['genome_id']} - {row['display_name']}: {row['n_sites']} sites")
+        log_print(f"  {row['genome_id']} - {row['display_name']}: {row['n_sites']} sites")
     usage_summary.to_csv(os.path.join(genome_output_dir, 'usage_summary.csv'), index=False)
 else:
-    log_print("  WARNING: No usage data loaded!")
+    log_print("WARNING: No usage data loaded!")
 
 step4_time = time.time() - step4_start
 
 # Force garbage collection and log memory
 gc.collect()
 mem_after_step4 = get_memory_usage()
-log_print(f"  Loading splice sites completed in {step4_time:.2f} seconds")
-log_print(f"  Memory usage after step 4: {mem_after_step4:.2f} GB\n")
+log_print(f"Loading splice sites completed in {step4_time:.2f} seconds")
+log_print(f"Memory usage after step 4: {mem_after_step4:.2f} GB\n")
 
 # Step 5: Extract sequences and labels
 log_print( "\nStep 5: Extracting sequences and labels to arrays...")
@@ -258,7 +258,7 @@ step5_start = time.time()
 # If not a dry run, extract arrays
 if not dry_run:
     # Get all sequences and save directly to memmap
-    log_print(f"  Converting to arrays and saving to memmap (window={window_size}, context={context_size})...")
+    log_print(f"Converting to arrays and saving to memmap (window={window_size}, context={context_size})...")
     sequences, labels, usage_arrays, metadata = loader.to_arrays(
         window_size=window_size,
         context_size=context_size,
@@ -267,15 +267,15 @@ if not dry_run:
         use_parallel=True,
         save_memmap=genome_output_dir
     )
-    log_print(f"  Generated {len(sequences)} sequence windows")
-    log_print(f"  Sequence shape: {sequences.shape}")
-    log_print(f"  Label shape: {labels.shape}")
+    log_print(f"Generated {len(sequences)} sequence windows")
+    log_print(f"Sequence shape: {sequences.shape}")
+    log_print(f"Label shape: {labels.shape}")
     if usage_arrays:
         for key, arr in usage_arrays.items():
-            log_print(f"  Usage array '{key}' shape: {arr.shape}")
+            log_print(f"Usage array '{key}' shape: {arr.shape}")
             # Check if any values are not NaN
             if np.all(np.isnan(arr)):
-                log_print(f"    Warning: All values in usage array '{key}' are NaN")
+                log_print(f"  Warning: All values in usage array '{key}' are NaN")
             else:
                 # Add info about loaded usage data
                 usage_info = loader.get_usage_array_info(usage_arrays = usage_arrays)
@@ -285,16 +285,16 @@ if not dry_run:
     # Force garbage collection and log memory
     gc.collect()
     mem_after_step5 = get_memory_usage()
-    log_print(f"  Arrays extracted and saved in {step5_time:.2f} seconds")
-    log_print(f"  Memory usage after step 5: {mem_after_step5:.2f} GB")
-    log_print(f"  Memory increase from step 4 to 5: {mem_after_step5 - mem_after_step4:.2f} GB\n")
+    log_print(f"Arrays extracted and saved in {step5_time:.2f} seconds")
+    log_print(f"Memory usage after step 5: {mem_after_step5:.2f} GB")
+    log_print(f"Memory increase from step 4 to 5: {mem_after_step5 - mem_after_step4:.2f} GB\n")
 else:
-    log_print("  Dry run specified, skipping array extraction.")
+    log_print("Dry run specified, skipping array extraction.")
     sequences = np.array([])
     labels = np.array([])
     usage_arrays = {}
     step5_time = time.time() - step5_start
-    log_print(f"  Dry run completed in {step5_time:.2f} seconds\n")
+    log_print(f"Dry run completed in {step5_time:.2f} seconds\n")
 
 # Step 6: Save data to disk
 log_print( "\nStep 6: Saving metadata...")
@@ -348,18 +348,18 @@ if usage_arrays:
         metadata_json['files'][f'{key}'] = os.path.join(genome_output_dir, f'usage_{key}.mmap')
 
 metadata_json_path = os.path.join(genome_output_dir, 'metadata.json')
-log_print(f"  Saving metadata to {metadata_json_path}")
+log_print(f"Saving metadata to {metadata_json_path}")
 with open(metadata_json_path, 'w') as f:
     json.dump(metadata_json, f, indent=2)
 
 # Save metadata.csv
 metadata_path = os.path.join(genome_output_dir, 'metadata.csv')
 if not dry_run:
-    log_print(f"  Saving sequence metadata to {metadata_path}")
+    log_print(f"Saving sequence metadata to {metadata_path}")
     metadata.to_csv(metadata_path, index=False)
 
 step6_time = time.time() - step6_start
-log_print(f"  Metadata saved in {step6_time:.2f} seconds\n")
+log_print(f"Metadata saved in {step6_time:.2f} seconds\n")
 
 # Final summary
 total_time = time.time() - script_start_time
@@ -373,12 +373,12 @@ log_print(f"Output directory: {genome_output_dir}")
 log_print(f"Total time: {format_time(total_time)}")
 log_print("=" * 60)
 log_print("\nStep Timings:")
-log_print(f"  Step 1 (Configuration): {format_time(step1_time)}")
-log_print(f"  Step 2 (Genome loading): {format_time(step2_time)}")
-log_print(f"  Step 3 (Usage files): {format_time(step3_time)}")
-log_print(f"  Step 4 (Splice site loading): {format_time(step4_time)}")
-log_print(f"  Step 5 (Array extraction): {format_time(step5_time)}")
-log_print(f"  Step 6 (Metadata saving): {format_time(step6_time)}")
+log_print(f"Step 1 (Configuration): {format_time(step1_time)}")
+log_print(f"Step 2 (Genome loading): {format_time(step2_time)}")
+log_print(f"Step 3 (Usage files): {format_time(step3_time)}")
+log_print(f"Step 4 (Splice site loading): {format_time(step4_time)}")
+log_print(f"Step 5 (Array extraction): {format_time(step5_time)}")
+log_print(f"Step 6 (Metadata saving): {format_time(step6_time)}")
 log_print("=" * 60)
 
 log_print(f"\nData loading completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

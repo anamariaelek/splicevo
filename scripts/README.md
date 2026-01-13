@@ -1,6 +1,6 @@
-# Memory-Efficient Data Loading and Splitting Approach
+# SplicEvo
 
-## Overview
+## Memory-Efficient Data Loading and Splitting Approach
 
 The refactored approach processes one genome at a time to minimize memory usage and enables parallel/distributed processing of genomes.
 
@@ -10,8 +10,6 @@ Make sure to have the following variables set:
 # Where SplicEvo is located
 export SPLICEVO_DIR=/home/elek/projects/splicevo
 ```
-
-## Two-Step Process
 
 ### Step 1: data_load.py - Process Individual Genomes
 
@@ -53,6 +51,19 @@ for genome in human_GRCh37 mouse_GRCm38 rat_Rnor_5.0; do
         --n_cpus 8 &
 done
 ```
+
+Benchmarking:
+| Genome       | Subset | Chromosomes        | Tissues                  | Timepoints | Time (hh:mm:ss) | Max memory |
+|--------------|--------|--------------------|--------------------------|------------|-----------------|------------|
+| mouse_GRCm38 | small  | 15, 16, 17, 18, 19 | Brain, Cerebellum, Heart |1, 5, 10    | 00:14:50        | 16.4 GB    |
+| mouse_GRCm38 | full   | all                | all                      |all         | ~00:24:00       | > 512 GB   |
+
+Benchmarking better implementation:
+| Genome       | Subset | Chromosomes        | Tissues                  | Timepoints | Time (hh:mm:ss) | Max memory |
+|--------------|--------|--------------------|--------------------------|------------|-----------------|------------|
+| mouse_GRCm38 | small  | 15, 16, 17, 18, 19 | Brain, Cerebellum, Heart |1, 5, 10    | 00:14:52        | 14.7 GB  |
+| mouse_GRCm38 | full   | all                | all                      |all         |                 |            |
+
 
 ### Step 2: data_split.py - Combine into Train/Test Sets
 

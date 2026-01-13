@@ -27,25 +27,24 @@ jobs:
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install ruff
-      run: pip install ruff
+        python-version:  ${{ matrix.python-version }}
+        cache: 'pip'
+        cache-dependency-path: 'pyproject.toml'
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo apt-get clean
+        df -h
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -e .[test]
-    - name: Install extra dependencies (tangermeme, grelu)
-      run: |
-        pip install tangermeme grelu
     - name: Lint with ruff
       run: |
         # stop the build if there are Python syntax errors or undefined names
         ruff check --select=E9,F63,F7,F82
         # exit-zero treats all errors as warnings
         ruff check --exit-zero --statistics
-    - name: Install project
-      run: |
-        pip install .
     - name: Run tests
       run: |
         pytest

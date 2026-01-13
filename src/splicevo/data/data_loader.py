@@ -739,46 +739,30 @@ class MultiGenomeDataLoader:
         loaded_genomes = df['genome_id'].unique()
         total_window = context_size + window_size + context_size
 
-        # Count total windows needed (fast, low memory)
+        # Fast window estimation from dataframe (no genome loading needed)
         if save_memmap:
-            print("Counting windows to pre-allocate memmap arrays...")
+            print("Estimating window count from splice site positions...")
             total_windows = 0
             
             for genome_id in loaded_genomes:
                 df_genome = df[df['genome_id'] == genome_id]
                 genes = df_genome['gene_id'].unique()
                 
-                genome = self.genomes[genome_id].load_genome()
-                
-                for gene_id in tqdm(genes, desc=f"  Counting {genome_id} windows", unit="gene"):
+                for gene_id in genes:
                     df_gene = df_genome[df_genome['gene_id'] == gene_id]
                     
-                    # Count windows for this gene
+                    # Estimate windows from position range (no genome sequence needed)
                     min_pos = df_gene['position'].min()
                     max_pos = df_gene['position'].max()
-                    requested_start = min_pos - context_size
-                    requested_end = max_pos + context_size
+                    gene_span = max_pos - min_pos + 2 * context_size
                     
-                    gene_length = requested_end - requested_start
-                    n_windows_in_gene = max(0, (gene_length - total_window) // window_size + 1)
-                    
-                    # Count only windows that have splice sites
-                    for window_idx in range(n_windows_in_gene):
-                        window_start = requested_start + window_idx * window_size
-                        window_center_start = window_start + context_size
-                        window_center_end = window_center_start + window_size
-                            
-                        sites_in_window = df_gene[
-                            (df_gene['position'] >= window_center_start) & 
-                            (df_gene['position'] < window_center_end)
-                        ]
-                        
-                        if len(sites_in_window) > 0:
-                            total_windows += 1
-                
-                del genome  # Free memory
+                    # Count windows that would contain splice sites
+                    n_windows_in_gene = max(1, (gene_span - total_window) // window_size + 1)
+                    total_windows += n_windows_in_gene
             
-            print(f"Total windows to create: {total_windows}")
+            # Over-allocate by 10% to be safe (will trim at end)
+            total_windows = int(total_windows * 1.1)
+            print(f"Estimated windows (with 10% buffer): {total_windows}")
             
             # Pre-allocate memmap arrays
             save_memmap = Path(save_memmap)
@@ -825,6 +809,7 @@ class MultiGenomeDataLoader:
             }
             
             # Initialize usage arrays with NaN
+            print("Initializing usage arrays with NaN...")
             for key in ['alpha', 'beta', 'sse']:
                 usage_arrays[key][:] = np.nan
                 usage_arrays[key].flush()
@@ -886,10 +871,14 @@ class MultiGenomeDataLoader:
                             seq_list, lbl_list, usage_dict, metadata_rows = future.result(timeout=120)
                             
                             if save_memmap:
-                                # Write incrementally to memmap
+                                # Write incrementally to memmap (memory efficient)
                                 n_windows = len(seq_list)
                                 if n_windows > 0:
                                     end_idx = current_idx + n_windows
+                                    if end_idx > len(sequences):
+                                        print(f"\n  Warning: Exceeded estimated size, truncating at {current_idx}")
+                                        break
+                                    
                                     sequences[current_idx:end_idx] = np.array(seq_list, dtype=np.float32)
                                     labels[current_idx:end_idx] = np.array(lbl_list, dtype=np.int8)
                                     
@@ -899,14 +888,14 @@ class MultiGenomeDataLoader:
                                     all_metadata_rows.extend(metadata_rows)
                                     current_idx = end_idx
                                     
-                                    # Periodic flush (every 100 windows)
-                                    if current_idx % 100 < n_windows:
+                                    # Periodic flush to disk
+                                    if len(all_metadata_rows) % 500 == 0:
                                         sequences.flush()
                                         labels.flush()
                                         for key in usage_arrays:
                                             usage_arrays[key].flush()
                             else:
-                                # Collect in memory
+                                # Collect in memory for non-memmap mode
                                 all_sequences.extend(seq_list)
                                 all_labels.extend(lbl_list)
                                 all_usage['alpha'].extend(usage_dict['alpha'])
@@ -931,10 +920,14 @@ class MultiGenomeDataLoader:
                         )
                         
                         if save_memmap:
-                            # Write incrementally to memmap
+                            # Write incrementally to memmap (memory efficient)
                             n_windows = len(seq_list)
                             if n_windows > 0:
                                 end_idx = current_idx + n_windows
+                                if end_idx > len(sequences):
+                                    print(f"\n  Warning: Exceeded estimated size, stopping at {current_idx}")
+                                    break
+                                
                                 sequences[current_idx:end_idx] = np.array(seq_list, dtype=np.float32)
                                 labels[current_idx:end_idx] = np.array(lbl_list, dtype=np.int8)
                                 
@@ -957,6 +950,36 @@ class MultiGenomeDataLoader:
         
         # Finalize arrays
         if save_memmap:
+            # Trim arrays to actual size (we over-allocated by 10%)
+            if current_idx < len(sequences):
+                print(f"Trimming memmap arrays from {len(sequences)} to {current_idx} windows...")
+                # Create properly-sized memmaps
+                sequences_trimmed = np.memmap(
+                    save_memmap / 'sequences.mmap',
+                    dtype=np.float32,
+                    mode='r+',
+                    shape=(current_idx, sequences.shape[1], sequences.shape[2])
+                )
+                labels_trimmed = np.memmap(
+                    save_memmap / 'labels.mmap',
+                    dtype=np.int8,
+                    mode='r+',
+                    shape=(current_idx, labels.shape[1])
+                )
+                usage_arrays_trimmed = {}
+                for key in ['alpha', 'beta', 'sse']:
+                    usage_arrays_trimmed[key] = np.memmap(
+                        save_memmap / f'usage_{key}.mmap',
+                        dtype=np.float32,
+                        mode='r+',
+                        shape=(current_idx, usage_arrays[key].shape[1], usage_arrays[key].shape[2])
+                    )
+                
+                # Replace references
+                sequences = sequences_trimmed
+                labels = labels_trimmed
+                usage_arrays = usage_arrays_trimmed
+            
             # Final flush
             print("Flushing memmap arrays...")
             sequences.flush()
