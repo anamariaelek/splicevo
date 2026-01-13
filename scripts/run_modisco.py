@@ -86,7 +86,9 @@ def run_modisco_analysis(base_path, output_dir,
     
     # Run analysis on splice attributions (by site type)
     print(f"\n1. Running TF-MoDISco analysis on splice attributions by site type...")
-    splice_base_path = Path(str(base_path) + "_splice") if not str(base_path).endswith("_splice") else base_path
+    # Construct path for splice files (e.g., base_path/splice)
+    base_path_obj = Path(base_path)
+    splice_base_path = base_path_obj / "splice" if not str(base_path).endswith("splice") else base_path_obj
     splice_output_dir = output_dir / "splice_by_site_type"
     
     print(f"  Base path: {splice_base_path}")
@@ -104,7 +106,8 @@ def run_modisco_analysis(base_path, output_dir,
     
     # Run analysis on usage attributions (by condition)
     print(f"\n2. Running TF-MoDISco analysis on usage attributions by condition...")
-    usage_base_path = Path(str(base_path) + "_usage") if not str(base_path).endswith("_usage") else base_path
+    # Construct path for usage files (e.g., base_path/usage)
+    usage_base_path = base_path_obj / "usage" if not str(base_path).endswith("usage") else base_path_obj
     usage_output_dir = output_dir / "usage_by_condition"
     
     print(f"  Base path: {usage_base_path}")

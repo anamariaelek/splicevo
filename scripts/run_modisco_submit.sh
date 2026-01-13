@@ -29,6 +29,8 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Configuration
 SPECIES="mouse_rat_human"
+KB="1"
+SUBSET=""
 ATTR_WINDOW=400
 SLIDING_WINDOW_SIZE=12
 FLANK_SIZE=5
@@ -43,8 +45,12 @@ N_CORES=4
 
 # Paths
 BASE_DIR="/home/elek/sds/sd17d003/Anamaria/splicevo"
-ATTRIBUTION_DIR="${BASE_DIR}/attributions/${SPECIES}_weighted_mse_window_${ATTR_WINDOW}"
-OUTPUT_DIR="${BASE_DIR}/tfmodisco/${SPECIES}_weighted_mse_window_${TRIM_TO_WINDOW_SIZE}_flank_${INITIAL_FLANK_TO_ADD}_fdr_${TARGET_SEQLET_FDR}"
+ATTRIBUTION_DIR="${BASE_DIR}/attributions/transformer/${SPECIES}_${KB}kb_window_${ATTR_WINDOW}"
+OUTPUT_DIR="${BASE_DIR}/tfmodisco/transformer/${SPECIES}_${KB}kb_window_${TRIM_TO_WINDOW_SIZE}_flank_${INITIAL_FLANK_TO_ADD}_fdr_${TARGET_SEQLET_FDR}"
+if [ "$SUBSET" != "" ] ; then
+    ATTRIBUTION_DIR="${ATTRIBUTION_DIR}_subset_${SUBSET//:/-}/"
+    OUTPUT_DIR="${OUTPUT_DIR}_subset_${SUBSET//:/-}/"
+fi
 
 # Create logs directory
 mkdir -p logs
@@ -81,7 +87,7 @@ fi
 echo ""
 echo "Running TF-MoDISco analysis on both splice and usage attributions..."
 
-python ${SPLICEVO_DIR}/scripts/run_modisco_analysis.py \
+python ${SPLICEVO_DIR}/scripts/run_modisco.py \
     --attributions-base "$ATTRIBUTION_DIR" \
     --output "$OUTPUT_DIR" \
     --sliding-window-size "$SLIDING_WINDOW_SIZE" \

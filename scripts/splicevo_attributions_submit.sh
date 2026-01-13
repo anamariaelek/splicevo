@@ -30,16 +30,20 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Configuration
 SPECIES="mouse_rat_human"
+KB="1"
+MODEL="${SPECIES}_${KB}kb"
 WINDOW=400
 N_CORES=4
 
 # Paths
 BASE_DIR="/home/elek/sds/sd17d003/Anamaria/splicevo"
-MODEL_PATH="${BASE_DIR}/models/full_${SPECIES}_weighted_mse/best_model.pt"
-DATA_PATH="${BASE_DIR}/data/splits_full/${SPECIES}/test"
-PREDICTIONS_PATH="${BASE_DIR}/predictions/full_${SPECIES}_weighted_mse"
-OUTPUT_DIR="${BASE_DIR}/attributions/${SPECIES}_weighted_mse_window_${WINDOW}"
+MODEL_PATH="${BASE_DIR}/models/transformer/full_${MODEL}/best_model.pt"
+DATA_PATH="${BASE_DIR}/data/splits_full_${KB}kb/${SPECIES}/test"
+PREDICTIONS_PATH="${BASE_DIR}/predictions/transformer/full_${MODEL}/"
+OUTPUT_DIR="${BASE_DIR}/attributions/transformer/${MODEL}_window_${WINDOW}"
 
+# Optionally calculate attributions for a subset of sequences
+# SUBSET should look like "0,1,2" or "0:10"
 SUBSET=""
 if [ "$SUBSET" != "" ]; then
     OUTPUT_DIR="${OUTPUT_DIR}_subset_${SUBSET//:/-}"
@@ -93,7 +97,8 @@ if [ "$SUBSET" != "" ]; then
         --predictions $PREDICTIONS_PATH \
         --sequences $SUBSET \
         --window $WINDOW \
-        --output $OUTPUT_DIR
+        --output $OUTPUT_DIR \
+        --share-attributions-across-conditions
 else
     python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
         --model $MODEL_PATH \
