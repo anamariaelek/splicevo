@@ -129,7 +129,8 @@ class MultiGenomeDataLoader:
                 
                 # Collect donor sites in bulk
                 for donor_pos in transcript.splice_donor_sites:
-                    usage_stats = self.get_usage_stats(genome_id, chrom, donor_pos, transcript.strand)
+                    # Don't populate usage_stats here to save memory (99 conditions × 500k sites)
+                    # Usage will be looked up on-demand during array extraction
                     batch_positives.append({
                         'genome_id': genome_id,
                         'chromosome': chrom,
@@ -138,12 +139,13 @@ class MultiGenomeDataLoader:
                         'position': donor_pos,
                         'site_type': 1,  # donor
                         'strand': transcript.strand,
-                        'site_usage': usage_stats
+                        'site_usage': {}  # Empty dict - will look up during array extraction
                     })
                     
                 # Collect acceptor sites in bulk
                 for acceptor_pos in transcript.splice_acceptor_sites:
-                    usage_stats = self.get_usage_stats(genome_id, chrom, acceptor_pos, transcript.strand)
+                    # Don't populate usage_stats here to save memory (99 conditions × 500k sites)
+                    # Usage will be looked up on-demand during array extraction
                     batch_positives.append({
                         'genome_id': genome_id,
                         'chromosome': chrom,
@@ -152,7 +154,7 @@ class MultiGenomeDataLoader:
                         'position': acceptor_pos,
                         'site_type': 2,  # acceptor
                         'strand': transcript.strand,
-                        'site_usage': usage_stats
+                        'site_usage': {}  # Empty dict - will look up during array extraction
                     })
             
             # Bulk extend instead of individual appends
@@ -637,17 +639,21 @@ class MultiGenomeDataLoader:
                         elif site_type == 2:
                             n_acceptor_sites += 1
                         
+                        # Look up usage stats on-demand instead of using pre-loaded dict
+                        # This saves memory by not storing usage for all 500k sites during step 4
+                        usage_stats = self.get_usage_stats(genome_id, chrom, site_pos, strand)
+                        
                         # Store only non-NaN usage stats (sparse representation)
-                        for condition_key, usage_stats in splice_site.site_usage.items():
+                        for condition_key, stats in usage_stats.items():
                             if condition_key in condition_to_idx:
                                 cond_idx = condition_to_idx[condition_key]
                                 if window_pos not in usage_alpha_dict:
                                     usage_alpha_dict[window_pos] = {}
                                     usage_beta_dict[window_pos] = {}
                                     usage_sse_dict[window_pos] = {}
-                                usage_alpha_dict[window_pos][cond_idx] = usage_stats['alpha']
-                                usage_beta_dict[window_pos][cond_idx] = usage_stats['beta']
-                                usage_sse_dict[window_pos][cond_idx] = usage_stats['sse']
+                                usage_alpha_dict[window_pos][cond_idx] = stats['alpha']
+                                usage_beta_dict[window_pos][cond_idx] = stats['beta']
+                                usage_sse_dict[window_pos][cond_idx] = stats['sse']
             
             # Convert sparse dicts to dense arrays with NaN (only at append time)
             # This defers allocation until necessary and keeps memory minimal during processing

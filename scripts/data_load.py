@@ -13,6 +13,8 @@ import argparse
 import sys
 import pandas as pd
 from pathlib import Path
+import psutil
+import gc
 
 from splicevo.data import MultiGenomeDataLoader
 
@@ -85,6 +87,12 @@ def format_time(seconds):
     secs = int(seconds % 60)
     return f"{hours}h {minutes}m {secs}s"
 
+def get_memory_usage():
+    """Get current memory usage in GB."""
+    process = psutil.Process()
+    mem_info = process.memory_info()
+    return mem_info.rss / (1024**3)  # Convert to GB
+
 log_print(f"Data loading started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 log_print(f"Genome ID: {genome_id}")
 log_print(f"Output directory: {genome_output_dir}")
@@ -116,7 +124,9 @@ log_print(f"  Genome path: {genome_config['genome_path']}")
 log_print(f"  GTF path: {genome_config['gtf_path']}")
 
 step1_time = time.time() - step1_start
-log_print(f"  Configuration loaded in {step1_time:.2f} seconds\n")
+mem_after_step1 = get_memory_usage()
+log_print(f"  Configuration loaded in {step1_time:.2f} seconds")
+log_print(f"  Memory usage: {mem_after_step1:.2f} GB\n")
 
 # Step 2: Initialize loader and add this genome
 log_print( "\nStep 2: Adding genome data...")
@@ -132,7 +142,9 @@ loader.add_genome(
 )
 
 step2_time = time.time() - step2_start
-log_print(f"  Genome added in {step2_time:.2f} seconds\n")
+mem_after_step2 = get_memory_usage()
+log_print(f"  Genome added in {step2_time:.2f} seconds")
+log_print(f"  Memory usage: {mem_after_step2:.2f} GB\n")
 
 # Step 3: Add usage files from config
 log_print( "\nStep 3: Adding usage data...")
@@ -204,7 +216,9 @@ for genome_name, usage_config in usage_files_config.items():
     log_print(f"    {usage_count} usage files added for {genome_name} in {usage_time:.2f} seconds")
 
 step3_time = time.time() - step3_start
+mem_after_step3 = get_memory_usage()
 log_print(f"  Usage files processed in {step3_time:.2f} seconds")
+log_print(f"  Memory usage: {mem_after_step3:.2f} GB")
 
 # Step 4: Load the genome data
 log_print(f"\nStep 4: Loading splice sites from {genome_id}...")
@@ -230,7 +244,12 @@ else:
     log_print("  WARNING: No usage data loaded!")
 
 step4_time = time.time() - step4_start
-log_print(f"  Loading splice sites completed in {step4_time:.2f} seconds\n")
+
+# Force garbage collection and log memory
+gc.collect()
+mem_after_step4 = get_memory_usage()
+log_print(f"  Loading splice sites completed in {step4_time:.2f} seconds")
+log_print(f"  Memory usage after step 4: {mem_after_step4:.2f} GB\n")
 
 # Step 5: Extract sequences and labels
 log_print( "\nStep 5: Extracting sequences and labels to arrays...")
@@ -262,7 +281,13 @@ if not dry_run:
                 usage_info = loader.get_usage_array_info(usage_arrays = usage_arrays)
         
     step5_time = time.time() - step5_start
-    log_print(f"  Arrays extracted and saved in {step5_time:.2f} seconds\n")
+    
+    # Force garbage collection and log memory
+    gc.collect()
+    mem_after_step5 = get_memory_usage()
+    log_print(f"  Arrays extracted and saved in {step5_time:.2f} seconds")
+    log_print(f"  Memory usage after step 5: {mem_after_step5:.2f} GB")
+    log_print(f"  Memory increase from step 4 to 5: {mem_after_step5 - mem_after_step4:.2f} GB\n")
 else:
     log_print("  Dry run specified, skipping array extraction.")
     sequences = np.array([])
