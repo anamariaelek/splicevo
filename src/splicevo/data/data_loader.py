@@ -8,11 +8,15 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 import json
+import gc
 
 from ..io.genome import GenomeData
 from ..io.gene_annotation import GTFProcessor, Transcript
 from ..io.splice_sites import SpliceSite
 from ..utils.sequence_utils import complement_sequence
+
+# Nucleotide to index mapping for one-hot encoding
+nuc_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
 
 
 class MultiGenomeDataLoader:
@@ -33,6 +37,29 @@ class MultiGenomeDataLoader:
         self.usage_data: Dict[str, Dict[str, pd.DataFrame]] = {}  # {genome_id: {condition_key: usage_df}}
         self.usage_conditions: List[Dict[str, str]] = []  # List of condition metadata
         self.condition_to_key: Dict[str, str] = {}  # Maps (tissue, timepoint) to condition_key
+    
+    def _encode_ohe_window(self, seq: str, start: int, length: int) -> np.ndarray:
+        """
+        Encode a window of a DNA sequence into one-hot representation.
+        
+        This is more memory efficient than encoding the entire sequence and then slicing,
+        as it only allocates memory for the requested window.
+        
+        Args:
+            seq: DNA sequence string
+            start: Start position in the sequence
+            length: Length of window to encode
+            
+        Returns:
+            One-hot encoded array of shape (length, 4)
+        """
+        ohe = np.zeros((length, 4), dtype=np.float32)
+        for i in range(length):
+            nuc = seq[start + i]
+            idx = nuc_to_idx.get(nuc, 4)
+            if idx < 4:
+                ohe[i, idx] = 1.0
+        return ohe
         
     def add_genome(self, 
                    genome_id: str, 
@@ -445,6 +472,30 @@ class MultiGenomeDataLoader:
         
         return pd.DataFrame(summary_rows)
 
+    def _encode_ohe_window(self, seq: str, window_start: int, window_length: int) -> np.ndarray:
+        """
+        Encode a portion of a sequence to one-hot encoding on-demand to save memory.
+        
+        Args:
+            seq: The full sequence string
+            window_start: Start position in the sequence
+            window_length: Length of the window
+            
+        Returns:
+            One-hot encoded array of shape (window_length, 4)
+        """
+        nuc_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
+        ohe = np.zeros((window_length, 4), dtype=np.float32)
+        
+        window_end = min(window_start + window_length, len(seq))
+        for i in range(window_start, window_end):
+            nuc = seq[i]
+            idx = nuc_to_idx.get(nuc, 4)
+            if idx < 4:
+                ohe[i - window_start, idx] = 1.0
+        
+        return ohe
+
     def _process_gene_windows(self,
                              genome_id: str,
                              gene_id: str,
@@ -459,14 +510,16 @@ class MultiGenomeDataLoader:
         """
         Process windows for a single gene (parallelizable).
         
+        Memory-optimized version:
+        - Encodes sequences on-demand per window instead of pre-computing full gene
+        - Stores sparse usage data instead of full NaN-filled arrays
+        
         Args:
             genome_cache: Optional pre-loaded genome to avoid repeated loading
         
         Returns:
             Tuple of (sequences, labels, usage_dict, metadata_rows)
         """
-        nuc_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
-        
         sequences = []
         labels_list = []
         usage_dict = {'alpha': [], 'beta': [], 'sse': []}
@@ -529,14 +582,8 @@ class MultiGenomeDataLoader:
         if right_pad > 0:
             seq = seq + 'N' * right_pad
         
-        # Pre-compute one-hot encoding for the entire gene sequence
-        gene_ohe = np.zeros((len(seq), 4), dtype=np.float32)
-        for i, nuc in enumerate(seq):
-            idx = nuc_to_idx.get(nuc, 4)
-            if idx < 4:
-                gene_ohe[i, idx] = 1.0
-        
         # Split gene into windows shifted by window_size
+        # Encode sequence on-demand per window to save memory
         for window_start in range(0, len(seq) - total_window + 1, window_size):
             # Calculate the genomic position of this window
             window_genomic_start = requested_start + window_start
@@ -555,16 +602,17 @@ class MultiGenomeDataLoader:
             if len(sites_in_window) == 0:
                 continue
             
-            # Extract pre-computed one-hot encoding
-            ohe_seq = gene_ohe[window_start:window_start + total_window]
+            # Encode sequence on-demand for this window only (memory optimization)
+            ohe_seq = self._encode_ohe_window(seq, window_start, total_window)
             
             # Initialize label array for this window
             labels = np.zeros(window_size, dtype=np.int8)
             
-            # Initialize usage arrays for this window
-            usage_alpha = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
-            usage_beta = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
-            usage_sse = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+            # Use sparse dictionaries for usage arrays instead of full NaN arrays
+            # This significantly reduces memory for genomes with many usage conditions
+            usage_alpha_dict = {}
+            usage_beta_dict = {}
+            usage_sse_dict = {}
             
             n_donor_sites = 0
             n_acceptor_sites = 0
@@ -589,13 +637,35 @@ class MultiGenomeDataLoader:
                         elif site_type == 2:
                             n_acceptor_sites += 1
                         
-                        # Fill usage stats for this position
+                        # Store only non-NaN usage stats (sparse representation)
                         for condition_key, usage_stats in splice_site.site_usage.items():
                             if condition_key in condition_to_idx:
                                 cond_idx = condition_to_idx[condition_key]
-                                usage_alpha[window_pos, cond_idx] = usage_stats['alpha']
-                                usage_beta[window_pos, cond_idx] = usage_stats['beta']
-                                usage_sse[window_pos, cond_idx] = usage_stats['sse']
+                                if window_pos not in usage_alpha_dict:
+                                    usage_alpha_dict[window_pos] = {}
+                                    usage_beta_dict[window_pos] = {}
+                                    usage_sse_dict[window_pos] = {}
+                                usage_alpha_dict[window_pos][cond_idx] = usage_stats['alpha']
+                                usage_beta_dict[window_pos][cond_idx] = usage_stats['beta']
+                                usage_sse_dict[window_pos][cond_idx] = usage_stats['sse']
+            
+            # Convert sparse dicts to dense arrays with NaN (only at append time)
+            # This defers allocation until necessary and keeps memory minimal during processing
+            usage_alpha = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+            usage_beta = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+            usage_sse = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+            
+            for window_pos in usage_alpha_dict:
+                for cond_idx, val in usage_alpha_dict[window_pos].items():
+                    usage_alpha[window_pos, cond_idx] = val
+            
+            for window_pos in usage_beta_dict:
+                for cond_idx, val in usage_beta_dict[window_pos].items():
+                    usage_beta[window_pos, cond_idx] = val
+                    
+            for window_pos in usage_sse_dict:
+                for cond_idx, val in usage_sse_dict[window_pos].items():
+                    usage_sse[window_pos, cond_idx] = val
             
             # Store this window's data
             sequences.append(ohe_seq)
