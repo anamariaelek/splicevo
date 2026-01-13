@@ -257,7 +257,17 @@ def plot_attributions_splice(
             ylabel='Input x Gradient',
             ylim=ylim
         )
-        ax.set_xticks(np.arange(data['x_vals'][0], data['x_vals'][-1] + 1, 10))
+        # Adaptive tick spacing to avoid overcrowding
+        x_range = data['x_vals'][-1] - data['x_vals'][0]
+        if x_range <= 100:
+            tick_step = 10
+        elif x_range <= 200:
+            tick_step = 20
+        elif x_range <= 400:
+            tick_step = 50
+        else:
+            tick_step = 100
+        ax.set_xticks(np.arange(data['x_vals'][0], data['x_vals'][-1] + 1, tick_step))
     
     fig.tight_layout()
     return fig
@@ -412,7 +422,17 @@ def plot_attributions_usage(
             ylabel='Input x Gradient',
             ylim=ylim
         )
-        ax.set_xticks(np.arange(data['x_vals'][0], data['x_vals'][-1] + 1, 10))
+        # Adaptive tick spacing to avoid overcrowding
+        x_range = data['x_vals'][-1] - data['x_vals'][0]
+        if x_range <= 100:
+            tick_step = 10
+        elif x_range <= 200:
+            tick_step = 20
+        elif x_range <= 400:
+            tick_step = 50
+        else:
+            tick_step = 100
+        ax.set_xticks(np.arange(data['x_vals'][0], data['x_vals'][-1] + 1, tick_step))
     
     fig.tight_layout()
     return fig

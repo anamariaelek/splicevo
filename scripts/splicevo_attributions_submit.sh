@@ -34,6 +34,7 @@ KB="1"
 MODEL="${SPECIES}_${KB}kb"
 WINDOW=400
 N_CORES=4
+BATCH_SIZE=1000
 
 # Paths
 BASE_DIR="/home/elek/sds/sd17d003/Anamaria/splicevo"
@@ -88,8 +89,6 @@ if [ ! -d "$PREDICTIONS_PATH" ]; then
 fi
 
 # Run analysis
-# To skip some calculations, set --skip-splice-attributions or --skip-usage-attributions
-# Setting both flag will skip all calculations i.e. dry run.
 if [ "$SUBSET" != "" ]; then
     python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
         --model $MODEL_PATH \
@@ -100,12 +99,50 @@ if [ "$SUBSET" != "" ]; then
         --output $OUTPUT_DIR \
         --share-attributions-across-conditions
 else
-    python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
-        --model $MODEL_PATH \
-        --data $DATA_PATH \
-        --predictions $PREDICTIONS_PATH \
-        --window $WINDOW \
-        --output $OUTPUT_DIR \
-        --share-attributions-across-conditions \
-        --skip-splice-attributions
+    # Process in batches to avoid OOM with large datasets
+    # Count sequences from metadata.csv (subtract 1 for header)
+    TOTAL_SEQUENCES=$(awk 'END {print NR-1}' "${DATA_PATH}/metadata.csv")
+    echo "Total sequences: $TOTAL_SEQUENCES"
+    echo "Batch size: $BATCH_SIZE"
+    
+    for ((START=0; START<TOTAL_SEQUENCES; START+=BATCH_SIZE)); do
+        END=$((START + BATCH_SIZE))
+        if [ $END -gt $TOTAL_SEQUENCES ]; then
+            END=$TOTAL_SEQUENCES
+        fi
+        
+        echo ""
+        echo "Processing batch: sequences $START to $END"
+        
+        python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
+            --model $MODEL_PATH \
+            --data $DATA_PATH \
+            --predictions $PREDICTIONS_PATH \
+            --sequences "${START}:${END}" \
+            --window $WINDOW \
+            --output "${OUTPUT_DIR}/batch_${START}_${END}" \
+            --share-attributions-across-conditions \
+            --skip-splice-attributions
+        
+        if [ $? -ne 0 ]; then
+            echo "Error processing batch $START to $END"
+            exit 1
+        fi
+    done
+    
+    echo ""
+    echo "All batches completed successfully."
+    echo ""
+    echo "Merging batch results..."
+    python ${SPLICEVO_DIR}/scripts/splicevo_attributions_merge_batches.py --input ${OUTPUT_DIR}
+    
+    if [ $? -eq 0 ]; then
+        echo "Merge completed successfully."
+        echo "Removing individual batch directories to save space..."
+        rm -rf ${OUTPUT_DIR}/batch_*/
+        echo "Cleanup complete. Final results are in: ${OUTPUT_DIR}"
+    else
+        echo "Warning: Merge failed. Batch directories preserved for debugging."
+        exit 1
+    fi
 fi

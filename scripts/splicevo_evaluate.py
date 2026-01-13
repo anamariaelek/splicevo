@@ -42,14 +42,14 @@ def evaluate_splice_site_classification(
     log_fn=print
 ) -> Dict:
     """Evaluate splice site classification performance."""
-    log_fn("\n" + "="*60)
+    log_fn("="*60)
     log_fn("SPLICE SITE CLASSIFICATION EVALUATION")
     log_fn("="*60)
     
     results = {}
     
     # PR-AUC scores
-    log_fn("\nCalculating Precision-Recall AUC scores...")
+    log_fn("Calculating Precision-Recall AUC scores...")
     pr_auc_scores = {}
     class_labels = {0: 'no splice site', 1: 'donor', 2: 'acceptor'}
     class_colors = {0: 'tab:blue', 1: 'tab:orange', 2: 'tab:green'}
@@ -99,7 +99,7 @@ def evaluate_splice_site_classification(
     results['pr_auc'] = pr_auc_scores
     
     # Top-k accuracy
-    log_fn("\nCalculating top-k accuracy...")
+    log_fn("Calculating top-k accuracy...")
     def top_k_accuracy(y_true, y_scores):
         k = np.sum(y_true)
         if k == 0:
@@ -139,14 +139,14 @@ def evaluate_splice_usage_regression(
     log_fn=print
 ) -> Dict:
     """Evaluate splice usage (SSE) prediction performance."""
-    log_fn("\n" + "="*60)
+    log_fn("="*60)
     log_fn("SPLICE USAGE REGRESSION EVALUATION")
     log_fn("="*60)
     
     results = {}
     
     # Calculate MSE for each species and condition
-    log_fn("\nCalculating MSE for each species and condition...")
+    log_fn("Calculating MSE for each species and condition...")
     conds = meta['conditions']
     mse_dict = {}
     
@@ -183,7 +183,7 @@ def evaluate_splice_usage_regression(
     results['mse_df'] = mse_df
     
     # Plot RMSE by species
-    log_fn("\nPlotting RMSE by species...")
+    log_fn("Plotting RMSE by species...")
     plt.figure(figsize=(9, 3))
     species_list = mse_df['Species'].unique()
     
@@ -222,7 +222,7 @@ def prepare_matched_positions(
     log_fn=print
 ) -> pd.DataFrame:
     """Prepare matched SSE positions across timepoints."""
-    log_fn("\nPreparing matched SSE positions...")
+    log_fn("Preparing matched SSE positions...")
     
     num_sequences = true_sse.shape[0]
     conds = meta['conditions']
@@ -264,7 +264,7 @@ def prepare_matched_positions(
 
 def calculate_tissue_correlations(all_data_df: pd.DataFrame, log_fn=print) -> pd.DataFrame:
     """Calculate correlation between predicted and true SSE values."""
-    log_fn("\nCalculating correlations...")
+    log_fn("Calculating correlations...")
     
     correlation_results = []
     for (seq_idx, pos, tissue), group in all_data_df.groupby(['sequence', 'position', 'Tissue']):
@@ -296,7 +296,7 @@ def calculate_tissue_correlations(all_data_df: pd.DataFrame, log_fn=print) -> pd
 
 def plot_sse_density(all_data_df: pd.DataFrame, output_dir: Path, log_fn=print):
     """Plot density of predicted vs true SSE values."""
-    log_fn("\nPlotting SSE density...")
+    log_fn("Plotting SSE density...")
     
     samples = all_data_df['group'].unique()[0:1]  # Only first timepoint
     num_tissues = len(samples)
@@ -352,7 +352,7 @@ def plot_sse_density(all_data_df: pd.DataFrame, output_dir: Path, log_fn=print):
 
 def plot_correlation_distribution(correlation_df: pd.DataFrame, output_dir: Path, log_fn=print):
     """Plot distribution of correlations."""
-    log_fn("\nPlotting correlation distribution...")
+    log_fn("Plotting correlation distribution...")
     
     sorted_corr = np.sort(correlation_df['correlation'].dropna())
     cdf = np.arange(1, len(sorted_corr) + 1) / len(sorted_corr)
@@ -384,7 +384,7 @@ def plot_correlation_by_tissue(
     log_fn=print
 ):
     """Plot correlation distribution by tissue."""
-    log_fn("\nPlotting correlations by tissue...")
+    log_fn("Plotting correlations by tissue...")
     
     tissue_colors = {
         'Brain': '#3399cc',
@@ -431,13 +431,135 @@ def plot_correlation_by_tissue(
     log_fn(f"Saved tissue correlation plot to {tissue_plot}")
 
 
+def plot_top_correlation_examples(
+    all_data_df: pd.DataFrame,
+    correlation_df: pd.DataFrame,
+    output_dir: Path,
+    n_examples: int = 7,
+    log_fn=print
+):
+    """Plot top correlation examples showing SSE trends across timepoints."""
+    log_fn(f"Plotting top {n_examples} correlation examples...")
+    
+    # Define tissue colors
+    tissue_colors = {
+        'Brain': '#3399cc',
+        'Cerebellum': '#34ccff',
+        'Heart': '#cc0100',
+        'Kidney': '#cc9900',
+        'Liver': '#339900',
+        'Ovary': '#cc329a',
+        'Testis': '#ff6600'
+    }
+    
+    # Select top examples (skip first, it might be too perfect)
+    top_examples = correlation_df.sort_values(by='correlation', ascending=False)[1:n_examples+1]
+    
+    if len(top_examples) == 0:
+        log_fn("  No examples to plot")
+        return
+    
+    # Filter data for top examples
+    plot_df = all_data_df[
+        (all_data_df['sequence'].isin(top_examples['sequence'])) & 
+        (all_data_df['position'].isin(top_examples['position']))
+    ].copy()
+    
+    plot_df['site'] = plot_df['sequence'].astype(str) + '_' + plot_df['position'].astype(str)
+    plot_df['tissue'] = plot_df['group'].apply(lambda x: x.split('_')[0])
+    plot_df['timepoint'] = plot_df['group'].apply(lambda x: x.split('_')[1])
+    
+    unique_sites = plot_df['site'].unique()
+    timepoint_order = sorted(plot_df['timepoint'].unique(), key=lambda x: int(''.join(filter(str.isdigit, x))))
+    plot_df['timepoint'] = pd.Categorical(plot_df['timepoint'], categories=timepoint_order, ordered=True)
+    
+    n_sites = len(unique_sites)
+    n_tissues = len(plot_df['tissue'].unique())
+    
+    fig, axes = plt.subplots(
+        n_tissues, n_sites,
+        figsize=(2.5 * n_sites, 2.5 * n_tissues),
+        sharex='col',
+        squeeze=False
+    )
+    
+    legend_handles, legend_labels = [], []
+    
+    for col_idx, site in enumerate(unique_sites):
+        site_data = plot_df[plot_df['site'] == site]
+        for tissue in site_data['tissue'].unique():
+            row_idx = list(plot_df['tissue'].unique()).index(tissue)
+            tissue_data = site_data[site_data['tissue'] == tissue].sort_values('timepoint')
+            color = tissue_colors.get(tissue, '#000000')
+            
+            x_values = tissue_data['timepoint'].cat.codes
+            y_sse_true = tissue_data['true_SSE'].values
+            y_sse_pred = tissue_data['pred_SSE'].values
+            correlation = np.corrcoef(y_sse_true, y_sse_pred)[0, 1]
+            
+            # True SSE: solid line
+            line_true, = axes[row_idx, col_idx].plot(
+                x_values, y_sse_true,
+                label=f'{tissue} True',
+                color=color,
+                linewidth=2,
+                linestyle='-'
+            )
+            axes[row_idx, col_idx].scatter(x_values, y_sse_true, color=color, marker='o', s=36)
+            
+            # Predicted SSE: dashed line
+            line_pred, = axes[row_idx, col_idx].plot(
+                x_values, y_sse_pred,
+                label=f'{tissue} Pred',
+                color=color,
+                linewidth=2,
+                linestyle='--'
+            )
+            axes[row_idx, col_idx].scatter(x_values, y_sse_pred, color=color, marker='x', s=36)
+            
+            if col_idx == 0:
+                legend_handles.extend([line_true, line_pred])
+                legend_labels.extend([f'{tissue} True', f'{tissue} Pred'])
+            
+            axes[row_idx, col_idx].set_ylim(0, 1)
+            axes[row_idx, col_idx].set_title(f'{site}\n{correlation:.3f}', fontsize=14)
+            axes[row_idx, col_idx].set_xticks(range(len(timepoint_order)))
+            axes[row_idx, col_idx].set_xticklabels(timepoint_order, rotation=90)
+            axes[row_idx, col_idx].grid(True, alpha=0.3)
+    
+    # Set y labels for first column
+    for row_idx in range(n_tissues):
+        axes[row_idx, 0].set_ylabel('SSE', fontsize=12, fontweight='bold')
+    
+    # Set x labels for last row
+    for col_idx in range(n_sites):
+        axes[-1, col_idx].set_xlabel('Timepoint', fontsize=12, fontweight='bold')
+    
+    fig.legend(
+        legend_handles, legend_labels,
+        loc='lower center',
+        bbox_to_anchor=(1.05, 0.5),
+        title='Tissue',
+        title_fontsize=14,
+        fontsize=12,
+        ncol=1
+    )
+    
+    plt.tight_layout(rect=[0, 0.05, 1, 1])
+    
+    top_examples_plot = output_dir / "top_correlation_examples.png"
+    plt.savefig(top_examples_plot, dpi=150, bbox_inches='tight')
+    plt.close()
+    log_fn(f"Saved top correlation examples plot to {top_examples_plot}")
+
+
 def save_results_summary(
     eval_results: Dict,
     output_dir: Path,
     log_fn=print
 ):
     """Save evaluation results summary to JSON."""
-    log_fn("\nSaving results summary...")
+    log_fn("Saving results summary...")
     
     # Convert numpy types to Python native types for JSON serialization
     summary = {
@@ -502,7 +624,7 @@ def main():
     
     try:
         # Load test data
-        log_fn("\nLoading test data...")
+        log_fn("Loading test data...")
         test_seq, test_labels, test_alpha, test_beta, test_sse, test_species = load_processed_data(str(test_data_dir))
         log_fn(f"  Sequences shape: {test_seq.shape}")
         log_fn(f"  Labels shape: {test_labels.shape}")
@@ -514,7 +636,7 @@ def main():
             test_meta = json.load(f)
         
         # Load predictions
-        log_fn("\nLoading predictions...")
+        log_fn("Loading predictions...")
         pred_labels, pred_probs, pred_sse, meta, true_labels, true_sse = load_predictions(str(pred_dir))
         log_fn(f"  Predicted labels shape: {pred_labels.shape}")
         log_fn(f"  Predicted probs shape: {pred_probs.shape}")
@@ -547,21 +669,27 @@ def main():
         # Calculate correlations
         correlation_df = calculate_tissue_correlations(all_data_df, log_fn)
         
+        # Save correlation table
+        correlation_file = output_dir / "sse_correlation_per_position.csv"
+        correlation_df.to_csv(correlation_file, index=False)
+        log_fn(f"Saved correlation table to {correlation_file}")
+        
         # Generate plots
         plot_sse_density(all_data_df, output_dir, log_fn)
         plot_correlation_distribution(correlation_df, output_dir, log_fn)
         plot_correlation_by_tissue(correlation_df, output_dir, log_fn)
+        plot_top_correlation_examples(all_data_df, correlation_df, output_dir, log_fn=log_fn)
         
         # Save results summary
         save_results_summary(eval_results, output_dir, log_fn)
         
-        log_fn("\n" + "="*60)
+        log_fn("="*60)
         log_fn("EVALUATION COMPLETED SUCCESSFULLY")
         log_fn("="*60)
         log_fn(f"End time: {datetime.now().isoformat()}")
         
     except Exception as e:
-        log_fn(f"\nERROR: {str(e)}")
+        log_fn(f"ERROR: {str(e)}")
         import traceback
         log_fn(traceback.format_exc())
         raise
