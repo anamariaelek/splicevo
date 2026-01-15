@@ -480,13 +480,11 @@ class AttributionCalculator:
             pos_logits = splice_logits[:, position, :]
             target_class = target_tensor[position]
             
-            loss = torch.nn.functional.cross_entropy(
-                pos_logits,
-                target_class.unsqueeze(0),
-                reduction='mean'
-            )
+            # Get the logit for the target class
+            target_logit = pos_logits[0, target_class]
             
-            loss.backward()
+            # Backward on the logit directly
+            target_logit.backward()
         
         attr = seq_tensor.grad.detach().cpu().numpy()[0, :, :]
         return attr
@@ -529,16 +527,10 @@ class AttributionCalculator:
                 output = self.model(seq_tensor)
                 usage_pred = output['usage_predictions']  # (1, seq_len, n_conditions)
                 pos_pred = usage_pred[:, position, :]  # (1, n_conditions)
-                target_vals = target_tensor[position, :]  # (n_conditions,)
                 
-                # Compute loss for all conditions at once
-                loss = torch.nn.functional.mse_loss(
-                    pos_pred,
-                    target_vals.unsqueeze(0),
-                    reduction='mean'
-                )
-                
-                loss.backward()
+                # Sum predictions across all conditions and backward
+                # (to get gradients for all conditions in one pass)
+                pos_pred.sum().backward()
             
             # Extract gradients once for all conditions
             grad_all = seq_tensor.grad.detach().cpu().numpy()[0, :, :]  # (seq_len, 4)
@@ -556,15 +548,9 @@ class AttributionCalculator:
                     output = self.model(seq_tensor)
                     usage_pred = output['usage_predictions']  # (1, seq_len, n_conditions)
                     pos_pred = usage_pred[:, position, col]  # (1,)
-                    target_val = target_tensor[position, col]
                     
-                    loss = torch.nn.functional.mse_loss(
-                        pos_pred,
-                        target_val.unsqueeze(0),
-                        reduction='mean'
-                    )
-                    
-                    loss.backward()
+                    # Backward on the prediction directly
+                    pos_pred.backward()
                 
                 attributions[:, :, col] = seq_tensor.grad.detach().cpu().numpy()[0, :, :]
                 seq_tensor.grad.zero_()

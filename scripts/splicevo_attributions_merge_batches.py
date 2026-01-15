@@ -109,13 +109,9 @@ def merge_attribution_batches(input_dir, output_dir=None, verbose=True):
             print(f"  Sequence shape per site: {seq_shape}")
             print(f"  Attribution shape per site: {attr_shape}")
         
-        # Create output directory
-        output_subdir = output_path / attr_type
-        output_subdir.mkdir(parents=True, exist_ok=True)
-        
         # Pre-allocate output arrays
-        merged_seq_path = output_subdir / f"{attr_type}_sequences.npy"
-        merged_attr_path = output_subdir / f"{attr_type}_attributions.npy"
+        merged_seq_path = output_path / f"{attr_type}_sequences.npy"
+        merged_attr_path = output_path / f"{attr_type}_attributions.npy"
         
         merged_sequences = np.lib.format.open_memmap(
             str(merged_seq_path), mode='w+', 
@@ -159,12 +155,12 @@ def merge_attribution_batches(input_dir, output_dir=None, verbose=True):
         
         # Save metadata
         if all_metadata:
-            with open(output_subdir / f"{attr_type}_metadata.json", 'w') as f:
+            with open(output_path / f"{attr_type}_metadata.json", 'w') as f:
                 json.dump(all_metadata, f, indent=2)
         
         if verbose:
-            print(f"  ✓ Merged {total_sites} total sites")
-            print(f"  Saved to: {output_subdir}")
+            print(f"  Merged {total_sites} total sites")
+            print(f"  Saved to: {output_path}")
     
     if verbose:
         print(f"\nMerged results saved to: {output_path}")

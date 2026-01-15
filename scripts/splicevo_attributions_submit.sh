@@ -33,7 +33,6 @@ SPECIES="mouse_rat_human"
 KB="1"
 MODEL="${SPECIES}_${KB}kb"
 WINDOW=400
-N_CORES=4
 BATCH_SIZE=1000
 
 # Paths
@@ -59,44 +58,41 @@ echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "Hostname: $(hostname)"
 echo ""
 echo "Configuration:"
-echo "  Subset: $SUBSET"
-echo "  Species: $SPECIES"
-echo "  Model: $MODEL_PATH"
-echo "  Data: $DATA_PATH"
-echo "  Predictions: $PREDICTIONS_PATH"
-echo "  Output directory: $OUTPUT_DIR"
-echo ""
-echo "Parameters:"
-echo "  n_cores: $N_CORES"
+echo "  Subset: ${SUBSET}"
+echo "  Species: ${SPECIES}"
+echo "  Model: ${MODEL_PATH}"
+echo "  Data: ${DATA_PATH}"
+echo "  Predictions: ${PREDICTIONS_PATH}"
+echo "  Output directory: ${OUTPUT_DIR}"
 echo ""
 
 # Check if model exists
-if [ ! -f "$MODEL_PATH" ]; then
-    echo "Error: Model not found at $MODEL_PATH"
+if [ ! -f "${MODEL_PATH}" ]; then
+    echo "Error: Model not found at ${MODEL_PATH}"
     exit 1
 fi
 
 # Check if data exists
-if [ ! -d "$DATA_PATH" ]; then
-    echo "Error: Data not found at $DATA_PATH"
+if [ ! -d "${DATA_PATH}" ]; then
+    echo "Error: Data not found at ${DATA_PATH}"
     exit 1
 fi
 
 # Check if predictions exist
-if [ ! -d "$PREDICTIONS_PATH" ]; then
-    echo "Error: Predictions not found at $PREDICTIONS_PATH"
+if [ ! -d "${PREDICTIONS_PATH}" ]; then
+    echo "Error: Predictions not found at ${PREDICTIONS_PATH}"
     exit 1
 fi
 
 # Run analysis
 if [ "$SUBSET" != "" ]; then
     python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
-        --model $MODEL_PATH \
-        --data $DATA_PATH \
-        --predictions $PREDICTIONS_PATH \
-        --sequences $SUBSET \
-        --window $WINDOW \
-        --output $OUTPUT_DIR \
+        --model ${MODEL_PATH} \
+        --data ${DATA_PATH} \
+        --predictions ${PREDICTIONS_PATH} \
+        --sequences ${SUBSET} \
+        --window ${WINDOW} \
+        --output ${OUTPUT_DIR} \
         --share-attributions-across-conditions
 else
     # Process in batches to avoid OOM with large datasets
@@ -115,11 +111,11 @@ else
         echo "Processing batch: sequences $START to $END"
         
         python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
-            --model $MODEL_PATH \
-            --data $DATA_PATH \
-            --predictions $PREDICTIONS_PATH \
+            --model ${MODEL_PATH} \
+            --data ${DATA_PATH} \
+            --predictions ${PREDICTIONS_PATH} \
             --sequences "${START}:${END}" \
-            --window $WINDOW \
+            --window ${WINDOW} \
             --output "${OUTPUT_DIR}/batch_${START}_${END}" \
             --share-attributions-across-conditions \
             --skip-splice-attributions
