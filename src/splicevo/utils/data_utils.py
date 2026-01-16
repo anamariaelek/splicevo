@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 from typing import Tuple, Optional, Union, Dict
 
-def load_processed_data(fn, verbose: bool = False) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+def load_processed_data(fn, verbose: bool = False) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
 
     if fn.endswith(".npz"):
         # Load npz file
@@ -46,6 +46,14 @@ def load_processed_data(fn, verbose: bool = False) -> Tuple[np.ndarray, np.ndarr
                 print(f"Species IDs shape: {species_ids.shape}")
         else:
             species_ids = None
+        
+        # Load condition mask if available
+        if 'condition_mask' in test_data.keys():
+            condition_mask = test_data['condition_mask']
+            if verbose:
+                print(f"Condition mask shape: {condition_mask.shape}")
+        else:
+            condition_mask = None
 
     elif os.path.isdir(fn):
 
@@ -107,10 +115,25 @@ def load_processed_data(fn, verbose: bool = False) -> Tuple[np.ndarray, np.ndarr
                 sse = usage_array
                 if verbose:
                     print(f"SSE shape: {sse.shape}")
+        
+        # Load condition mask if available
+        condition_mask = None
+        mask_path = os.path.join(mmap_dir, 'condition_mask.mmap')
+        if os.path.exists(mask_path):
+            # Handle both nested and flat metadata formats
+            if 'condition_mask' in meta and isinstance(meta['condition_mask'], dict):
+                mask_dtype = np.dtype(meta['condition_mask'].get('dtype', 'bool'))
+                mask_shape = tuple(meta['condition_mask']['shape'])
+            else:
+                mask_dtype = np.dtype(meta.get('condition_mask_dtype', 'bool'))
+                mask_shape = tuple(meta.get('condition_mask_shape'))
+            condition_mask = np.memmap(mask_path, dtype=mask_dtype, mode='r', shape=mask_shape)
+            if verbose:
+                print(f"Condition mask shape: {condition_mask.shape}")
     else:
         raise ValueError("Unknown file format")
     
-    return sequences, labels, alpha, beta, sse, species_ids
+    return sequences, labels, alpha, beta, sse, species_ids, condition_mask
 
 def load_predictions(fn, keys=None, verbose=False):
     

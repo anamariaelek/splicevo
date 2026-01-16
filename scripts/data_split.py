@@ -13,6 +13,8 @@ import argparse
 import sys
 import pandas as pd
 from pathlib import Path
+import psutil
+import gc
 
 parser = argparse.ArgumentParser(description="Split loaded data into train/test sets")
 parser.add_argument("--input_dir", type=str, required=True, 
@@ -70,6 +72,12 @@ def format_time(seconds):
     secs = int(seconds % 60)
     return f"{hours}h {minutes}m {secs}s"
 
+def get_memory_usage():
+    """Get current memory usage in GB."""
+    process = psutil.Process()
+    mem_info = process.memory_info()
+    return mem_info.rss / (1024**3)  # Convert to GB
+
 log_print(f"Train/test splitting started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 log_print(f"Input directory: {input_dir}")
 log_print(f"Output directory: {output_dir}")
@@ -96,7 +104,9 @@ for gid in sorted(genome_dirs):
     log_print(f"    - {gid}")
 
 step1_time = time.time() - step1_start
-log_print(f"  Discovery completed in {step1_time:.2f} seconds\n")
+mem_after_step1 = get_memory_usage()
+log_print(f"  Discovery completed in {step1_time:.2f} seconds")
+log_print(f"  Memory usage: {mem_after_step1:.2f} GB\n")
 
 # Step 2: Load orthology file
 log_print("Step 2: Loading orthology file...")
@@ -131,7 +141,9 @@ log_print(f"  Total ortholog groups: {n_groups}")
 log_print(f"  Genomes in orthology file: {sorted(genome_genes.keys())}")
 
 step2_time = time.time() - step2_start
-log_print(f"  Orthology loaded in {step2_time:.2f} seconds\n")
+mem_after_step2 = get_memory_usage()
+log_print(f"  Orthology loaded in {step2_time:.2f} seconds")
+log_print(f"  Memory usage: {mem_after_step2:.2f} GB\n")
 
 # Step 3: Determine train/test split based on POV genome chromosomes
 log_print("Step 3: Determining train/test split...")
@@ -269,7 +281,14 @@ log_print(f"    Train: {train_assignments}")
 log_print(f"    Test: {test_assignments}")
 
 step3_time = time.time() - step3_start
-log_print(f"  Split determined in {step3_time:.2f} seconds\n")
+
+# Free memory from genome metadata cache (no longer needed)
+del genome_metadata_cache, train_genes_by_genome_chrom
+gc.collect()
+
+mem_after_step3 = get_memory_usage()
+log_print(f"  Split determined in {step3_time:.2f} seconds")
+log_print(f"  Memory usage: {mem_after_step3:.2f} GB\n")
 
 # Step 4: Identify common metadata columns and usage conditions
 log_print("Step 4: Identifying common columns and conditions...")
@@ -298,7 +317,9 @@ common_usage_conditions = sorted(list(all_usage_conditions))
 log_print(f"  Common usage conditions: {common_usage_conditions}")
 
 step4_time = time.time() - step4_start
-log_print(f"  Column identification completed in {step4_time:.2f} seconds\n")
+mem_after_step4 = get_memory_usage()
+log_print(f"  Column identification completed in {step4_time:.2f} seconds")
+log_print(f"  Memory usage: {mem_after_step4:.2f} GB\n")
 
 # Step 5: Process genomes sequentially and write to memory-mapped files
 log_print("Step 5: Processing genomes sequentially and writing to outputs...")
@@ -351,6 +372,7 @@ train_species_ids_mmap = None
 train_usage_alpha_mmap = None
 train_usage_beta_mmap = None
 train_usage_sse_mmap = None
+train_condition_mask_mmap = None
 
 test_sequences_mmap = None
 test_labels_mmap = None
@@ -358,6 +380,7 @@ test_species_ids_mmap = None
 test_usage_alpha_mmap = None
 test_usage_beta_mmap = None
 test_usage_sse_mmap = None
+test_condition_mask_mmap = None
 
 train_metadata_list = []
 test_metadata_list = []
@@ -408,41 +431,41 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
         seq_metadata['species_id'] = genome_idx
         test_metadata_list.append(seq_metadata)
     
-    # Load sequences and labels
+    # Open memmap files without loading into memory (memory efficient)
     seq_shape = tuple(meta['sequences_shape'])
     labels_shape = tuple(meta['labels_shape'])
     
-    log_print(f"    Loading sequences...")
-    sequences = np.memmap(os.path.join(genome_dir, 'sequences.mmap'), 
-                         dtype=seq_dtype, mode='r', shape=seq_shape)
+    log_print(f"    Opening sequences memmap (not loading into memory)...")
+    sequences_mmap = np.memmap(os.path.join(genome_dir, 'sequences.mmap'), 
+                              dtype=seq_dtype, mode='r', shape=seq_shape)
     
-    log_print(f"    Loading labels...")
-    labels = np.memmap(os.path.join(genome_dir, 'labels.mmap'), 
-                      dtype=label_dtype, mode='r', shape=labels_shape)
+    log_print(f"    Opening labels memmap (not loading into memory)...")
+    labels_mmap = np.memmap(os.path.join(genome_dir, 'labels.mmap'), 
+                           dtype=label_dtype, mode='r', shape=labels_shape)
     
-    # Load usage arrays if they exist
-    usage_alpha = None
-    usage_beta = None
-    usage_sse = None
+    # Open usage array memmaps if they exist
+    usage_alpha_mmap = None
+    usage_beta_mmap = None
+    usage_sse_mmap = None
     genome_usage_conditions = meta.get('usage_conditions', [])
     
     usage_alpha_path = os.path.join(genome_dir, 'usage_alpha.mmap')
     if os.path.exists(usage_alpha_path):
         usage_alpha_shape = tuple(meta['alpha_shape'])
-        log_print(f"    Loading usage_alpha...")
-        usage_alpha = np.memmap(usage_alpha_path, dtype=alpha_dtype, mode='r', shape=usage_alpha_shape)
+        log_print(f"    Opening usage_alpha memmap (not loading into memory)...")
+        usage_alpha_mmap = np.memmap(usage_alpha_path, dtype=alpha_dtype, mode='r', shape=usage_alpha_shape)
     
     usage_beta_path = os.path.join(genome_dir, 'usage_beta.mmap')
     if os.path.exists(usage_beta_path):
         usage_beta_shape = tuple(meta['beta_shape'])
-        log_print(f"    Loading usage_beta...")
-        usage_beta = np.memmap(usage_beta_path, dtype=beta_dtype, mode='r', shape=usage_beta_shape)
+        log_print(f"    Opening usage_beta memmap (not loading into memory)...")
+        usage_beta_mmap = np.memmap(usage_beta_path, dtype=beta_dtype, mode='r', shape=usage_beta_shape)
     
     usage_sse_path = os.path.join(genome_dir, 'usage_sse.mmap')
     if os.path.exists(usage_sse_path):
         usage_sse_shape = tuple(meta['sse_shape'])
-        log_print(f"    Loading usage_sse...")
-        usage_sse = np.memmap(usage_sse_path, dtype=sse_dtype, mode='r', shape=usage_sse_shape)
+        log_print(f"    Opening usage_sse memmap (not loading into memory)...")
+        usage_sse_mmap = np.memmap(usage_sse_path, dtype=sse_dtype, mode='r', shape=usage_sse_shape)
     
     # Helper to reorder usage conditions
     def reorder_usage_to_common(usage_array, genome_conds, target_conds):
@@ -457,6 +480,16 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
                 source_idx = cond_to_idx[target_cond]
                 reordered[:, :, target_idx] = usage_array[:, :, source_idx]
         return reordered
+    
+    # Helper to build condition mask for genome
+    def build_condition_mask(genome_conds, target_conds):
+        """Build binary mask indicating which conditions are valid for this genome."""
+        mask = np.zeros(len(target_conds), dtype=np.bool_)
+        cond_to_idx = {cond: idx for idx, cond in enumerate(genome_conds)}
+        for target_idx, target_cond in enumerate(target_conds):
+            if target_cond in cond_to_idx:
+                mask[target_idx] = True
+        return mask
     
     # Process train sequences
     if train_indices:
@@ -484,35 +517,53 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
                 train_usage_sse_mmap = np.memmap(os.path.join(train_dir, 'usage_sse.mmap'), 
                                                 dtype=sse_dtype, mode='w+', 
                                                 shape=(train_count, label_window_size, n_usage_conditions))
+            
+            # Create condition mask array
+            train_condition_mask_mmap = np.memmap(os.path.join(train_dir, 'condition_mask.mmap'),
+                                                 dtype=np.bool_, mode='w+',
+                                                 shape=(train_count, n_usage_conditions))
         
-        # Write train data
-        train_seqs = sequences[train_indices]
-        train_lbls = labels[train_indices]
+        # Write train data in batches to avoid memory spikes
         n_train = len(train_indices)
+        batch_size = 1000  # Process 1000 sequences at a time
         
-        train_sequences_mmap[train_offset:train_offset + n_train] = train_seqs
-        train_labels_mmap[train_offset:train_offset + n_train] = train_lbls
-        train_species_ids_mmap[train_offset:train_offset + n_train] = genome_idx
-        
-        if usage_alpha is not None:
-            train_alpha = reorder_usage_to_common(usage_alpha[train_indices], 
-                                                 genome_usage_conditions, 
-                                                 common_usage_conditions)
-            train_usage_alpha_mmap[train_offset:train_offset + n_train] = train_alpha
-        
-        if usage_beta is not None:
-            train_beta = reorder_usage_to_common(usage_beta[train_indices], 
-                                                genome_usage_conditions, 
-                                                common_usage_conditions)
-            train_usage_beta_mmap[train_offset:train_offset + n_train] = train_beta
-        
-        if usage_sse is not None:
-            train_sse = reorder_usage_to_common(usage_sse[train_indices], 
-                                               genome_usage_conditions, 
-                                               common_usage_conditions)
-            train_usage_sse_mmap[train_offset:train_offset + n_train] = train_sse
-        
-        train_offset += n_train
+        log_print(f"    Writing {n_train} train sequences in batches of {batch_size}...")
+        for batch_start in range(0, n_train, batch_size):
+            batch_end = min(batch_start + batch_size, n_train)
+            batch_indices = train_indices[batch_start:batch_end]
+            batch_size_actual = len(batch_indices)
+            
+            # Copy batch directly from source memmap to dest memmap (memory efficient)
+            train_sequences_mmap[train_offset:train_offset + batch_size_actual] = sequences_mmap[batch_indices]
+            train_labels_mmap[train_offset:train_offset + batch_size_actual] = labels_mmap[batch_indices]
+            train_species_ids_mmap[train_offset:train_offset + batch_size_actual] = genome_idx
+            
+            if usage_alpha_mmap is not None:
+                train_alpha = reorder_usage_to_common(usage_alpha_mmap[batch_indices], 
+                                                     genome_usage_conditions, 
+                                                     common_usage_conditions)
+                train_usage_alpha_mmap[train_offset:train_offset + batch_size_actual] = train_alpha
+                del train_alpha
+            
+            if usage_beta_mmap is not None:
+                train_beta = reorder_usage_to_common(usage_beta_mmap[batch_indices], 
+                                                    genome_usage_conditions, 
+                                                    common_usage_conditions)
+                train_usage_beta_mmap[train_offset:train_offset + batch_size_actual] = train_beta
+                del train_beta
+            
+            if usage_sse_mmap is not None:
+                train_sse = reorder_usage_to_common(usage_sse_mmap[batch_indices], 
+                                                   genome_usage_conditions, 
+                                                   common_usage_conditions)
+                train_usage_sse_mmap[train_offset:train_offset + batch_size_actual] = train_sse
+                del train_sse
+            
+            # Write condition mask (same for all sequences from this genome)
+            genome_mask = build_condition_mask(genome_usage_conditions, common_usage_conditions)
+            train_condition_mask_mmap[train_offset:train_offset + batch_size_actual] = genome_mask
+            
+            train_offset += batch_size_actual
     
     # Process test sequences
     if test_indices:
@@ -540,38 +591,60 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
                 test_usage_sse_mmap = np.memmap(os.path.join(test_dir, 'usage_sse.mmap'), 
                                                dtype=sse_dtype, mode='w+', 
                                                shape=(test_count, label_window_size, n_usage_conditions))
+            
+            # Create condition mask array
+            test_condition_mask_mmap = np.memmap(os.path.join(test_dir, 'condition_mask.mmap'),
+                                                dtype=np.bool_, mode='w+',
+                                                shape=(test_count, n_usage_conditions))
         
-        # Write test data
-        test_seqs = sequences[test_indices]
-        test_lbls = labels[test_indices]
+        # Write test data in batches to avoid memory spikes
         n_test = len(test_indices)
+        batch_size = 1000  # Process 1000 sequences at a time
         
-        test_sequences_mmap[test_offset:test_offset + n_test] = test_seqs
-        test_labels_mmap[test_offset:test_offset + n_test] = test_lbls
-        test_species_ids_mmap[test_offset:test_offset + n_test] = genome_idx
-        
-        if usage_alpha is not None:
-            test_alpha = reorder_usage_to_common(usage_alpha[test_indices], 
-                                                genome_usage_conditions, 
-                                                common_usage_conditions)
-            test_usage_alpha_mmap[test_offset:test_offset + n_test] = test_alpha
-        
-        if usage_beta is not None:
-            test_beta = reorder_usage_to_common(usage_beta[test_indices], 
-                                               genome_usage_conditions, 
-                                               common_usage_conditions)
-            test_usage_beta_mmap[test_offset:test_offset + n_test] = test_beta
-        
-        if usage_sse is not None:
-            test_sse = reorder_usage_to_common(usage_sse[test_indices], 
-                                              genome_usage_conditions, 
-                                              common_usage_conditions)
-            test_usage_sse_mmap[test_offset:test_offset + n_test] = test_sse
-        
-        test_offset += n_test
+        log_print(f"    Writing {n_test} test sequences in batches of {batch_size}...")
+        for batch_start in range(0, n_test, batch_size):
+            batch_end = min(batch_start + batch_size, n_test)
+            batch_indices = test_indices[batch_start:batch_end]
+            batch_size_actual = len(batch_indices)
+            
+            # Copy batch directly from source memmap to dest memmap (memory efficient)
+            test_sequences_mmap[test_offset:test_offset + batch_size_actual] = sequences_mmap[batch_indices]
+            test_labels_mmap[test_offset:test_offset + batch_size_actual] = labels_mmap[batch_indices]
+            test_species_ids_mmap[test_offset:test_offset + batch_size_actual] = genome_idx
+            
+            if usage_alpha_mmap is not None:
+                test_alpha = reorder_usage_to_common(usage_alpha_mmap[batch_indices], 
+                                                    genome_usage_conditions, 
+                                                    common_usage_conditions)
+                test_usage_alpha_mmap[test_offset:test_offset + batch_size_actual] = test_alpha
+                del test_alpha
+            
+            if usage_beta_mmap is not None:
+                test_beta = reorder_usage_to_common(usage_beta_mmap[batch_indices], 
+                                                   genome_usage_conditions, 
+                                                   common_usage_conditions)
+                test_usage_beta_mmap[test_offset:test_offset + batch_size_actual] = test_beta
+                del test_beta
+            
+            if usage_sse_mmap is not None:
+                test_sse = reorder_usage_to_common(usage_sse_mmap[batch_indices], 
+                                                  genome_usage_conditions, 
+                                                  common_usage_conditions)
+                test_usage_sse_mmap[test_offset:test_offset + batch_size_actual] = test_sse
+                del test_sse
+            
+            # Write condition mask (same for all sequences from this genome)
+            genome_mask = build_condition_mask(genome_usage_conditions, common_usage_conditions)
+            test_condition_mask_mmap[test_offset:test_offset + batch_size_actual] = genome_mask
+            
+            test_offset += batch_size_actual
     
-    log_print(f"    Genome {genome_id} processed and removed from memory")
-    del sequences, labels, usage_alpha, usage_beta, usage_sse, metadata
+    log_print(f"    Genome {genome_id} processed")
+    # Close memmap references to free file handles
+    del sequences_mmap, labels_mmap, usage_alpha_mmap, usage_beta_mmap, usage_sse_mmap, metadata
+    gc.collect()
+    
+    log_print(f"    Memory after processing: {get_memory_usage():.2f} GB")
 
 # Flush and close mmap files
 if train_sequences_mmap is not None:
@@ -582,6 +655,8 @@ if train_sequences_mmap is not None:
         del train_usage_beta_mmap
     if train_usage_sse_mmap is not None:
         del train_usage_sse_mmap
+    if train_condition_mask_mmap is not None:
+        del train_condition_mask_mmap
 
 if test_sequences_mmap is not None:
     del test_sequences_mmap, test_labels_mmap, test_species_ids_mmap
@@ -591,6 +666,8 @@ if test_sequences_mmap is not None:
         del test_usage_beta_mmap
     if test_usage_sse_mmap is not None:
         del test_usage_sse_mmap
+    if test_condition_mask_mmap is not None:
+        del test_condition_mask_mmap
 
 # Save metadata
 log_print(f"\n  Saving metadata...")
@@ -642,6 +719,9 @@ def create_split_metadata(output_split_dir, n_sequences, common_usage_conditions
     if os.path.exists(os.path.join(output_split_dir, 'usage_sse.mmap')):
         metadata['sse_shape'] = [n_sequences, label_window_size, len(common_usage_conditions)]
         metadata['sse_dtype'] = sse_dtype
+    if os.path.exists(os.path.join(output_split_dir, 'condition_mask.mmap')):
+        metadata['condition_mask_shape'] = [n_sequences, len(common_usage_conditions)]
+        metadata['condition_mask_dtype'] = 'bool'
     
     # Collect species mapping
     species_mapping = {}
@@ -694,7 +774,13 @@ with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
     json.dump(summary_data, f, indent=2)
 
 step5_time = time.time() - step5_start
-log_print(f"  Data processed and saved in {step5_time:.2f} seconds\n")
+
+# Final garbage collection
+gc.collect()
+mem_after_step5 = get_memory_usage()
+
+log_print(f"  Data processed and saved in {step5_time:.2f} seconds")
+log_print(f"  Final memory usage: {mem_after_step5:.2f} GB\n")
 
 # Final summary
 total_time = time.time() - script_start_time

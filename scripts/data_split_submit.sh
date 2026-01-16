@@ -2,15 +2,21 @@
 #SBATCH --job-name=split_mouse_rat
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=512G
+#SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 
-# Memoory rules of thumb:
-# - 64G for small datasets (e.g., a few chromosome in a single genome, a few usage conditions)
-# - 128G or 256G for medium datasets (e.g., multiple chromosomes from multiple genomes, a few usage conditions)
-# - 512G for large datasets (e.g., whole genomes of multiple species, many usage conditions)
+# Memory rules of thumb (with optimizations):
+# - 32G for small datasets (e.g., a few chromosomes in a single genome, a few usage conditions)
+# - 64G for medium datasets (e.g., multiple chromosomes from multiple genomes, a few usage conditions)
+# - 128G for large datasets (e.g., whole genomes of multiple species, many usage conditions)
+#
+# Optimizations applied:
+# - Batch processing (1000 sequences at a time) instead of loading entire genome
+# - Direct memmap-to-memmap copying without intermediate arrays
+# - Metadata cache freed after step 3
+# - Memory logging after each step
 
 set -e
 

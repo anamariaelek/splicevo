@@ -193,6 +193,19 @@ def load_test_data(data_path: str, use_memmap: bool = False, log_fn=print) -> Di
             if key in data:
                 log_fn(f"{key.capitalize()} shape: {data[key].shape}")
         
+        # Load condition mask if available
+        mask_path = mmap_dir / 'condition_mask.mmap'
+        if mask_path.exists():
+            mask_dtype = np.dtype(meta.get('condition_mask_dtype', 'bool'))
+            mask_shape = tuple(meta.get('condition_mask_shape'))
+            data['condition_mask'] = np.memmap(
+                mask_path,
+                dtype=mask_dtype,
+                mode='r',
+                shape=mask_shape
+            )
+            log_fn(f"Condition mask shape: {data['condition_mask'].shape}")
+        
     else:
         # Load from .npz file (in-memory)
         log_fn(f"\nLoading test data from {data_path}...")
@@ -492,6 +505,9 @@ def main():
             ground_truth['labels_true'] = np.array(test_data['labels'])
         if 'usage_sse' in test_data:
             ground_truth['usage_sse_true'] = np.array(test_data['usage_sse'])
+        if 'condition_mask' in test_data:
+            ground_truth['condition_mask'] = np.array(test_data['condition_mask'])
+            log_print(f"Condition mask included (shape: {ground_truth['condition_mask'].shape})")
         
         # Save predictions
         save_start = time.time()
