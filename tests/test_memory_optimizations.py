@@ -165,9 +165,9 @@ class TestSparseUsageRepresentation:
             for cond_idx, value in cond_dict.items():
                 dense_from_sparse[pos, cond_idx] = value
         
-        # Check a few values
-        assert dense_from_sparse[100, 5] == 0.75
-        assert dense_from_sparse[500, 15] == 0.55
+        # Check a few values with tolerance for floating-point precision
+        np.testing.assert_almost_equal(dense_from_sparse[100, 5], 0.75)
+        np.testing.assert_almost_equal(dense_from_sparse[500, 15], 0.55)
         assert np.isnan(dense_from_sparse[0, 0])
 
 
