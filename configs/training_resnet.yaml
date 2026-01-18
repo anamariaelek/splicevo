@@ -25,6 +25,7 @@ model:
   num_resblocks: 16
   dilation_strategy: alternating
   alternate: 4 
+  bottleneck_dim: 128
   num_heads: 8
   num_classes: 3
   context_len: 450  # this must match context_size in data creation (verify in metadata.json)

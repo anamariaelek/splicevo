@@ -192,7 +192,8 @@ class EncoderModule(nn.Module):
                  dropout: float = 0.0,
                  usage_loss_type: str = 'weighted_mse',
                  n_species: int = 1,
-                 species_names: Optional[list] = None
+                 species_names: Optional[list] = None,
+                 bottleneck_dim: Optional[int] = None
         ):
         """
         Initialize encoder module (convolutional encoder with multi-scale fusion).
@@ -208,6 +209,8 @@ class EncoderModule(nn.Module):
             usage_loss_type: Type of usage loss ('mse', 'weighted_mse', 'hybrid')
             n_species: Number of species (for tracking)
             species_names: Optional list of species names for tracking
+            bottleneck_dim: Dimension after bottleneck fusion (default: embed_dim)
+                           Use higher values (256, 320, 640) to preserve more multi-scale info
         """
         super().__init__()
         
@@ -267,14 +270,16 @@ class EncoderModule(nn.Module):
             for _ in self.dilation_groups
         ])
         
-        # Bottleneck fusion
-        bottleneck_dim = embed_dim 
-        self.fusion_reduce = nn.Conv1d(num_scales * embed_dim, bottleneck_dim, kernel_size=1)
+        # Bottleneck fusion - configurable dimension
+        # Default: embed_dim (e.g., 128)
+        # Can increase to 256, 320, or 640 to preserve more multi-scale information for transformer
+        self.bottleneck_dim = bottleneck_dim if bottleneck_dim is not None else embed_dim
+        self.fusion_reduce = nn.Conv1d(num_scales * embed_dim, self.bottleneck_dim, kernel_size=1)
         self.fusion_activation = nn.ReLU(inplace=True)
-        self.fusion_expand = nn.Conv1d(bottleneck_dim, embed_dim, kernel_size=1)
+        self.fusion_expand = nn.Conv1d(self.bottleneck_dim, self.bottleneck_dim, kernel_size=1)
             
         # Output normalization
-        self.output_norm = nn.LayerNorm(embed_dim)
+        self.output_norm = nn.LayerNorm(self.bottleneck_dim)
         
         # Dropout layer
         self.dropout = nn.Dropout(dropout)
@@ -428,13 +433,14 @@ class SplicevoModel(nn.Module):
                  dropout: float = 0.3,
                  usage_loss_type: str = 'weighted_mse',
                  n_species: int = 1,
-                 species_names: Optional[list] = None
+                 species_names: Optional[list] = None,
+                 bottleneck_dim: Optional[int] = None
         ):
         """
         Initialize model with encoder, transformer, and output heads.
         
         Args:
-            embed_dim: Embedding dimension
+            embed_dim: Embedding dimension for encoder
             num_resblocks: Number of residual blocks in encoder
             dilation_strategy: Dilation strategy for residual blocks
             num_classes: Number of splice site classes
@@ -445,10 +451,13 @@ class SplicevoModel(nn.Module):
             usage_loss_type: Type of usage loss ('mse', 'weighted_mse', 'hybrid')
             n_species: Number of species (creates separate output heads per species)
             species_names: Optional list of species names
+            bottleneck_dim: Dimension after bottleneck fusion, passed to transformer (default: embed_dim)
+                           Higher values (256, 320, 640) preserve more multi-scale info for attention
         """
         super().__init__()
         
         self.embed_dim = embed_dim
+        self.bottleneck_dim = bottleneck_dim if bottleneck_dim is not None else embed_dim
         self.context_len = context_len
         self.usage_loss_type = usage_loss_type
         self.n_species = n_species
@@ -468,28 +477,29 @@ class SplicevoModel(nn.Module):
             dropout=dropout,
             usage_loss_type=usage_loss_type,
             n_species=n_species,
-            species_names=species_names
+            species_names=species_names,
+            bottleneck_dim=bottleneck_dim
         )
         
-        # Transformer module (multi-head self-attention)
-        self.transformer = TransformerModule(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
+        # Transformer module (multi-head self-attention) - uses bottleneck_dim
+        self.transformer = TransformerModule(embed_dim=self.bottleneck_dim, num_heads=num_heads, dropout=dropout)
         
-        # Output heads for splice site classification (one per species)
+        # Output heads for splice site classification (one per species) - use bottleneck_dim
         self.splice_classifiers = nn.ModuleDict({
-            name: nn.Conv1d(embed_dim, num_classes, kernel_size=1)
+            name: nn.Conv1d(self.bottleneck_dim, num_classes, kernel_size=1)
             for name in self.species_names
         })
         
-        # Output heads for usage prediction (SSE) (one per species)
+        # Output heads for usage prediction (one per species) - use bottleneck_dim
         self.usage_predictors = nn.ModuleDict({
-            name: nn.Conv1d(embed_dim, n_conditions, kernel_size=1)
+            name: nn.Conv1d(self.bottleneck_dim, n_conditions, kernel_size=1)
             for name in self.species_names
         })
         
         # Hybrid loss: add classification head for SSE (one per species)
         if usage_loss_type == 'hybrid':
             self.usage_classifiers = nn.ModuleDict({
-                name: nn.Conv1d(embed_dim, n_conditions * 3, kernel_size=1)
+                name: nn.Conv1d(self.bottleneck_dim, n_conditions * 3, kernel_size=1)
                 for name in self.species_names
             })
         

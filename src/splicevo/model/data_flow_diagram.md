@@ -157,134 +157,140 @@ Description: All multi-scale features stacked together
 ```
 
 ### After Bottleneck Fusion
-**fusion_reduce (1x1 conv: 640 → 128)**
+
+**fusion_reduce (1x1 conv: 640 → bottleneck_dim)**
 ```
-Shape: (16, 128, 1900)
-Memory reduction: 7.8 MB → 1.6 MB (5x compression)
-Description: Compress multi-scale information
+Shape: (16, bottleneck_dim, 1900)
+Default bottleneck_dim: 128
+Alternatives: 256 (balanced), 320 (half), 640 (no compression)
+Memory reduction: 7.8 MB → 1.6 MB (5x compression at 128 dims)
+Description: Compress multi-scale information into bottleneck
 ```
 
 **fusion_activation (ReLU)**
 ```
-Shape: (16, 128, 1900)
-Description: Non-linearity
+Shape: (16, bottleneck_dim, 1900)
+Description: Non-linear transformation in compressed space
 ```
 
-**fusion_expand (1x1 conv: 128 → 128)**
+**fusion_expand (1x1 conv: bottleneck_dim → bottleneck_dim)**
 ```
-Shape: (16, 128, 1900)
-Description: Final fused multi-scale features
+Shape: (16, bottleneck_dim, 1900)
+Description: Learn flexible transformation of compressed features
+           This second convolution + ReLU creates a two-layer MLP
+           that can learn non-linear combinations of multi-scale features
 ```
 
 ### After Transpose
 ```
-Shape: (16, 1900, 128)
+Shape: (16, 1900, bottleneck_dim)
 Description: Back to sequence-first format for layer norm
-Memory: ~1.6 MB
+Memory: ~1.6 MB (for bottleneck_dim=128)
 ```
 
 ### After LayerNorm
 ```
-Shape: (16, 1900, 128)
+Shape: (16, 1900, bottleneck_dim)
 Description: Normalized across embedding dimension
 ```
 
 ### After Dropout (p=0.5)
 ```
-Shape: (16, 1900, 128)
+Shape: (16, 1900, bottleneck_dim)
 Description: Regularization applied (50% of activations zeroed during training)
-Name: fused_skip
+Name: fused_skip (full sequence, ready for transformer)
 ```
 
 ---
 
-## 6. Central Region Extraction (Before Transformer)
-
-### Extract Central Region from Fused Features
-```
-Input:  fused_skip = (16, 1900, 128)
-        [:, 450:-450, :]
-Output: central_features = (16, 1000, 128)
-Description: Extract only the middle 1000 positions (prediction region)
-Memory: ~0.8 MB (16 * 1000 * 128 * 4 bytes)
-Why here: Transformer attention is O(seq_len²), so applying to central region
-          saves ~3.6x memory: (1000² vs 1900²)
-Context removed: 450 positions on each side (used as context in encoder/attention)
-```
-
----
-
-## 7. Multi-Head Self-Attention Layer
+## 6. Multi-Head Self-Attention Layer (Transformer on Full Sequence)
 
 ### Input to Attention
 ```
-Shape: (16, 1000, 128)
-Description: Central region features (sequence-first format)
-Name: central_features
-Memory: ~0.8 MB (16 * 1000 * 128 * 4 bytes)
+Shape: (16, 1900, 128)
+Description: Full sequence features including context (sequence-first format)
+Name: full_features (from encoder output)
+Memory: ~1.6 MB (16 * 1900 * 128 * 4 bytes)
 ```
 
 ### Multi-Head Self-Attention
 ```
 Query, Key, Value projections:
-- Input: (16, 1000, 128)
-- Output: (16, 1000, 128) per projection
+- Input: (16, 1900, 128)
+- Output: (16, 1900, 128) per projection
 - num_heads = 8
 - head_dim = 128 / 8 = 16
 
 Attention computation per head:
-- Q: (16, 1000, 16) after split into 8 heads
-- K: (16, 1000, 16) after split into 8 heads
-- V: (16, 1000, 16) after split into 8 heads
-- Attention scores: (16, 1000, 1000) per head [central_len x central_len]
-  * This is ~3.6x smaller than (1900 x 1900) full sequence attention!
+- Q: (16, 1900, 16) after split into 8 heads
+- K: (16, 1900, 16) after split into 8 heads
+- V: (16, 1900, 16) after split into 8 heads
+- Attention scores: (16, 1900, 1900) per head [seq_len x seq_len]
+  * Full sequence attention captures long-range dependencies across entire input
+  * Includes context regions in attention mechanism
 - Attention weights: softmax applied across sequence dimension
-- Attention output per head: (16, 1000, 16)
-Memory for attention: ~51 MB per head for (16, 1000, 1000) float32
-Total for 8 heads: ~51 MB (shared computation)
-vs. Full sequence would be: ~183 MB (3.6x larger!)
+- Attention output per head: (16, 1900, 16)
+Memory for attention: ~183 MB for (16, 1900, 1900) float32
+Total for 8 heads: ~183 MB (shared computation)
 ```
 
 ### After Head Concatenation
 ```
-Shape: (16, 1000, 128)
+Shape: (16, 1900, 128)
 Description: Concatenated outputs from 8 attention heads
-Memory: ~0.8 MB (16 * 1000 * 128 * 4 bytes)
+Memory: ~1.6 MB (16 * 1900 * 128 * 4 bytes)
 ```
 
 ### After Output Projection (1x1 linear)
 ```
-Shape: (16, 1000, 128)
+Shape: (16, 1900, 128)
 Description: Final attention output
 ```
 
 ### After Residual Connection (add input)
 ```
-Shape: (16, 1000, 128)
-Description: central_features + attention_output
+Shape: (16, 1900, 128)
+Description: full_features + attention_output
 Preserves original features while integrating attention-weighted information
-Memory: ~0.8 MB
+Memory: ~1.6 MB
 ```
 
 ### After Layer Normalization
 ```
-Shape: (16, 1000, 128)
-Description: Normalized attention output
+Shape: (16, 1900, 128)
+Description: Normalized attention output across full sequence
 Name: transformer_output
 ```
 
 ### After Dropout (p=0.5)
 ```
-Shape: (16, 1000, 128)
+Shape: (16, 1900, 128)
 Description: Regularization applied (50% of activations zeroed during training)
-Name: transformer_output (final)
+Name: transformer_output (full sequence)
+```
+
+---
+
+## 7. Central Region Extraction (After Transformer)
+
+### Extract Central Region from Transformer Output
+```
+Input:  transformer_output = (16, 1900, 128)
+        [:, 450:-450, :]
+Output: central_features = (16, 1000, 128)
+Description: Extract only the middle 1000 positions (prediction region)
+Memory: ~0.8 MB (16 * 1000 * 128 * 4 bytes)
+Why now: Transformer has already incorporated context information via attention
+         across the full sequence. Now extract only central region for predictions.
+Context used: 450 positions on each side were included in attention computation,
+              allowing central positions to attend to full sequence context.
 ```
 
 ---
 
 ## 8. Output Heads (Applied to Central Region)
 
-### Transpose central_skip for Conv1d
+### Transpose central_features for Conv1d
 ```
 Shape: (16, 128, 1000)
 Description: Channels-first for output convolutions
@@ -366,8 +372,9 @@ output = {
     'splice_logits': (16, 1000, 3),        # Classification logits
     'usage_predictions': (16, 1000, 5),    # Regression: SSE in [0,1]
     # Optional (if return_features=True):
-    'encoder_features': (16, 1900, 128),   # Full sequence features
-    'central_features': (16, 1000, 128),   # Central region features
+    'encoder_features': (16, 1900, 128),   # Full sequence features from encoder
+    'central_features': (16, 1000, 128),   # Central region from transformer output
+    'transformer_features': (16, 1900, 128), # Full transformer output
     'skip_features': (16, 1900, 128)       # Fused multi-scale skip (full)
 }
 
@@ -377,8 +384,9 @@ output = {
     'usage_predictions': (16, 1000, 5),         # Regression: SSE in [0,1]
     'usage_class_logits': (16, 1000, 5, 3),     # Classification: [is_zero, is_one, is_middle]
     # Optional (if return_features=True):
-    'encoder_features': (16, 1900, 128),        # Full sequence features
-    'central_features': (16, 1000, 128),        # Central region features
+    'encoder_features': (16, 1900, 128),        # Full sequence features from encoder
+    'central_features': (16, 1000, 128),        # Central region from transformer output
+    'transformer_features': (16, 1900, 128),    # Full transformer output
     'skip_features': (16, 1900, 128)            # Fused multi-scale skip (full)
 }
 ```

@@ -11,8 +11,8 @@ data:
   path: /home/elek/sds/sd17d003/Anamaria/splicevo/data/splits_small/mouse_rat_human/
   use_mmap: true
   train_split: 0.8
-  normalization_method: none   # SSE needs no normalization (already [0,1])
-  usage_types: ['sse']  # Only SSE for usage training
+  normalization_method: none    # SSE needs no normalization (already [0,1])
+  usage_types: ['sse']          # Only SSE for usage training
 
 # Output configuration
 output:
@@ -25,9 +25,10 @@ model:
   num_resblocks: 16
   dilation_strategy: alternating
   alternate: 4 
-  num_heads: 8
-  num_classes: 3
-  context_len: 450  # this must match context_size in data creation (verify in metadata.json)
+  bottleneck_dim: 128   # Try 128 (default), 256 (balanced), 320, or 640 (full multi-scale)
+  num_heads: 8          # Transformer heads
+  num_classes: 3        # Splice donor, acceptor, not a splice site
+  context_len: 450      # This must match context_size in data creation (verify in metadata.json)
   dropout: 0.4
 
 # Training configuration
