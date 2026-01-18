@@ -262,55 +262,64 @@ def load_data(config: dict, log_fn=print):
 
 
 def create_datasets(sequences, labels, usage_sse, species_ids, config: dict, log_fn=print):
-    """Create train/val datasets."""
+    """Create train/val datasets with index-based streaming (no data copying)."""
     split_ratio = config['data'].get('train_split', 0.8)
     n_samples = len(sequences)
     n_train = int(split_ratio * n_samples)
     
     log_fn(f"\nSplitting data: {n_train} train, {n_samples - n_train} val")
+    log_fn("  Using index-based streaming (no data copied to RAM)")
     
-    train_sse = usage_sse[:n_train] if usage_sse is not None else None
-    val_sse = usage_sse[n_train:] if usage_sse is not None else None
-    train_species = species_ids[:n_train] if species_ids is not None else None
-    val_species = species_ids[n_train:] if species_ids is not None else None
-
+    # Create index arrays instead of slicing data (keeps memmap intact)
+    train_indices = np.arange(0, n_train)
+    val_indices = np.arange(n_train, n_samples)
+    
+    # Pass full arrays + indices to dataset (SpliceDataset will use indices for access)
     train_dataset = SpliceDataset(
-        sequences[:n_train],
-        labels[:n_train],
-        train_sse,
-        train_species
+        sequences,
+        labels,
+        usage_sse,
+        species_ids,
+        indices=train_indices
     )
     
     val_dataset = SpliceDataset(
-        sequences[n_train:],
-        labels[n_train:],
-        val_sse,
-        val_species
+        sequences,
+        labels,
+        usage_sse,
+        species_ids,
+        indices=val_indices
     )
     
     return train_dataset, val_dataset
 
 
-def compute_class_weights(labels, config: dict, log_fn=print):
-    """Compute class weights for imbalanced data."""
+def compute_class_weights(labels, config: dict, n_train: int, log_fn=print):
+    """Compute class weights by sampling (avoid loading full dataset)."""
     if not config['training'].get('use_class_weights', True):
         return None
     
-    log_fn("\nComputing class weights...")
-    train_labels_flat = labels.flatten()
-    unique_classes, class_counts = np.unique(train_labels_flat, return_counts=True)
+    log_fn("\nComputing class weights from sample...")
     
-    log_fn("Class distribution:")
+    # Sample 10% of training data to estimate class distribution (avoids loading everything)
+    sample_size = min(50000, n_train // 10)
+    sample_indices = np.random.choice(n_train, size=sample_size, replace=False)
+    
+    # Load only sampled labels
+    sampled_labels = labels[sample_indices].flatten()
+    unique_classes, class_counts = np.unique(sampled_labels, return_counts=True)
+    
+    log_fn("Class distribution (from sample):")
     for cls, count in zip(unique_classes, class_counts):
-        log_fn(f"  Class {cls}: {count:,} ({100*count/len(train_labels_flat):.2f}%)")
+        log_fn(f"  Class {cls}: {count:,} ({100*count/len(sampled_labels):.2f}%)")
     
     # Inverse frequency weights
-    total_samples = len(train_labels_flat)
+    total_samples = len(sampled_labels)
     class_weights = total_samples / (len(unique_classes) * class_counts)
     class_weights = class_weights / class_weights.mean()
     class_weights = torch.FloatTensor(class_weights)
     
-    log_fn(f"Class weights: {class_weights.tolist()}")
+    log_fn(f"Class weights (estimated): {class_weights.tolist()}")
     
     return class_weights
 
@@ -537,9 +546,10 @@ def main():
     )
     dataset_time = time.time() - dataset_start
     
-    # Compute class weights
-    train_labels = labels[:len(train_dataset)]
-    class_weights = compute_class_weights(train_labels, config, log_print)
+    # Compute class weights (using sampling to avoid loading all data)
+    split_ratio = config['data'].get('train_split', 0.8)
+    n_train = int(split_ratio * len(sequences))
+    class_weights = compute_class_weights(labels, config, n_train, log_print)
     
     # Create model (pass usage_sse to determine n_conditions)
     model_start = time.time()
