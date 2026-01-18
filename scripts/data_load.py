@@ -276,9 +276,6 @@ if not dry_run:
             # Check if any values are not NaN
             if np.all(np.isnan(arr)):
                 log_print(f"  Warning: All values in usage array '{key}' are NaN")
-            else:
-                # Add info about loaded usage data
-                usage_info = loader.get_usage_array_info(usage_arrays = usage_arrays)
         
     step5_time = time.time() - step5_start
     

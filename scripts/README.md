@@ -61,7 +61,7 @@ Data loading for `--window_size 5000 --context_size 450 --n_cpus 4`:
 |--------------|--------|--------------------|--------------------------|------------|-----------------|------------|---------|
 | mouse_GRCm38 | small  | 15, 16, 17, 18, 19 | Brain, Cerebellum, Heart |1, 5, 10    | 00:14:59        | 13.9 GB    | 17,963  |
 | human_GRCh37 | full   | all                | all                      |all         | 21:32:20        | 557 GB     | 127,990 |
-| mouse_GRCm38 | full   | all                | all                      |all         | >24:00:00       | >586 GB    | 104,151 |
+| mouse_GRCm38 | full   | all                | all                      |all         | 24:30:00        | 671 GB     | 104,151 |
 | rat_Rnor_5.0 | full   | all                | all                      |all         | 18:06:28        | 586 GB     | 101,460 |
 
 
