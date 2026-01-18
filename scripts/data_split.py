@@ -505,15 +505,15 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
             train_species_ids_mmap = np.memmap(os.path.join(train_dir, 'species_ids.mmap'), 
                                               dtype=np.int32, mode='w+', 
                                               shape=(train_count,))
-            if usage_alpha is not None:
+            if usage_alpha_mmap is not None:
                 train_usage_alpha_mmap = np.memmap(os.path.join(train_dir, 'usage_alpha.mmap'), 
                                                   dtype=alpha_dtype, mode='w+', 
                                                   shape=(train_count, label_window_size, n_usage_conditions))
-            if usage_beta is not None:
+            if usage_beta_mmap is not None:
                 train_usage_beta_mmap = np.memmap(os.path.join(train_dir, 'usage_beta.mmap'), 
                                                  dtype=beta_dtype, mode='w+', 
                                                  shape=(train_count, label_window_size, n_usage_conditions))
-            if usage_sse is not None:
+            if usage_sse_mmap is not None:
                 train_usage_sse_mmap = np.memmap(os.path.join(train_dir, 'usage_sse.mmap'), 
                                                 dtype=sse_dtype, mode='w+', 
                                                 shape=(train_count, label_window_size, n_usage_conditions))
@@ -579,15 +579,15 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
             test_species_ids_mmap = np.memmap(os.path.join(test_dir, 'species_ids.mmap'), 
                                              dtype=np.int32, mode='w+', 
                                              shape=(test_count,))
-            if usage_alpha is not None:
+            if usage_alpha_mmap is not None:
                 test_usage_alpha_mmap = np.memmap(os.path.join(test_dir, 'usage_alpha.mmap'), 
                                                  dtype=alpha_dtype, mode='w+', 
                                                  shape=(test_count, label_window_size, n_usage_conditions))
-            if usage_beta is not None:
+            if usage_beta_mmap is not None:
                 test_usage_beta_mmap = np.memmap(os.path.join(test_dir, 'usage_beta.mmap'), 
                                                 dtype=beta_dtype, mode='w+', 
                                                 shape=(test_count, label_window_size, n_usage_conditions))
-            if usage_sse is not None:
+            if usage_sse_mmap is not None:
                 test_usage_sse_mmap = np.memmap(os.path.join(test_dir, 'usage_sse.mmap'), 
                                                dtype=sse_dtype, mode='w+', 
                                                shape=(test_count, label_window_size, n_usage_conditions))

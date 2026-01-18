@@ -1,12 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=train_mouse_rat_human
-#SBATCH --partition=gpu-single
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
+#SBATCH --partition=gpu-single 
+#SBATCH --nodes=1 
+#SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:a100:1
-#SBATCH --constraint=gpu80
-#SBATCH --mem=128G
+#SBATCH --gres=gpu:A40:1
+#SBATCH --mem=40gb
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -15,9 +14,15 @@
 # - Attention memory for batch=64, seq_len=5900: ~8.9 GB
 # - With gradient accumulation (steps=4), effective batch=16: ~2.2 GB attention
 # - Plus model params, gradients, optimizer states: ~10-15 GB total
-# - A100 80GB recommended for safety, A40 40GB may work with gradient accumulation
-# - For A40 40GB, use: --gres=gpu:a40:1 (remove --constraint=gpu80)
-# - For H200 141GB, use: --gres=gpu:h200:1 --constraint=gpu141
+# 
+# Helix GPU options (see https://wiki.bwhpc.de/e/Helix/Hardware):
+# - A40 (48 GB):   --gres=gpu:A40:1 (no fp64 constraint)
+# - A100 (40 GB):  --gres=gpu:A100:1 --constraint=fp64
+# - A100 (80 GB):  --gres=gpu:A100:1 --constraint=fp64 (will get 80GB if available)
+# - H200 (141 GB): --gres=gpu:H200:1 --constraint=fp64
+# 
+# Alternative: Request by memory instead of type:
+# --gres=gpu:1,gpumem_per_gpu:80GB --constraint=fp64
 
 set -e
 
@@ -41,8 +46,14 @@ python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f
 # Exit if CUDA is not available
 python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() else 1)" || {
     echo "ERROR: CUDA is not available in PyTorch!"
-    echo "Please reinstall PyTorch with CUDA support:"
-    echo "  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121"
+    echo ""
+    echo "System has CUDA 13.0, but PyTorch was installed without CUDA support."
+    echo "Reinstall PyTorch with CUDA 12.4 support (compatible with CUDA 13.0):"
+    echo ""
+    echo "  conda activate splicevo"
+    echo "  pip uninstall torch torchvision torchaudio -y"
+    echo "  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124"
+    echo ""
     exit 1
 }
 

@@ -1,8 +1,6 @@
 # SplicEvo
 
-## Memory-Efficient Data Loading and Splitting Approach
-
-The refactored approach processes one genome at a time to minimize memory usage and enables parallel/distributed processing of genomes.
+This README provides instructions for using the SplicEvo scripts for data loading, splitting, model training, prediction, and evaluation.
 
 Make sure to have the following variables set:
 
@@ -11,6 +9,10 @@ Make sure to have the following variables set:
 export SPLICEVO_DIR=/home/elek/projects/splicevo
 ```
 
+## Memory-Efficient Data Loading and Splitting Approach
+
+The refactored approach processes one genome at a time to minimize memory usage and enables parallel/distributed processing of genomes
+
 ### Step 1: data_load.py - Process Individual Genomes
 
 Processes **one genome at a time** and saves its data in a dedicated directory.
@@ -18,13 +20,13 @@ Processes **one genome at a time** and saves its data in a dedicated directory.
 **Usage:**
 ```bash
 python ${SPLICEVO_DIR}/scripts/data_load.py \
-    --config configs/genomes.json \
-    --genome_id human_GRCh37 \
-    --output_dir data/processed \
-    --window_size 1000 \
-    --context_size 450 \
-    --alpha_threshold 5 \
-    --n_cpus 8 &
+  --config configs/genomes.json \
+  --genome_id human_GRCh37 \
+  --output_dir data/processed \
+  --window_size 1000 \
+  --context_size 450 \
+  --alpha_threshold 5 \
+  --n_cpus 8 &
 ```
 
 **What it does:**
@@ -41,28 +43,26 @@ python ${SPLICEVO_DIR}/scripts/data_load.py \
 **Run for each genome:**
 ```bash
 for genome in human_GRCh37 mouse_GRCm38 rat_Rnor_5.0; do
-    python ${SPLICEVO_DIR}/scripts/data_load.py \
-        --config configs/genomes.json \
-        --genome_id $genome \
-        --output_dir data/processed \
-        --window_size 1000 \
-        --context_size 450 \
-        --quiet \
-        --n_cpus 8 &
+  python ${SPLICEVO_DIR}/scripts/data_load.py \
+    --config configs/genomes.json \
+    --genome_id $genome \
+    --output_dir data/processed \
+    --window_size 1000 \
+    --context_size 450 \
+    --quiet \
+    --n_cpus 8 &
 done
 ```
 
-Benchmarking:
-| Genome       | Subset | Chromosomes        | Tissues                  | Timepoints | Time (hh:mm:ss) | Max memory |
-|--------------|--------|--------------------|--------------------------|------------|-----------------|------------|
-| mouse_GRCm38 | small  | 15, 16, 17, 18, 19 | Brain, Cerebellum, Heart |1, 5, 10    | 00:14:50        | 16.4 GB    |
-| mouse_GRCm38 | full   | all                | all                      |all         | ~00:24:00       | > 512 GB   |
+**Benchmarking:**
+Data loading for `--window_size 5000 --context_size 450 --n_cpus 4`:
 
-Benchmarking better implementation:
-| Genome       | Subset | Chromosomes        | Tissues                  | Timepoints | Time (hh:mm:ss) | Max memory |
-|--------------|--------|--------------------|--------------------------|------------|-----------------|------------|
-| mouse_GRCm38 | small  | 15, 16, 17, 18, 19 | Brain, Cerebellum, Heart |1, 5, 10    | 00:14:52        | 14.7 GB  |
-| mouse_GRCm38 | full   | all                | all                      |all         |                 |            |
+| Genome       | Subset | Chromosomes        | Tissues                  | Timepoints | Time (hh:mm:ss) | Max memory | Windows |
+|--------------|--------|--------------------|--------------------------|------------|-----------------|------------|---------|
+| mouse_GRCm38 | small  | 15, 16, 17, 18, 19 | Brain, Cerebellum, Heart |1, 5, 10    | 00:14:59        | 13.9 GB    | 17,963  |
+| human_GRCh37 | full   | all                | all                      |all         | 21:32:20        | 557 GB     | 127,990 |
+| mouse_GRCm38 | full   | all                | all                      |all         | >24:00:00       | >586 GB    | 104,151 |
+| rat_Rnor_5.0 | full   | all                | all                      |all         | 18:06:28        | 586 GB     | 101,460 |
 
 
 ### Step 2: data_split.py - Combine into Train/Test Sets
@@ -74,12 +74,12 @@ Reads individual genome directories and combines them into train/test splits bas
 SPLICEVO_DIR=/home/elek/projects/splicevo
 ORTHOLOGY_FILE=/home/elek/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
 python ${SPLICEVO_DIR}/scripts/data_split.py \
-    --input_dir data/processed \
-    --output_dir data/splits/run1 \
-    --orthology_file ${ORTHOLOGY_FILE} \
-    --pov_genome human_GRCh37 \
-    --test_chromosomes 1 3 5 \
-    --quiet &
+  --input_dir data/processed \
+  --output_dir data/splits/run1 \
+  --orthology_file ${ORTHOLOGY_FILE} \
+  --pov_genome human_GRCh37 \
+  --test_chromosomes 1 3 5 \
+  --quiet &
 ```
 
 **What it does:**
@@ -95,13 +95,21 @@ python ${SPLICEVO_DIR}/scripts/data_split.py \
    - `output_dir/test/` - test data
    - Each with sequences.mmap, labels.mmap, usage_*.mmap, metadata.csv
 
-## Key Improvements
+**Key features:**
 
 1. **Memory Efficiency**: Only one genome loaded at a time during data_load
 2. **Deduplication**: Same sequence saved once per genome, linked to all overlapping genes
 3. **Parallel Processing**: Can run data_load.py for different genomes in parallel
 4. **Incremental**: Can process additional genomes later without reprocessing existing ones
 5. **Flexible Splitting**: Can create multiple train/test splits from the same loaded data
+
+**Benchmarking:**
+
+Data splitting for data loaded with `--window_size 5000 --context_size 450`, and using `--pov_genome mouse_GRCm38 --test_chromosomes 2 4 `:
+
+| Genomes                                | Time (hh:mm:ss) | Max memory | Total Windows |
+|----------------------------------------|-----------------|------------|----------------|
+| mouse_GRCm38 rat_Rnor_5.0 human_GRCh37 |
 
 ## Directory Structure
 
@@ -131,4 +139,73 @@ data/
       test/
         ...
       summary.json
+```
+## Training SplicEvo Model
+
+```bash
+TRAINING_CONFIG=configs/training_transformer.yaml
+DATA_TRAIN_DIR=data/splits/run1/train
+MODEL_DIR=models/splicevo_run1
+
+python ${SPLICEVO_DIR}/scripts/splicevo_train.py \
+  --config ${TRAINING_CONFIG} \
+  --data ${DATA_TRAIN_DIR} \
+  --checkpoint-dir ${MODEL_DIR} \
+  --quiet
+
+```
+
+## Predictions Using SplicEvo model
+
+### Generate Predictions on Test Set
+
+```bash
+DATA_TEST_DIR=data/splits/run1/test
+PREDICTIONS_DIR=predictions/splicevo_run1
+
+python ${SPLICEVO_DIR}/scripts/splicevo_predict.py \
+  --checkpoint ${MODEL_DIR}/best_model.pt \
+  --test-data ${DATA_TEST_DIR} \
+  --output ${PREDICTIONS_DIR} \
+  --use-memmap --save-memmap \
+  --batch-size 128
+```
+
+### Evaluation of Model Performance on Test Set
+
+```bash
+python ${SPLICEVO_DIR}/scripts/splicevo_evaluate.py \
+  --test-data ${DATA_TEST_DIR} \
+  --predictions ${PREDICTIONS_DIR} \
+  --output ${PREDICTIONS_DIR}/evaluation/
+```
+
+## Attributions
+
+```bash
+python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
+  --model ${MODEL_PATH} \
+  --data ${DATA_TEST_DIR} \
+  --predictions ${PREDICTIONS_DIR} \
+  --window ${WINDOW} \
+  --output ${OUTPUT_DIR}
+```
+
+By default, this will calculate both splice site attributions and usage attributions across all conditioins, for all sequences in the test set. This may just be too computationally intensive and take a long time.
+
+To specify a subset of sequences to process, set the `--sequences` parameter to either a range (e.g. `0:1000`) or a comma-separated list  (e.g. `0,5,10,100`) of sequence indices in the test set.
+
+To calculate usage attributions shared across all conditions, set the `--share-attributions-across-conditions` flag.
+
+To skip either splice site attributions or usage attributions calculation, set the `--skip-splice-attributions` or `--skip-usage-attributions` flags respectively.
+
+```bash
+python ${SPLICEVO_DIR}/scripts/splicevo_attributions.py \
+  --model ${MODEL_PATH} \
+  --data ${DATA_TEST_DIR} \
+  --predictions ${PREDICTIONS_DIR} \
+  --sequences "1:1000" \
+  --window ${WINDOW} \
+  --output ${OUTPUT_DIR} \
+  --share-attributions-across-conditions
 ```
