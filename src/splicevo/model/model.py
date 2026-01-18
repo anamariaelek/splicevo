@@ -515,15 +515,15 @@ class SplicevoModel(nn.Module):
         encoder_output = self.encoder(sequences, return_features=return_features)
         full_features = encoder_output['features']  # (batch_size, seq_len, embed_dim)
         
-        # Extract central region first (much more memory efficient for attention)
-        if self.context_len > 0:
-            central_features = full_features[:, self.context_len:-self.context_len, :]  # (batch_size, central_len, embed_dim)
-        else:
-            central_features = full_features
+        # Transformer: Multi-head self-attention on full sequence
+        # Applies attention to entire sequence including context regions
+        transformer_output = self.transformer(full_features)  # (batch_size, seq_len, embed_dim)
         
-        # Transformer: Multi-head self-attention on central region only
-        # This saves massive memory since attention is O(seq_len^2), so (1000^2) instead of (1900^2)
-        transformer_output = self.transformer(central_features)  # (batch_size, central_len, embed_dim)
+        # Extract central region from transformer output
+        if self.context_len > 0:
+            central_features = transformer_output[:, self.context_len:-self.context_len, :]  # (batch_size, central_len, embed_dim)
+        else:
+            central_features = transformer_output
         
         # Get species ID for output head selection
         if species_ids is None:
@@ -536,12 +536,12 @@ class SplicevoModel(nn.Module):
         
         species_name = self.species_names[species_id]
         
-        # Transpose transformer output for Conv1d: (batch_size, embed_dim, central_len)
-        transformer_conv = transformer_output.transpose(1, 2)
+        # Transpose central features for Conv1d: (batch_size, embed_dim, central_len)
+        central_conv = central_features.transpose(1, 2)
         
         # Apply output heads to central region
-        splice_logits = self.splice_classifiers[species_name](transformer_conv)
-        usage_predictions = self.usage_predictors[species_name](transformer_conv)
+        splice_logits = self.splice_classifiers[species_name](central_conv)
+        usage_predictions = self.usage_predictors[species_name](central_conv)
         
         # Transpose back: (batch_size, central_len, num_classes/n_conditions)
         splice_logits = splice_logits.transpose(1, 2)
@@ -554,7 +554,7 @@ class SplicevoModel(nn.Module):
         
         # Hybrid loss: classification head for SSE
         if self.usage_loss_type == 'hybrid':
-            usage_class_logits = self.usage_classifiers[species_name](transformer_conv)
+            usage_class_logits = self.usage_classifiers[species_name](central_conv)
             usage_class_logits = usage_class_logits.transpose(1, 2)
             batch_size, central_len, _ = usage_class_logits.shape
             usage_class_logits = usage_class_logits.view(batch_size, central_len, self.n_conditions, 3)

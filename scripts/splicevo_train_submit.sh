@@ -4,23 +4,47 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:a100:1
+#SBATCH --constraint=gpu80
 #SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
+#
+# Memory requirements for Option A (Transformer on full sequence):
+# - Attention memory for batch=64, seq_len=5900: ~8.9 GB
+# - With gradient accumulation (steps=4), effective batch=16: ~2.2 GB attention
+# - Plus model params, gradients, optimizer states: ~10-15 GB total
+# - A100 80GB recommended for safety, A40 40GB may work with gradient accumulation
+# - For A40 40GB, use: --gres=gpu:a40:1 (remove --constraint=gpu80)
+# - For H200 141GB, use: --gres=gpu:h200:1 --constraint=gpu141
 
 set -e
 
 # Initialize conda for bash shell
 source ${HOME}/miniforge3/etc/profile.d/conda.sh
 
+# Load CUDA module BEFORE activating conda environment
+module load devel/cuda
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+
 # Activate conda environment
 conda activate splicevo
 
-# Cuda
-module load devel/cuda
-export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+# Verify CUDA setup
+echo "CUDA setup verification:"
+echo "  CUDA_HOME: ${CUDA_HOME}"
+echo "  LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
+nvidia-smi
+python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}')"
+
+# Exit if CUDA is not available
+python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() else 1)" || {
+    echo "ERROR: CUDA is not available in PyTorch!"
+    echo "Please reinstall PyTorch with CUDA support:"
+    echo "  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121"
+    exit 1
+}
 
 # Splicevo directory
 SPLICEVO_DIR=${HOME}/projects/splicevo/
