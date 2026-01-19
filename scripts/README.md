@@ -157,7 +157,15 @@ python ${SPLICEVO_DIR}/scripts/splicevo_train.py \
 
 ```
 
-Run `splicevo_train_submit.sh` to submit the training script to HPC cluster. The resources and training config there are optimized for training the full model (mouse, rat and human genomes) on Helix HPC. Alternativelly, `splicevo_train_submit_small.sh` is submission script with resources and configs optimized for training a small SplicEvo model on subset of data.
+To monitor training progress, use:
+
+```bash
+tensorboard --logdir=models/splicevo_run1/tensorboard/
+``` 
+
+**Note on HPC Submission:**
+Run `splicevo_train_submit.sh` to submit the training script to HPC cluster. The resources and training config there are optimized for training the full model (mouse, rat and human genomes) on Helix HPC. Alternativelly, `splicevo_train_submit_small.sh` is submission script with resources and configs 
+optimized for training a small SplicEvo model on subset of data.
 
 ## Predictions Using SplicEvo model
 

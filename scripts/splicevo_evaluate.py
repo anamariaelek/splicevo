@@ -625,10 +625,12 @@ def main():
     try:
         # Load test data
         log_fn("Loading test data...")
-        test_seq, test_labels, test_alpha, test_beta, test_sse, test_species = load_processed_data(str(test_data_dir))
+        test_seq, test_labels, test_alpha, test_beta, test_sse, test_species, test_condition_mask = load_processed_data(str(test_data_dir))
         log_fn(f"  Sequences shape: {test_seq.shape}")
         log_fn(f"  Labels shape: {test_labels.shape}")
         log_fn(f"  SSE shape: {test_sse.shape}")
+        if test_condition_mask is not None:
+            log_fn(f"  Condition mask shape: {test_condition_mask.shape}")
         
         # Load metadata
         meta_fn = test_data_dir / "metadata.json"

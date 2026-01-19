@@ -2,11 +2,13 @@
 #
 # This script evaluates predictions on test data from pre-trained Splicevo models.
 #
-#SBATCH --job-name=evaluate_mouse_rat_human
-#SBATCH --partition=gpu-single
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH --time=02:00:00
+#SBATCH --job-name=evaluate_small
+#SBATCH --partition=cpu-single
+#SBATCH --nodes=1 
+#SBATCH --ntasks=1 
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16gb
+#SBATCH --time=01:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 
@@ -18,18 +20,17 @@ source ${HOME}/miniforge3/etc/profile.d/conda.sh
 # Activate conda environment
 conda activate splicevo
 
-# Cuda
-module load devel/cuda
+# Set number of threads
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
 # Splicevo directory
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
-SUBSET="full"
+SUBSET="small"
 SPECIES="mouse_rat_human"
-KB="1"
-MODEL=${SUBSET}_${SPECIES}_${KB}kb
+KB="5"
+MODEL=${SUBSET}_${SPECIES}_${KB}kb_A40
 
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/test/
 PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/transformer/${MODEL}/
