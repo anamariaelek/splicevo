@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=split_mouse_rat
+#SBATCH --job-name=split_mouse_rat_human
 #SBATCH --partition=cpu-single
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=128G
-#SBATCH --time=12:00:00
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=10gb
+#SBATCH --time=24:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 
@@ -11,12 +11,6 @@
 # - 32G for small datasets (e.g., a few chromosomes in a single genome, a few usage conditions)
 # - 64G for medium datasets (e.g., multiple chromosomes from multiple genomes, a few usage conditions)
 # - 128G for large datasets (e.g., whole genomes of multiple species, many usage conditions)
-#
-# Optimizations applied:
-# - Batch processing (1000 sequences at a time) instead of loading entire genome
-# - Direct memmap-to-memmap copying without intermediate arrays
-# - Metadata cache freed after step 3
-# - Memory logging after each step
 
 set -e
 
@@ -34,9 +28,9 @@ ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
 
 # Split the data
 SUBSET="full"
-SPECIES="mouse_rat"
-INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_${SUBSET}/
-OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/
+SPECIES="mouse_rat_human"
+INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_${SUBSET}_5kb/
+OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_5kb/${SPECIES}/
 
 python ${SPLICEVO_DIR}/scripts/data_split.py \
     --input_dir ${INPUT_DIR} --genome_ids mouse_GRCm38 rat_Rnor_5.0 human_GRCh37 \

@@ -3,24 +3,24 @@
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:A40:1
-#SBATCH --mem=48gb
-#SBATCH --time=12:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:A100:1
+#SBATCH --mem=80gb
+#SBATCH --time=24:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 #
-# Memory requirements with streaming (index-based memmap access):
-# - Memmap metadata only (no full array loading): ~1-2 GB
-# - DataLoader workers (num_workers * batch_size * sample_size): ~20-30 GB
-# - Model + optimizer states: ~10-15 GB
-# - GPU transfers and buffers: ~10-15 GB
-# Total: ~50-65 GB
+# Optimized for A100 80GB with full dataset (257k samples, 99 conditions)
+# Memory requirements:
+# - GPU (batch=8, seq=5900, 99 conditions, fp16): ~20-25 GB
+# - RAM (6 workers * 2 prefetch * batch_8): ~15-20 GB
+# - Model + optimizer states: ~10-15 GB GPU
+# Total: ~45-55 GB GPU, ~30-40 GB RAM
 # 
-# Helix GPU options (see https://wiki.bwhpc.de/e/Helix/Hardware):
+# Helix GPU options:
 # - A40 (48 GB):   --gres=gpu:A40:1
 # - A100 (40 GB):  --gres=gpu:A100:1
-# - A100 (80 GB):  --gres=gpu:A100:1
+# - A100 (80 GB):  --gres=gpu:A100:1 (current)
 # - H200 (141 GB): --gres=gpu:H200:1
 
 set -e
@@ -31,6 +31,9 @@ source ${HOME}/miniforge3/etc/profile.d/conda.sh
 # Load CUDA module before activating conda environment
 module load devel/cuda
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+
+# Fix PyTorch memory fragmentation (reduces reserved-but-unallocated memory)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Activate conda environment
 conda activate splicevo
@@ -62,7 +65,7 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 # Inputs
 SUBSET="full"
 SPECIES="mouse_rat_human"
-KB="1"
+KB="5"
 TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_transformer.yaml
 DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/train/
 MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${SUBSET}_${SPECIES}_${KB}kb/

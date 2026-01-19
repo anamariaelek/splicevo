@@ -10,15 +10,15 @@
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 #
-# Memory requirements with streaming (index-based memmap access):
-# - Memmap metadata only (no full array loading): ~1-2 GB
-# - DataLoader workers (num_workers * batch_size * sample_size): ~20-30 GB
-# - Model + optimizer states: ~10-15 GB
-# - GPU transfers and buffers: ~10-15 GB
-# Total: ~50-65 GB
+# Optimized for A40 48GB with streaming
+# Memory requirements:
+# - GPU (batch=8, seq=5900, fp16): ~15 GB (batch=16 caused OOM)
+# - RAM (6 workers * 2 prefetch * batch_8): ~10-15 GB
+# - Model + optimizer states: ~10-15 GB GPU
+# Total: ~25-30 GB GPU, ~25-30 GB RAM
 # 
-# Helix GPU options (see https://wiki.bwhpc.de/e/Helix/Hardware):
-# - A40 (48 GB):   --gres=gpu:A40:1
+# Helix GPU options:
+# - A40 (48 GB):   --gres=gpu:A40:1 (current)
 # - A100 (40 GB):  --gres=gpu:A100:1
 # - A100 (80 GB):  --gres=gpu:A100:1
 # - H200 (141 GB): --gres=gpu:H200:1
