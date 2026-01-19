@@ -57,12 +57,14 @@ done
 **Benchmarking:**
 Data loading for `--window_size 5000 --context_size 450 --n_cpus 4`:
 
-| Genome       | Subset | Chromosomes        | Tissues                  | Timepoints | Time (hh:mm:ss) | Max memory | Windows |
-|--------------|--------|--------------------|--------------------------|------------|-----------------|------------|---------|
-| mouse_GRCm38 | small  | 15, 16, 17, 18, 19 | Brain, Cerebellum, Heart |1, 5, 10    | 00:14:59        | 13.9 GB    | 17,963  |
-| human_GRCh37 | full   | all                | all                      |all         | 21:32:20        | 557 GB     | 127,990 |
-| mouse_GRCm38 | full   | all                | all                      |all         | 24:30:00        | 671 GB     | 104,151 |
-| rat_Rnor_5.0 | full   | all                | all                      |all         | 18:06:28        | 586 GB     | 101,460 |
+| Genome       | Subset | Chromosomes        | Tissues                  | Timepoints | Time (hh:mm:ss) | Max memory | Sequences |
+|--------------|--------|--------------------|--------------------------|------------|-----------------|------------|-----------|
+| human_GRCh37 | small  | 11, 19, 20, 21, 22 | Brain, Cerebellum, Heart |1, 5, 10    | 00:24:26        | 11.4 GB    | 18,327    |
+| mouse_GRCm38 | small  | 15, 16, 17, 18, 19 | Brain, Cerebellum, Heart |1, 5, 10    | 00:17:02        | 14.8 GB    | 17,963    |
+| rat_Rnor_5.0 | small  | 16, 17, 18, 19, 20 | Brain, Cerebellum, Heart |1, 5, 10    | 00:13:47        | 11.4 GB    | 15,153    |
+| human_GRCh37 | full   | all                | all                      |all         | 21:32:20        | 557 GB     | 127,990   |
+| mouse_GRCm38 | full   | all                | all                      |all         | 12:06:09        | 671 GB     | 104,151   |
+| rat_Rnor_5.0 | full   | all                | all                      |all         | 18:06:28        | 586 GB     | 101,460   |
 
 
 ### Step 2: data_split.py - Combine into Train/Test Sets
@@ -105,12 +107,12 @@ python ${SPLICEVO_DIR}/scripts/data_split.py \
 
 **Benchmarking:**
 
-Data splitting for data loaded with `--window_size 5000 --context_size 450`, and using `--pov_genome mouse_GRCm38 --test_chromosomes 2 4 `:
+Data splitting for data loaded with `--window_size 5000 --context_size 450`, and using `--pov_genome mouse_GRCm38` and `--test_chromosomes` as specified below:
 
-| Genomes                                | Time (hh:mm:ss) | Max memory | Total Windows |
-|----------------------------------------|-----------------|------------|----------------|
-| mouse_GRCm38 rat_Rnor_5.0 human_GRCh37 |
-
+| Genomes                                | Subset | Test chr | Time (hh:mm:ss) | Max memory | Train sequences | Test sequences |
+|----------------------------------------|--------|----------|-----------------|------------|-----------------|----------------|
+| mouse_GRCm38 rat_Rnor_5.0 human_GRCh37 | small  | 15       | 00:04:10        | 390 MB     | 40,027          | 3,619          |
+| mouse_GRCm38 rat_Rnor_5.0 human_GRCh37 | full   | 2, 4     | 04:02:03        | 3.81 GB    | 257,403         | 26,868         |
 ## Directory Structure
 
 ```
@@ -154,6 +156,8 @@ python ${SPLICEVO_DIR}/scripts/splicevo_train.py \
   --quiet
 
 ```
+
+Run `splicevo_train_submit.sh` to submit the training script to HPC cluster. The resources and training config there are optimized for training the full model (mouse, rat and human genomes) on Helix HPC. Alternativelly, `splicevo_train_submit_small.sh` is submission script with resources and configs optimized for training a small SplicEvo model on subset of data.
 
 ## Predictions Using SplicEvo model
 
