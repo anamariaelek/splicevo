@@ -40,6 +40,7 @@ class SpliceTrainer:
         non_blocking: bool = True,
         use_amp: bool = True,
         gradient_accumulation_steps: int = 1,
+        warmup_steps: int = 0,
         usage_loss_type: str = 'weighted_mse',
         weighted_mse_extreme_low: float = 0.05,
         weighted_mse_extreme_high: float = 0.95,
@@ -277,9 +278,8 @@ class SpliceTrainer:
             'middle': middle_losses.detach().cpu().numpy() if middle_losses.numel() > 0 else np.array([]),
             'n_zeros': is_zero.sum().item(),
             'n_ones': is_one.sum().item(),
-            'n_middle': is_middle.sum().item(),
-            'targets': masked_targets.detach().cpu().numpy(),
-            'predictions': masked_preds.detach().cpu().numpy()
+            'n_middle': is_middle.sum().item()
+            # Note: 'targets' and 'predictions' removed to prevent memory accumulation
         }
     
     def _track_splice_class_losses(
@@ -417,9 +417,8 @@ class SpliceTrainer:
             'middle': [],
             'n_zeros': 0,
             'n_ones': 0,
-            'n_middle': 0,
-            'targets': [],
-            'predictions': []
+            'n_middle': 0
+            # 'targets' and 'predictions' removed to prevent memory accumulation
         }
         
         # Track splice class losses
@@ -531,8 +530,6 @@ class SpliceTrainer:
                             epoch_sse_tracking['n_zeros'] += sse_tracking['n_zeros']
                             epoch_sse_tracking['n_ones'] += sse_tracking['n_ones']
                             epoch_sse_tracking['n_middle'] += sse_tracking['n_middle']
-                            epoch_sse_tracking['targets'].append(sse_tracking['targets'])
-                            epoch_sse_tracking['predictions'].append(sse_tracking['predictions'])
                     else:
                         usage_loss = torch.tensor(0.0, device=self.device)
                 elif self.usage_loss_type == 'weighted_mse':
@@ -560,8 +557,6 @@ class SpliceTrainer:
                             epoch_sse_tracking['n_zeros'] += sse_tracking['n_zeros']
                             epoch_sse_tracking['n_ones'] += sse_tracking['n_ones']
                             epoch_sse_tracking['n_middle'] += sse_tracking['n_middle']
-                            epoch_sse_tracking['targets'].append(sse_tracking['targets'])
-                            epoch_sse_tracking['predictions'].append(sse_tracking['predictions'])
                     else:
                         usage_loss = torch.tensor(0.0, device=self.device)
                 else:
@@ -661,9 +656,8 @@ class SpliceTrainer:
             'middle': np.array(epoch_sse_tracking['middle']),
             'n_zeros': epoch_sse_tracking['n_zeros'],
             'n_ones': epoch_sse_tracking['n_ones'],
-            'n_middle': epoch_sse_tracking['n_middle'],
-            'targets': np.concatenate(epoch_sse_tracking['targets']) if epoch_sse_tracking['targets'] else np.array([]),
-            'predictions': np.concatenate(epoch_sse_tracking['predictions']) if epoch_sse_tracking['predictions'] else np.array([])
+            'n_middle': epoch_sse_tracking['n_middle']
+            # 'targets' and 'predictions' removed to prevent memory leaks
         }
         
         # Log splice class losses to TensorBoard
@@ -722,12 +716,7 @@ class SpliceTrainer:
                     'middle': np.mean(epoch_sse_tracking['middle']) if len(epoch_sse_tracking['middle']) > 0 else 0.0
                 }, epoch_num)
             
-            # Correlation
-            if len(epoch_sse_tracking['targets']) > 0 and len(epoch_sse_tracking['predictions']) > 0:
-                targets = np.concatenate(epoch_sse_tracking['targets']).flatten()
-                preds = np.concatenate(epoch_sse_tracking['predictions']).flatten()
-                correlation = np.corrcoef(targets, preds)[0, 1]
-                self.writer.add_scalar('Usage_Metrics/Train_Correlation', correlation, epoch_num)
+            # Correlation calculation removed (requires targets/predictions arrays)
         
         return {
             'loss': total_loss / n_batches,
@@ -754,9 +743,8 @@ class SpliceTrainer:
             'middle': [],
             'n_zeros': 0,
             'n_ones': 0,
-            'n_middle': 0,
-            'targets': [],
-            'predictions': []
+            'n_middle': 0
+            # 'targets' and 'predictions' removed to prevent memory accumulation
         }
         
         # Track splice class losses
@@ -855,8 +843,6 @@ class SpliceTrainer:
                                 epoch_sse_tracking['n_zeros'] += sse_tracking['n_zeros']
                                 epoch_sse_tracking['n_ones'] += sse_tracking['n_ones']
                                 epoch_sse_tracking['n_middle'] += sse_tracking['n_middle']
-                                epoch_sse_tracking['targets'].append(sse_tracking['targets'])
-                                epoch_sse_tracking['predictions'].append(sse_tracking['predictions'])
                         else:
                             usage_loss = torch.tensor(0.0, device=self.device)
                     elif self.usage_loss_type == 'weighted_mse':
@@ -883,8 +869,6 @@ class SpliceTrainer:
                                 epoch_sse_tracking['n_zeros'] += sse_tracking['n_zeros']
                                 epoch_sse_tracking['n_ones'] += sse_tracking['n_ones']
                                 epoch_sse_tracking['n_middle'] += sse_tracking['n_middle']
-                                epoch_sse_tracking['targets'].append(sse_tracking['targets'])
-                                epoch_sse_tracking['predictions'].append(sse_tracking['predictions'])
                         else:
                             usage_loss = torch.tensor(0.0, device=self.device)
                     else:
@@ -939,9 +923,8 @@ class SpliceTrainer:
             'middle': np.array(epoch_sse_tracking['middle']),
             'n_zeros': epoch_sse_tracking['n_zeros'],
             'n_ones': epoch_sse_tracking['n_ones'],
-            'n_middle': epoch_sse_tracking['n_middle'],
-            'targets': np.concatenate(epoch_sse_tracking['targets']) if epoch_sse_tracking['targets'] else np.array([]),
-            'predictions': np.concatenate(epoch_sse_tracking['predictions']) if epoch_sse_tracking['predictions'] else np.array([])
+            'n_middle': epoch_sse_tracking['n_middle']
+            # 'targets' and 'predictions' removed to prevent memory leaks
         }
         
         # Log to TensorBoard
@@ -982,12 +965,7 @@ class SpliceTrainer:
                     'middle': hybrid_tracking['class_middle']
                 }, epoch_num)
             
-            # Correlation
-            if len(epoch_sse_tracking['targets']) > 0 and len(epoch_sse_tracking['predictions']) > 0:
-                targets = np.concatenate(epoch_sse_tracking['targets']).flatten()
-                preds = np.concatenate(epoch_sse_tracking['predictions']).flatten()
-                correlation = np.corrcoef(targets, preds)[0, 1]
-                self.writer.add_scalar('Usage_Metrics/Val_Correlation', correlation, epoch_num)
+            # Correlation calculation removed (requires targets/predictions arrays)
         
         return {
             'loss': total_loss / n_batches,

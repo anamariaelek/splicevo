@@ -237,18 +237,26 @@ def load_data(config: dict, log_fn=print):
     if usage_sse is None:
         log_fn("No SSE array loaded, training without usage prediction.")
         usage_conditions = []  # No conditions if no SSE
-    elif np.all(usage_sse == 0):
-        log_fn("SSE array is all zeros, training without usage prediction.")
-        usage_sse = None
-        usage_conditions = []  # No conditions if all zeros
     else:
         # SSE is already in [0,1] range, no normalization needed
         log_fn(f"Loaded SSE array:")
         log_fn(f"  shape={usage_sse.shape}, dtype={usage_sse.dtype}")
         log_fn(f"  conditions={usage_conditions}")
-        sse_clean = usage_sse[~np.isnan(usage_sse)]
-        if len(sse_clean) > 0:
-            log_fn(f"  range=[{sse_clean.min():.3f}, {sse_clean.max():.3f}], mean={sse_clean.mean():.3f}")
+        
+        # Sample a small subset to check properties (avoid loading entire memmap into RAM!)
+        sample_size = min(1000, usage_sse.shape[0])
+        sample_indices = np.random.choice(usage_sse.shape[0], size=sample_size, replace=False)
+        sse_sample = usage_sse[sample_indices, :100, :].flatten()  # Sample first 100 positions too
+        sse_sample_clean = sse_sample[~np.isnan(sse_sample)]
+        
+        if len(sse_sample_clean) > 0:
+            log_fn(f"  sampled range=[{sse_sample_clean.min():.3f}, {sse_sample_clean.max():.3f}], mean={sse_sample_clean.mean():.3f}")
+            
+            # Check if sample is all zeros (might indicate bad data)
+            if np.all(sse_sample_clean == 0):
+                log_fn("WARNING: Sampled SSE values are all zeros - usage predictions may not train properly")
+        else:
+            log_fn("WARNING: All sampled SSE values are NaN")
 
     log_fn(f"Loaded {len(sequences)} samples")
     log_fn(f"  Sequences shape: {sequences.shape}")

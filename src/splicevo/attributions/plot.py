@@ -126,6 +126,10 @@ def create_attribution_logo(
     
     # Validate and apply y-axis limits
     if ylim is not None:
+        # Handle single value as symmetric limits
+        if isinstance(ylim, (int, float)):
+            ylim = (-abs(ylim), abs(ylim))
+        
         y_min, y_max = ylim
         # Ensure min and max are different to avoid singular transformation
         if y_min == y_max:
@@ -195,7 +199,8 @@ def get_overlapping_transcripts(gtf_source, genome_id: str, chromosome: str, sta
     return overlapping
 
 
-def plot_gene_track(ax: plt.Axes, transcripts: list, start: int, end: int, strand: str, max_transcripts: Optional[int] = 5):
+def plot_gene_track(ax: plt.Axes, transcripts: list, start: int, end: int, strand: str, max_transcripts: Optional[int] = 5, 
+                   xlim_relative: Optional[Tuple[float, float]] = None, genomic_center: Optional[int] = None):
     """Plot gene track with exons and introns.
     
     Args:
@@ -205,17 +210,32 @@ def plot_gene_track(ax: plt.Axes, transcripts: list, start: int, end: int, stran
         end: End position of the region (genomic coordinates)
         strand: Strand ('+' or '-')
         max_transcripts: Maximum number of transcripts to display (default 5, None for all)
+        xlim_relative: Optional tuple (x_min, x_max) for relative coordinate system (e.g., -500, 500)
+        genomic_center: Genomic coordinate of the center position (splice site) for coordinate transformation
     """
     if not transcripts:
         ax.text(0.5, 0.5, 'No genes in region', ha='center', va='center', transform=ax.transAxes)
         ax.set_ylim(0, 1)
-        ax.set_xlim(start, end)
+        if xlim_relative is not None:
+            ax.set_xlim(xlim_relative[0], xlim_relative[1])
+        else:
+            ax.set_xlim(start, end)
         ax.set_yticks([])
         return
     
     # Limit number of transcripts if specified
     if max_transcripts is not None and len(transcripts) > max_transcripts:
         transcripts = transcripts[:max_transcripts]
+    
+    # Set up coordinate transformation if relative coordinates requested
+    if xlim_relative is not None and genomic_center is not None:
+        # Transform genomic coordinates to relative window coordinates
+        def genomic_to_relative(genomic_pos):
+            return genomic_pos - genomic_center
+    else:
+        # No transformation needed
+        def genomic_to_relative(genomic_pos):
+            return genomic_pos
     
     # Plot each transcript on a separate row
     n_transcripts = len(transcripts)
@@ -231,29 +251,37 @@ def plot_gene_track(ax: plt.Axes, transcripts: list, start: int, end: int, stran
         # Draw intron line spanning the transcript
         transcript_start = transcript.exons['start'].min()
         transcript_end = transcript.exons['end'].max()
-        ax.plot([transcript_start, transcript_end], [y_pos, y_pos], 
+        
+        # Transform to relative coordinates
+        rel_start = genomic_to_relative(transcript_start)
+        rel_end = genomic_to_relative(transcript_end)
+        
+        ax.plot([rel_start, rel_end], [y_pos, y_pos], 
                 color='gray', linewidth=2, zorder=1)
         
         # Draw exons as rectangles
         for _, exon in transcript.exons.iterrows():
-            exon_start = exon['start']
-            exon_end = exon['end']
-            exon_width = exon_end - exon_start
+            exon_start_rel = genomic_to_relative(exon['start'])
+            exon_end_rel = genomic_to_relative(exon['end'])
+            exon_width = exon_end_rel - exon_start_rel
             
-            rect = Rectangle((exon_start, y_pos - half_height), exon_width, exon_height,
+            rect = Rectangle((exon_start_rel, y_pos - half_height), exon_width, exon_height,
                            facecolor='blue', edgecolor='darkblue', linewidth=1, zorder=2)
             ax.add_patch(rect)
         
         # Add transcript label with adaptive positioning
-        label_x = transcript_start if strand == '+' else transcript_end
+        label_x = rel_start if strand == '+' else rel_end
         label_offset = max(0.03, exon_height * 0.6)
         ax.text(label_x, y_pos + label_offset, transcript.transcript_id, 
                fontsize=8, ha='left' if strand == '+' else 'right', va='bottom')
     
-    ax.set_xlim(start, end)
+    if xlim_relative is not None:
+        ax.set_xlim(xlim_relative[0], xlim_relative[1])
+    else:
+        ax.set_xlim(genomic_to_relative(start), genomic_to_relative(end))
     ax.set_ylim(0, 1)
     ax.set_yticks([])
-    ax.set_xlabel('Genomic Position')
+    ax.set_xlabel('Distance from splice site')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['left'].set_visible(False)
@@ -319,7 +347,10 @@ def plot_attributions_splice(
             axes[i, 0] = fig.add_subplot(gs[i * 2])      # Attribution plot
             axes[i, 1] = fig.add_subplot(gs[i * 2 + 1])  # Gene track below
     else:
+        nrows = nrows_base
         fig, axes = plt.subplots(nrows=nrows_base, ncols=1, figsize=figsize, squeeze=False)
+        # Add vertical spacing between subplots to prevent title/label overlap
+        fig.subplots_adjust(hspace=0.4)
 
     context = model_config.get('context_len', 50)
 
@@ -461,7 +492,13 @@ def plot_attributions_splice(
                     current_gtf, genome_id, chromosome, 
                     genomic_start, genomic_end, data['strand']
                 )
-                plot_gene_track(ax_gene, transcripts, genomic_start, genomic_end, data['strand'], max_transcripts)
+                plot_gene_track(
+                    ax_gene, transcripts, genomic_start, genomic_end, data['strand'], 
+                    max_transcripts=max_transcripts,
+                    xlim_relative=(data['x_vals'][0], data['x_vals'][-1]),
+                    genomic_center=data['genomic_coord']
+                )
+                
             except Exception as e:
                 ax_gene.text(0.5, 0.5, f'Error loading genes:\\n{str(e)}', 
                            ha='center', va='center', transform=ax_gene.transAxes, fontsize=8)
@@ -700,7 +737,12 @@ def plot_attributions_usage(
                     current_gtf, genome_id, chromosome, 
                     genomic_start, genomic_end, data['strand']
                 )
-                plot_gene_track(ax_gene, transcripts, genomic_start, genomic_end, data['strand'], max_transcripts)
+                plot_gene_track(
+                    ax_gene, transcripts, genomic_start, genomic_end, data['strand'], 
+                    max_transcripts=max_transcripts,
+                    xlim_relative=(data['x_vals'][0], data['x_vals'][-1]),
+                    genomic_center=data['genomic_coord']
+                )
             except Exception as e:
                 ax_gene.text(0.5, 0.5, f'Error loading genes:\n{str(e)}', 
                            ha='center', va='center', transform=ax_gene.transAxes, fontsize=8)
