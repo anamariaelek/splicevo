@@ -637,6 +637,7 @@ def main():
         use_tensorboard=config['output'].get('use_tensorboard', True),
         use_amp=training_config.get('use_amp', True),
         gradient_accumulation_steps=training_config.get('gradient_accumulation_steps', 1),
+        warmup_steps=training_config.get('warmup_steps', 0),
         **trainer_kwargs
     )
     

@@ -133,6 +133,11 @@ class SpliceTrainer:
             weight_decay=weight_decay
         )
         
+        # Learning rate warmup and scheduling
+        self.base_lr = learning_rate
+        self.warmup_steps = warmup_steps
+        self.warmup_factor = 0.1  # Start at 10% of base learning rate
+        
         # Adjust scheduler for gradient accumulation
         total_steps = len(train_loader) * 100 // gradient_accumulation_steps
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -187,6 +192,18 @@ class SpliceTrainer:
         self.epoch_start_time = None
         self.first_epoch_duration = None
         self.training_start_time = None
+    
+    def _update_learning_rate_with_warmup(self):
+        """Update learning rate with linear warmup if in warmup phase."""
+        if self.warmup_steps > 0 and self.global_step < self.warmup_steps:
+            # Linear warmup from warmup_factor * base_lr to base_lr
+            warmup_progress = self.global_step / self.warmup_steps
+            lr = self.base_lr * (self.warmup_factor + (1.0 - self.warmup_factor) * warmup_progress)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
+        else:
+            # After warmup, use cosine annealing scheduler
+            self.scheduler.step()
     
     def _track_sse_losses(
         self, 
@@ -598,7 +615,8 @@ class SpliceTrainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optimizer.step()
                 
-                self.scheduler.step()
+                # Update learning rate with warmup
+                self._update_learning_rate_with_warmup()
                 self.optimizer.zero_grad()
                 
                 # Log to TensorBoard (per update step, not per batch)
