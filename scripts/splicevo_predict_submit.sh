@@ -7,8 +7,8 @@
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:A40:1
-#SBATCH --mem=40gb
+#SBATCH --gres=gpu:A80:1
+#SBATCH --mem=80gb
 #SBATCH --time=6:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -35,8 +35,8 @@ KB="5"
 MODEL=${SUBSET}_${SPECIES}_${KB}kb
 
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/test/
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${MODEL}
-PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/${MODEL}_A40/
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${MODEL}/
+PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/transformer/${MODEL}/
 echo "Starting training job at "$(date)
 echo "Test data: ${DATA_TEST_DIR}"
 echo "Model directory: ${MODEL_DIR}"
@@ -49,5 +49,4 @@ python ${SPLICEVO_DIR}/scripts/splicevo_predict.py \
     --batch-size 32 \
     --quiet
 
-done
 echo "Predict completed at "$(date)

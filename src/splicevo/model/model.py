@@ -588,7 +588,8 @@ class SplicevoModel(nn.Module):
             raise ValueError(f"Unknown output_type: {output_type}")
         self.output_type = output_type
     
-    def predict(self, sequences, species_ids=None, batch_size: int = 32):
+    def predict(self, sequences, species_ids=None, batch_size: int = 32, 
+                stream_to_disk: Optional[Dict[str, np.memmap]] = None):
         """
         Predict splice sites and usage statistics for central region with batching.
         
@@ -599,9 +600,12 @@ class SplicevoModel(nn.Module):
                       Format: [context_len | central_region | context_len]
             species_ids: Species IDs (batch,) or single integer
             batch_size: Batch size for processing (default: 32)
+            stream_to_disk: Optional dict of memmap arrays to write results directly to disk
+                           Keys: 'splice_logits', 'splice_probs', 'splice_predictions', 'usage_predictions'
+                           If provided, results are written directly without accumulating in memory
             
         Returns:
-            Dictionary with numpy arrays for central region
+            Dictionary with numpy arrays for central region (or None if stream_to_disk is used)
         """
         import numpy as np
         
@@ -645,64 +649,119 @@ class SplicevoModel(nn.Module):
         
         device = next(self.parameters()).device
         
-        # Initialize lists to collect results
-        all_splice_logits = []
-        all_splice_probs = []
-        all_splice_predictions = []
-        all_usage_predictions = []
+        # Choose streaming or in-memory accumulation
+        if stream_to_disk is not None:
+            # Streaming mode: write directly to memmap
+            with torch.no_grad():
+                for i in range(0, num_sequences, batch_size):
+                    batch_end = min(i + batch_size, num_sequences)
+                    
+                    if sequences_is_memmap:
+                        batch_sequences = np.array(sequences_array[i:batch_end], dtype=np.float32)
+                        batch_sequences = torch.from_numpy(batch_sequences)
+                    else:
+                        batch_sequences = sequences[i:batch_end]
+                    
+                    # Get batch species IDs
+                    if species_ids is not None:
+                        batch_species = torch.from_numpy(species_ids[i:batch_end])
+                    else:
+                        batch_species = None
+                    
+                    # Transfer to device
+                    batch_sequences = batch_sequences.to(device)
+                    if batch_species is not None:
+                        batch_species = batch_species.to(device)
+                    
+                    # Forward pass
+                    output = self.forward(batch_sequences, species_ids=batch_species)
+                    
+                    # Process predictions and write directly to memmap
+                    splice_logits = output['splice_logits'].cpu().numpy()
+                    splice_probs = F.softmax(output['splice_logits'], dim=-1).cpu().numpy()
+                    splice_predictions = output['splice_logits'].argmax(dim=-1).cpu().numpy()
+                    usage_predictions = output['usage_predictions'].cpu().numpy()
+                    
+                    # Write to memmap slices
+                    if 'splice_logits' in stream_to_disk:
+                        stream_to_disk['splice_logits'][i:batch_end] = splice_logits
+                    if 'splice_probs' in stream_to_disk:
+                        stream_to_disk['splice_probs'][i:batch_end] = splice_probs
+                    if 'splice_predictions' in stream_to_disk:
+                        stream_to_disk['splice_predictions'][i:batch_end] = splice_predictions
+                    if 'usage_predictions' in stream_to_disk:
+                        stream_to_disk['usage_predictions'][i:batch_end] = usage_predictions
+                    
+                    # Flush to disk
+                    for mmap_array in stream_to_disk.values():
+                        mmap_array.flush()
+                    
+                    # Clear GPU cache
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+            
+            # Return None when streaming to disk
+            return None
         
-        with torch.no_grad():
-            # Process in batches
-            for i in range(0, num_sequences, batch_size):
-                batch_end = min(i + batch_size, num_sequences)
-                
-                if sequences_is_memmap:
-                    batch_sequences = np.array(sequences_array[i:batch_end], dtype=np.float32)
-                    batch_sequences = torch.from_numpy(batch_sequences)
-                else:
-                    batch_sequences = sequences[i:batch_end]
-                
-                # Get batch species IDs
-                if species_ids is not None:
-                    batch_species = torch.from_numpy(species_ids[i:batch_end])
-                else:
-                    batch_species = None
-                
-                # Transfer to device
-                batch_sequences = batch_sequences.to(device)
-                if batch_species is not None:
-                    batch_species = batch_species.to(device)
-                
-                # Forward pass
-                output = self.forward(batch_sequences, species_ids=batch_species)
-                
-                # Process predictions
-                splice_logits = output['splice_logits']
-                splice_probs = F.softmax(splice_logits, dim=-1)
-                splice_predictions = splice_logits.argmax(dim=-1)
-                usage_predictions = output['usage_predictions']
-                
-                # Move to CPU and convert to numpy
-                all_splice_logits.append(splice_logits.cpu().numpy())
-                all_splice_probs.append(splice_probs.cpu().numpy())
-                all_splice_predictions.append(splice_predictions.cpu().numpy())
-                all_usage_predictions.append(usage_predictions.cpu().numpy())
-                
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
-        
-        # Concatenate all batches
-        splice_logits = np.concatenate(all_splice_logits, axis=0)
-        splice_probs = np.concatenate(all_splice_probs, axis=0)
-        splice_predictions = np.concatenate(all_splice_predictions, axis=0)
-        usage_predictions = np.concatenate(all_usage_predictions, axis=0)
-        
-        # Remove batch dimension if single input
-        if single_input:
-            splice_logits = splice_logits[0]
-            splice_probs = splice_probs[0]
-            splice_predictions = splice_predictions[0]
-            usage_predictions = usage_predictions[0]
+        else:
+            # Original in-memory accumulation mode
+            all_splice_logits = []
+            all_splice_probs = []
+            all_splice_predictions = []
+            all_usage_predictions = []
+            
+            with torch.no_grad():
+                # Process in batches
+                for i in range(0, num_sequences, batch_size):
+                    batch_end = min(i + batch_size, num_sequences)
+                    
+                    if sequences_is_memmap:
+                        batch_sequences = np.array(sequences_array[i:batch_end], dtype=np.float32)
+                        batch_sequences = torch.from_numpy(batch_sequences)
+                    else:
+                        batch_sequences = sequences[i:batch_end]
+                    
+                    # Get batch species IDs
+                    if species_ids is not None:
+                        batch_species = torch.from_numpy(species_ids[i:batch_end])
+                    else:
+                        batch_species = None
+                    
+                    # Transfer to device
+                    batch_sequences = batch_sequences.to(device)
+                    if batch_species is not None:
+                        batch_species = batch_species.to(device)
+                    
+                    # Forward pass
+                    output = self.forward(batch_sequences, species_ids=batch_species)
+                    
+                    # Process predictions
+                    splice_logits = output['splice_logits']
+                    splice_probs = F.softmax(splice_logits, dim=-1)
+                    splice_predictions = splice_logits.argmax(dim=-1)
+                    usage_predictions = output['usage_predictions']
+                    
+                    # Move to CPU and convert to numpy
+                    all_splice_logits.append(splice_logits.cpu().numpy())
+                    all_splice_probs.append(splice_probs.cpu().numpy())
+                    all_splice_predictions.append(splice_predictions.cpu().numpy())
+                    all_usage_predictions.append(usage_predictions.cpu().numpy())
+                    
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+            
+            # Concatenate all batches
+            splice_logits = np.concatenate(all_splice_logits, axis=0)
+            splice_probs = np.concatenate(all_splice_probs, axis=0)
+            splice_predictions = np.concatenate(all_splice_predictions, axis=0)
+            usage_predictions = np.concatenate(all_usage_predictions, axis=0)
+            
+            # Remove batch dimension if single input
+            if single_input:
+                splice_logits = splice_logits[0]
+                splice_probs = splice_probs[0]
+                splice_predictions = splice_predictions[0]
+                usage_predictions = usage_predictions[0]
         
         return {
             'splice_logits': splice_logits,

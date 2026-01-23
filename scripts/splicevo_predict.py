@@ -195,9 +195,9 @@ def load_test_data(data_path: str, use_memmap: bool = False, log_fn=print) -> Di
         
         # Load condition mask if available
         mask_path = mmap_dir / 'condition_mask.mmap'
-        if mask_path.exists():
+        if mask_path.exists() and 'condition_mask_shape' in meta:
             mask_dtype = np.dtype(meta.get('condition_mask_dtype', 'bool'))
-            mask_shape = tuple(meta.get('condition_mask_shape'))
+            mask_shape = tuple(meta['condition_mask_shape'])
             data['condition_mask'] = np.memmap(
                 mask_path,
                 dtype=mask_dtype,
@@ -474,67 +474,126 @@ def main():
         test_data = load_test_data(args.test_data, use_memmap=args.use_memmap, log_fn=log_print)
         sequences = test_data['sequences']
         n_samples = sequences.shape[0]
+        seq_len = sequences.shape[1]
         data_time = time.time() - data_start
+        
+        # Calculate central region length
+        central_len = seq_len - 2 * model_config['context_len']
+        n_conditions = model_config.get('n_conditions', 0)
         
         # Make predictions
         log_print(f"\nMaking predictions on {n_samples} samples...")
+        log_print(f"  Sequence length: {seq_len}, Central length: {central_len}")
+        log_print(f"  Conditions: {n_conditions}")
         log_print(f"Using batch size: {args.batch_size}")
         log_print(f"Memory-mapped data: {isinstance(sequences, np.memmap)}")
         
         predict_start = time.time()
-        predictions = model.predict(
-            sequences,
-            batch_size=args.batch_size
-        )
-        predict_time = time.time() - predict_start
         
-        log_print(f"Predictions complete!")
-        log_print(f"  Splice logits shape: {predictions['splice_logits'].shape}")
-        log_print(f"  Splice probs shape: {predictions['splice_probs'].shape}")
-        log_print(f"  Splice predictions shape: {predictions['splice_predictions'].shape}")
-        log_print(f"  Usage predictions shape: {predictions['usage_predictions'].shape}")
-
-        # Extract SSE predictions
-        usage_preds = predictions['usage_predictions']  # (n_samples, central_len, n_conditions)
-        
-        log_print(f"\nExtracted usage predictions:")
-        log_print(f"  SSE shape: {usage_preds.shape} (sigmoid, range [0,1])")
-        
-        output_predictions = {
-            'splice_predictions': predictions['splice_predictions'],
-            'splice_probs': predictions['splice_probs'],
-            'usage_sse': usage_preds
-        }
-        
-        if args.save_logits:
-            output_predictions['splice_logits'] = predictions['splice_logits']
-
-        # Add ground truth if available
-        ground_truth = {}
-        if 'labels' in test_data:
-            ground_truth['labels_true'] = np.array(test_data['labels'])
-        if 'usage_sse' in test_data:
-            ground_truth['usage_sse_true'] = np.array(test_data['usage_sse'])
-        if 'condition_mask' in test_data:
-            ground_truth['condition_mask'] = np.array(test_data['condition_mask'])
-            log_print(f"Condition mask included (shape: {ground_truth['condition_mask'].shape})")
-        
-        # Save predictions
-        save_start = time.time()
         if args.save_memmap:
-            # Save as memmap files
+            # Streaming mode: write directly to memmap
+            log_print("Using streaming mode: writing predictions directly to disk...")
+            
+            # Prepare output directory
             output_dir = Path(args.output)
             if output_dir.suffix == '.npz':
                 output_dir = output_dir.parent / output_dir.stem
+            output_dir.mkdir(parents=True, exist_ok=True)
             
-            all_outputs = {**output_predictions, **ground_truth}
-            save_predictions_memmap(
-                all_outputs, 
-                output_dir, 
-                args.save_logits, 
-                condition_info=condition_info,
-                log_fn=log_print
+            # Create memmap output files
+            stream_mmap = {
+                'splice_probs': np.memmap(
+                    output_dir / 'splice_probs.mmap',
+                    dtype='float32', mode='w+',
+                    shape=(n_samples, central_len, 3)
+                ),
+                'splice_predictions': np.memmap(
+                    output_dir / 'splice_predictions.mmap',
+                    dtype='int64', mode='w+',
+                    shape=(n_samples, central_len)
+                ),
+                'usage_predictions': np.memmap(
+                    output_dir / 'usage_sse.mmap',
+                    dtype='float32', mode='w+',
+                    shape=(n_samples, central_len, n_conditions)
+                )
+            }
+            
+            if args.save_logits:
+                stream_mmap['splice_logits'] = np.memmap(
+                    output_dir / 'splice_logits.mmap',
+                    dtype='float32', mode='w+',
+                    shape=(n_samples, central_len, 3)
+                )
+            
+            # Run predictions with streaming
+            model.predict(
+                sequences,
+                batch_size=args.batch_size,
+                stream_to_disk=stream_mmap
             )
+            
+            predict_time = time.time() - predict_start
+            
+            log_print(f"Predictions complete (streamed to disk)!")
+            log_print(f"  Splice probs: {stream_mmap['splice_probs'].shape}")
+            log_print(f"  Splice predictions: {stream_mmap['splice_predictions'].shape}")
+            log_print(f"  Usage SSE: {stream_mmap['usage_predictions'].shape}")
+            
+            # Copy ground truth to memmap
+            if 'labels' in test_data:
+                log_print("  Copying ground truth labels...")
+                labels_mmap = np.memmap(
+                    output_dir / 'labels_true.mmap',
+                    dtype='int8', mode='w+',
+                    shape=test_data['labels'].shape
+                )
+                labels_mmap[:] = test_data['labels'][:]
+                labels_mmap.flush()
+            
+            if 'usage_sse' in test_data:
+                log_print("  Copying ground truth SSE...")
+                sse_mmap = np.memmap(
+                    output_dir / 'usage_sse_true.mmap',
+                    dtype='float32', mode='w+',
+                    shape=test_data['usage_sse'].shape
+                )
+                sse_mmap[:] = test_data['usage_sse'][:]
+                sse_mmap.flush()
+            
+            if 'condition_mask' in test_data:
+                log_print("  Copying condition mask...")
+                mask_mmap = np.memmap(
+                    output_dir / 'condition_mask.mmap',
+                    dtype='bool', mode='w+',
+                    shape=test_data['condition_mask'].shape
+                )
+                mask_mmap[:] = test_data['condition_mask'][:]
+                mask_mmap.flush()
+                log_print(f"  Condition mask included (shape: {mask_mmap.shape})")
+            
+            # Save metadata
+            metadata = {
+                'splice_probs': {'shape': list(stream_mmap['splice_probs'].shape), 'dtype': 'float32'},
+                'splice_predictions': {'shape': list(stream_mmap['splice_predictions'].shape), 'dtype': 'int64'},
+                'usage_sse': {'shape': list(stream_mmap['usage_predictions'].shape), 'dtype': 'float32'}
+            }
+            
+            if args.save_logits:
+                metadata['splice_logits'] = {'shape': list(stream_mmap['splice_logits'].shape), 'dtype': 'float32'}
+            
+            if 'labels' in test_data:
+                metadata['labels_true'] = {'shape': list(test_data['labels'].shape), 'dtype': 'int8'}
+            if 'usage_sse' in test_data:
+                metadata['usage_sse_true'] = {'shape': list(test_data['usage_sse'].shape), 'dtype': 'float32'}
+            if 'condition_mask' in test_data:
+                metadata['condition_mask'] = {'shape': list(test_data['condition_mask'].shape), 'dtype': 'bool'}
+            
+            if condition_info is not None:
+                metadata['conditions'] = condition_info
+            
+            with open(output_dir / 'metadata.json', 'w') as f:
+                json.dump(metadata, f, indent=2)
             
             # Calculate total size
             total_size = sum(f.stat().st_size for f in output_dir.glob('*.mmap'))
@@ -545,7 +604,47 @@ def main():
             log_print(f"  Total size: {total_size / 1024 / 1024:.1f} MB")
             
         else:
-            # Save as compressed .npz
+            # Original in-memory mode
+            log_print("Using in-memory mode: accumulating predictions in RAM...")
+            predictions = model.predict(
+                sequences,
+                batch_size=args.batch_size
+            )
+            predict_time = time.time() - predict_start
+            
+            log_print(f"Predictions complete!")
+            log_print(f"  Splice logits shape: {predictions['splice_logits'].shape}")
+            log_print(f"  Splice probs shape: {predictions['splice_probs'].shape}")
+            log_print(f"  Splice predictions shape: {predictions['splice_predictions'].shape}")
+            log_print(f"  Usage predictions shape: {predictions['usage_predictions'].shape}")
+
+            # Extract SSE predictions
+            usage_preds = predictions['usage_predictions']  # (n_samples, central_len, n_conditions)
+            
+            log_print(f"\nExtracted usage predictions:")
+            log_print(f"  SSE shape: {usage_preds.shape} (sigmoid, range [0,1])")
+            
+            output_predictions = {
+                'splice_predictions': predictions['splice_predictions'],
+                'splice_probs': predictions['splice_probs'],
+                'usage_sse': usage_preds
+            }
+            
+            if args.save_logits:
+                output_predictions['splice_logits'] = predictions['splice_logits']
+
+            # Add ground truth if available
+            ground_truth = {}
+            if 'labels' in test_data:
+                ground_truth['labels_true'] = np.array(test_data['labels'])
+            if 'usage_sse' in test_data:
+                ground_truth['usage_sse_true'] = np.array(test_data['usage_sse'])
+            if 'condition_mask' in test_data:
+                ground_truth['condition_mask'] = np.array(test_data['condition_mask'])
+                log_print(f"Condition mask included (shape: {ground_truth['condition_mask'].shape})")
+            
+            # Save predictions (in-memory mode only)
+            save_start = time.time()
             output_path = Path(args.output)
             output_data = {**output_predictions, **ground_truth}
             save_predictions_npz(
@@ -554,13 +653,17 @@ def main():
                 condition_info=condition_info,
                 log_fn=log_print
             )
+            save_time = time.time() - save_start
             
             log_print(f"\nPrediction Summary:")
             log_print(f"  Total samples: {n_samples}")
             log_print(f"  Usage type: SSE only")
             log_print(f"  Output file: {args.output}")
         
-        save_time = time.time() - save_start
+        # Timing summary (save_time already set above for both modes)
+        if args.save_memmap:
+            save_time = 0  # Already included in predict_time for streaming mode
+        
         total_time = time.time() - script_start_time
         
         # Timing summary

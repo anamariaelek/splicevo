@@ -27,10 +27,10 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
-SUBSET="small"
+SUBSET="full"
 SPECIES="mouse_rat_human"
-KB="5"
-MODEL=${SUBSET}_${SPECIES}_${KB}kb
+KB="1"
+MODEL=${SUBSET}_${SPECIES}_${KB}kb_1e-3
 
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/test/
 PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/transformer/${MODEL}/

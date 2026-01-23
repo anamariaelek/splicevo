@@ -192,6 +192,9 @@ python ${SPLICEVO_DIR}/scripts/splicevo_evaluate.py \
   --output ${PREDICTIONS_DIR}/evaluation/
 ```
 
+**Note on HPC Submission:**
+Run `splicevo_predict_submit.sh` to submit the training script to HPC cluster. 
+
 ## Attributions
 
 ```bash
