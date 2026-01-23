@@ -381,10 +381,12 @@ def main():
                         help='Device to use (cuda or cpu)')
     parser.add_argument('--batch-size', type=int, default=32,
                         help='Batch size for inference')
-    parser.add_argument('--use-memmap', action='store_true',
-                        help='Use memory-mapped data loading')
-    parser.add_argument('--save-memmap', action='store_true',
-                        help='Save predictions as memmap (faster for large datasets)')
+    parser.add_argument('--gpu-memory-fraction', type=float, default=None,
+                        help='Fraction of GPU memory to use (0.0-1.0). If not set, uses all available memory.')
+    parser.add_argument('--no-use-memmap', dest='use_memmap', action='store_false', default=True,
+                        help='Disable memory-mapped data loading (default: enabled)')
+    parser.add_argument('--no-save-memmap', dest='save_memmap', action='store_false', default=True,
+                        help='Disable saving predictions as memmap (default: enabled)')
     parser.add_argument('--save-logits', action='store_true',
                         help='Save raw logits (large file)')
     parser.add_argument('--quiet', action='store_true',
@@ -448,9 +450,17 @@ def main():
         log_print(f"Log file: {log_file}")
         log_print("=" * 60)
         
+        # Set GPU memory limit if specified
+        device = args.device if torch.cuda.is_available() else 'cpu'
+        if device == 'cuda' and args.gpu_memory_fraction is not None:
+            if 0.0 < args.gpu_memory_fraction <= 1.0:
+                torch.cuda.set_per_process_memory_fraction(args.gpu_memory_fraction)
+                log_print(f"GPU memory limit set to {args.gpu_memory_fraction:.1%} of available memory")
+            else:
+                log_print(f"Warning: Invalid gpu_memory_fraction {args.gpu_memory_fraction}, must be in (0.0, 1.0]")
+        
         # Load model
         load_start = time.time()
-        device = args.device if torch.cuda.is_available() else 'cpu'
         log_print(f"Device: {device}")
         model, model_config, condition_info = load_model_and_config(
             args.checkpoint, 

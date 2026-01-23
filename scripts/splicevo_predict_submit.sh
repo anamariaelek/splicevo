@@ -2,13 +2,13 @@
 # 
 # This script generates predictions on test data using a pre-trained Splicevo model.
 #
-#SBATCH --job-name=predict_small
+#SBATCH --job-name=predict
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:A40:1
-#SBATCH --mem=48gb
+#SBATCH --mem=40gb
 #SBATCH --time=6:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -29,10 +29,10 @@ export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK}
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
-SUBSET="small"
+SUBSET="full"
 SPECIES="mouse_rat_human"
 KB="5"
-MODEL=${SUBSET}_${SPECIES}_${KB}kb_A40
+MODEL=${SUBSET}_${SPECIES}_${KB}kb
 
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/test/
 MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${MODEL}
@@ -46,8 +46,6 @@ python ${SPLICEVO_DIR}/scripts/splicevo_predict.py \
     --checkpoint ${MODEL_DIR}/best_model.pt \
     --test-data ${DATA_TEST_DIR} \
     --output ${PREDICTIONS_DIR} \
-    --use-memmap \
-    --save-memmap \
     --batch-size 32 \
     --quiet
 
