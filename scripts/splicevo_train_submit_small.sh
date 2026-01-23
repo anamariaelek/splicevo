@@ -10,15 +10,8 @@
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 #
-# Optimized for A40 48GB with streaming
-# Memory requirements:
-# - GPU (batch=8, seq=5900, fp16): ~15 GB (batch=16 caused OOM)
-# - RAM (6 workers * 2 prefetch * batch_8): ~10-15 GB
-# - Model + optimizer states: ~10-15 GB GPU
-# Total: ~25-30 GB GPU, ~25-30 GB RAM
-# 
 # Helix GPU options:
-# - A40 (48 GB):   --gres=gpu:A40:1 (current)
+# - A40 (48 GB):   --gres=gpu:A40:1
 # - A100 (40 GB):  --gres=gpu:A100:1
 # - A100 (80 GB):  --gres=gpu:A100:1
 # - H200 (141 GB): --gres=gpu:H200:1
@@ -48,14 +41,6 @@ python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f
 # Exit if CUDA is not available
 python -c "import torch; import sys; sys.exit(0 if torch.cuda.is_available() else 1)" || {
     echo "ERROR: CUDA is not available in PyTorch!"
-    echo ""
-    echo "System has CUDA 13.0, but PyTorch was installed without CUDA support."
-    echo "Reinstall PyTorch with CUDA 12.4 support (compatible with CUDA 13.0):"
-    echo ""
-    echo "  conda activate splicevo"
-    echo "  pip uninstall torch torchvision torchaudio -y"
-    echo "  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124"
-    echo ""
     exit 1
 }
 

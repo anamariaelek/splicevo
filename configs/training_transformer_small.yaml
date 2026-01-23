@@ -36,7 +36,7 @@ training:
   # Optimizer
   learning_rate: 1.0e-3
   weight_decay: 1.0e-3
-  warmup_steps: 500       # Linear warmup from 10% to 100% of learning_rate (about 1 epoch)
+  warmup_steps: 500       # Linear warmup from 10% to 100% of learning_rate (~1 epoch)
 
   # Loss for splice site usage (SSE)
   usage_loss_type: 'weighted_mse'  # 'mse' or 'bce' or 'weighted_mse' or 'hybrid'

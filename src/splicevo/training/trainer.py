@@ -464,15 +464,7 @@ class SpliceTrainer:
                 usage_targets_central = usage_targets
                 
                 # Compute splice classification loss
-                splice_logits = output['splice_logits']
-                
-                # DEBUG: Log shapes on first batch
-                if self.train_epoch_count == 1 and batch_idx == 0:
-                    print(f"[DEBUG] First batch shapes (epoch={self.train_epoch_count}, batch={batch_idx}):")
-                    print(f"  splice_logits: {splice_logits.shape}")
-                    print(f"  splice_labels: {splice_labels.shape}")
-                    print(f"  model.context_len: {self.model.context_len}")
-                
+                splice_logits = output['splice_logits']                
                 splice_loss = self.splice_criterion(
                     splice_logits.reshape(-1, splice_logits.size(-1)),
                     splice_labels_central.reshape(-1)
