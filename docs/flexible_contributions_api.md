@@ -166,8 +166,8 @@ import pandas as pd
 
 # Load data and model
 model = load_model_and_config('path/to/model.pt')
-sequences, labels, _, _, usage, _ = load_processed_data('path/to/processed_data')
-label_predictions, label_probabilities, usage_predictioins, _, _, _ = load_predictions('path/to/predictions')
+sequences, labels, _, _, usage, _, condition_mask = load_processed_data('path/to/processed_data')
+label_predictions, label_probabilities, usage_predictions, _, _, _, condition_mask_pred = load_predictions('path/to/predictions')
 metadata = pd.read_csv('path/to/processed_data/metadata.csv')
 ```
 

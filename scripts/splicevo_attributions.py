@@ -73,7 +73,7 @@ def load_model_and_data(model_path, data_path, predictions_path, device='cuda'):
     print(f"  Metadata: {metadata.shape}")
     
     print("Loading predictions...")
-    pred_preds, pred_probs, pred_sse, meta, _, _ = load_predictions(
+    pred_preds, pred_probs, pred_sse, meta, _, _, condition_mask = load_predictions(
         str(predictions_path), verbose=False
     )
     print(f"  Predictions: {pred_preds.shape}")

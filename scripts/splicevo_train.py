@@ -505,6 +505,13 @@ def main():
     log_print(f"Configuration: {args.config}")
     log_print(f"Log file: {log_file}")
     
+    # Print full configuration
+    log_print("\n" + "="*60)
+    log_print("Configuration:")
+    log_print("="*60)
+    log_print(yaml.dump(config, default_flow_style=False, sort_keys=False))
+    log_print("="*60 + "\n")
+    
     # Setup device
     device = setup_device(config)
     log_print(f"Device: {device}")

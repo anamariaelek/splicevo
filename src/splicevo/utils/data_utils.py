@@ -161,6 +161,7 @@ def load_predictions(fn, keys=None, verbose=False):
         pred_sse = pred['usage_sse'] if 'usage_sse' in keys else None
         true_labels = pred['labels_true'] if 'labels_true' in keys else None
         true_sse = pred['usage_sse_true'] if 'usage_sse_true' in keys else None
+        condition_mask = pred['condition_mask'] if 'condition_mask' in keys else None
 
     # If a directory with memmap files
     elif os.path.isdir(fn):
@@ -242,8 +243,22 @@ def load_predictions(fn, keys=None, verbose=False):
                 print(f"Loaded true sse shape: {true_sse.shape}")
         else:
             true_sse = None
+        
+        # Load condition mask if available
+        condition_mask = None
+        mask_path = pred_dir / 'condition_mask.mmap'
+        if mask_path.exists():
+            if 'condition_mask' in meta:
+                mask_dtype = np.dtype(meta['condition_mask'].get('dtype', 'bool'))
+                mask_shape = tuple(meta['condition_mask']['shape'])
+            else:
+                mask_dtype = np.dtype(meta.get('condition_mask_dtype', 'bool'))
+                mask_shape = tuple(meta.get('condition_mask_shape'))
+            condition_mask = np.memmap(mask_path, dtype=mask_dtype, mode='r', shape=mask_shape)
+            if verbose:
+                print(f"Loaded condition mask shape: {condition_mask.shape}")
 
-    return pred_preds, pred_probs, pred_sse, meta, true_labels, true_sse
+    return pred_preds, pred_probs, pred_sse, meta, true_labels, true_sse, condition_mask
 
 def save_to_memmap(
     data: np.ndarray,

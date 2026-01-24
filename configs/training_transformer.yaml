@@ -65,10 +65,10 @@ training:
   
   # Memory optimization
   use_amp: true
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 1
   
   # DataLoader
   dataloader:
-    batch_size: 16
-    num_workers: 6
+    batch_size: 8
+    num_workers: 8
     prefetch_factor: 2

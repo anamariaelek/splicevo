@@ -639,7 +639,7 @@ def main():
         
         # Load predictions
         log_fn("Loading predictions...")
-        pred_labels, pred_probs, pred_sse, meta, true_labels, true_sse = load_predictions(str(pred_dir))
+        pred_labels, pred_probs, pred_sse, meta, true_labels, true_sse, condition_mask = load_predictions(str(pred_dir))
         log_fn(f"  Predicted labels shape: {pred_labels.shape}")
         log_fn(f"  Predicted probs shape: {pred_probs.shape}")
         log_fn(f"  Predicted SSE shape: {pred_sse.shape}")
