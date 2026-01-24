@@ -6,6 +6,94 @@ import torch.nn.functional as F
 from typing import Optional
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance in splice site prediction.
+    
+    Focal Loss = -alpha * (1 - p_t)^gamma * log(p_t)
+    
+    Where:
+        - p_t is the probability of the correct class
+        - alpha balances positive/negative examples
+        - gamma focuses on hard-to-classify examples (gamma=0 is cross-entropy)
+    
+    This loss is particularly effective for:
+    - Extreme class imbalance (e.g., non-splice sites >> splice sites)
+    - Reducing influence of easy negative examples
+    - Focusing training on hard-to-classify examples
+    
+    Reference: Lin et al., "Focal Loss for Dense Object Detection" (ICCV 2017)
+    """
+    
+    def __init__(
+        self,
+        alpha: Optional[torch.Tensor] = None,
+        gamma: float = 2.0,
+        reduction: str = 'mean'
+    ):
+        """
+        Args:
+            alpha: Weight for each class. Tensor of shape (num_classes,)
+                   Default None means equal weight for all classes.
+                   Typical usage: [0.25, 1.0, 1.0] to reduce weight on class 0
+            gamma: Focusing parameter. Higher values give more weight to hard examples.
+                   gamma=0 is equivalent to standard cross-entropy.
+                   Recommended values:
+                   - gamma=2.0 (default): Good starting point
+                   - gamma=3.0-5.0: For extreme imbalance
+            reduction: 'mean', 'sum', or 'none'
+        
+        Example:
+            # For splice site prediction with imbalanced classes
+            focal_loss = FocalLoss(
+                alpha=torch.tensor([0.25, 1.0, 1.0]),  # Reduce weight on class 0
+                gamma=2.0  # Focus on hard examples
+            )
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs: Model predictions (logits) of shape (N, C) where C is num_classes
+            targets: Ground truth labels of shape (N,) with values in [0, C-1]
+        
+        Returns:
+            Focal loss value
+        """
+        # Get cross-entropy loss for each example
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        
+        # Get probability of correct class: p_t = exp(-ce_loss)
+        p_t = torch.exp(-ce_loss)
+        
+        # Apply focal term: (1 - p_t)^gamma
+        # When p_t is high (confident, easy examples) -> focal_term is small -> reduced loss
+        # When p_t is low (uncertain, hard examples) -> focal_term is large -> increased loss
+        focal_term = (1 - p_t) ** self.gamma
+        focal_loss = focal_term * ce_loss
+        
+        # Apply alpha weighting if provided
+        if self.alpha is not None:
+            # Ensure alpha is on the same device as inputs
+            if self.alpha.device != inputs.device:
+                self.alpha = self.alpha.to(inputs.device)
+            # Select alpha value for each target's class
+            alpha_t = self.alpha[targets]
+            focal_loss = alpha_t * focal_loss
+        
+        # Apply reduction
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:  # 'none'
+            return focal_loss
+
+
 class WeightedMSELoss(nn.Module):
     """
     Weighted MSE loss where extreme values (near 0 and 1) get higher weights.

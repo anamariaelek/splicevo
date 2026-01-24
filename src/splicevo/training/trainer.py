@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timedelta
 import time
 
-from .losses import WeightedMSELoss, HybridUsageLoss
+from .losses import WeightedMSELoss, HybridUsageLoss, FocalLoss
 
 
 class SpliceTrainer:
@@ -34,6 +34,9 @@ class SpliceTrainer:
         splice_weight: float = 1.0,
         usage_weight: float = 0.5,
         class_weights: Optional[torch.Tensor] = None,
+        splice_loss_type: str = 'cross_entropy',
+        focal_alpha: Optional[torch.Tensor] = None,
+        focal_gamma: float = 2.0,
         checkpoint_dir: Optional[str] = None,
         use_tensorboard: bool = True,
         pin_memory: bool = True,
@@ -67,14 +70,18 @@ class SpliceTrainer:
             weight_decay: L2 regularization weight
             splice_weight: Weight for splice classification loss contribution to total loss
             usage_weight: Weight for usage prediction loss contribution to total loss
-            class_weights: Weights for each splice site class (for imbalanced data)
+            class_weights: Weights for each splice site class (for imbalanced data, used with CrossEntropyLoss)
+            splice_loss_type: Type of loss for splice classification ('cross_entropy' or 'focal')
+            focal_alpha: Alpha weights for Focal Loss (shape: [num_classes]). Example: [0.25, 1.0, 1.0]
+            focal_gamma: Gamma parameter for Focal Loss. Higher = more focus on hard examples. Default 2.0.
             checkpoint_dir: Directory to save checkpoints
             pin_memory: Pin memory for faster CPU-GPU transfer (for memmap data)
             non_blocking: Use non-blocking transfers for better performance
             use_amp: Use automatic mixed precision training (reduces memory usage)
             gradient_accumulation_steps: Number of steps to accumulate gradients before update
             usage_loss_type: Type of usage loss ('mse', 'weighted_mse', 'hybrid')
-            weighted_mse_extreme_threshold: Threshold for extreme values (for weighted_mse)
+            weighted_mse_extreme_low: Low threshold for extreme values (for weighted_mse)
+            weighted_mse_extreme_high: High threshold for extreme values (for weighted_mse)
             weighted_mse_extreme_weight: Weight for extreme values (for weighted_mse)
             hybrid_extreme_low: Low threshold for hybrid loss classification
             hybrid_extreme_high: High threshold for hybrid loss classification
@@ -98,10 +105,27 @@ class SpliceTrainer:
         # Mixed precision training
         self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
         
-        # Loss functions
-        if class_weights is not None:
-            class_weights = class_weights.to(device)
-        self.splice_criterion = nn.CrossEntropyLoss(weight=class_weights)
+        # Loss functions for splice site classification
+        # Choose between Focal Loss or weighted Cross-Entropy Loss
+        if splice_loss_type == 'focal':
+            if focal_alpha is not None:
+                focal_alpha = focal_alpha.to(device)
+            self.splice_criterion = FocalLoss(
+                alpha=focal_alpha,
+                gamma=focal_gamma,
+                reduction='mean'
+            )
+            print(f"Using Focal Loss for splice site classification with gamma={focal_gamma}")
+            if focal_alpha is not None:
+                print(f"  Alpha weights: {focal_alpha}")
+        elif splice_loss_type == 'cross_entropy':
+            if class_weights is not None:
+                class_weights = class_weights.to(device)
+                print(f"Using weighted CrossEntropyLoss for splice site classification")
+                print(f"  Class weights: {class_weights}")
+            self.splice_criterion = nn.CrossEntropyLoss(weight=class_weights)
+        else:
+            raise ValueError(f"splice_loss_type must be 'cross_entropy' or 'focal', got: {splice_loss_type}")
         
         # Usage loss: weighted MSE, hybrid, or regular MSE
         if usage_loss_type == 'weighted_mse':
