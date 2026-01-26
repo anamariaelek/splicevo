@@ -557,6 +557,11 @@ class SplicevoModel(nn.Module):
         splice_logits = splice_logits.transpose(1, 2)
         usage_predictions = usage_predictions.transpose(1, 2)
         
+        # Clip logits to prevent extreme values that cause NaN in loss
+        splice_logits = torch.clamp(splice_logits, min=-10, max=10)
+        # Optionally clip usage predictions if they go out of range
+        usage_predictions = torch.clamp(usage_predictions, min=-0, max=1)
+
         output = {
             'splice_logits': splice_logits,
             'usage_predictions': usage_predictions

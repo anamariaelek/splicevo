@@ -34,15 +34,15 @@ model:
 # Training configuration
 training:
   # Optimizer
-  learning_rate: 1.0e-3
+  learning_rate: 1.0e-4
   weight_decay: 1.0e-3
   warmup_steps: 3000      # Linear warmup from 10% to 100% of learning_rate (about 1 epoch) 
 
   # Loss for splice site prediction
-  splice_loss_type: 'focal'  # Options: 'cross_entropy' or 'focal'
+  splice_loss_type: 'cross_entropy'  # Options: 'cross_entropy' or 'focal'
   
   # Class weights for cross_entropy loss (auto-calculate from class frequencies)
-  class_weights: 'balanced'  # Use 'balanced', 'inverse', or specify [w0, w1, w2]
+  class_weights: 'inverse'  # Use 'balanced', 'inverse', or specify [w0, w1, w2]
   
   # Focal Loss parameters
   focal_alpha: 'auto'   # Options: 'auto' or specify [w0, w1, w2]
@@ -76,6 +76,6 @@ training:
   
   # DataLoader
   dataloader:
-    batch_size: 16
+    batch_size: 8
     num_workers: 8
     prefetch_factor: 2
