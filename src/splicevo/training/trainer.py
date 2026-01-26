@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timedelta
 import time
 
-from .losses import WeightedMSELoss, HybridUsageLoss, FocalLoss
+from .losses import WeightedMSELoss, HybridUsageLoss, FocalLoss, MaskedFocalLoss, HardNegativeMiningLoss
 
 
 class SpliceTrainer:
@@ -37,6 +37,10 @@ class SpliceTrainer:
         splice_loss_type: str = 'cross_entropy',
         focal_alpha: Optional[torch.Tensor] = None,
         focal_gamma: float = 2.0,
+        use_masked_loss: bool = False,
+        context_window: int = 100,
+        use_hard_negative_mining: bool = False,
+        negative_ratio: float = 3.0,
         checkpoint_dir: Optional[str] = None,
         use_tensorboard: bool = True,
         pin_memory: bool = True,
@@ -74,6 +78,10 @@ class SpliceTrainer:
             splice_loss_type: Type of loss for splice classification ('cross_entropy' or 'focal')
             focal_alpha: Alpha weights for Focal Loss (shape: [num_classes]). Example: [0.25, 1.0, 1.0]
             focal_gamma: Gamma parameter for Focal Loss. Higher = more focus on hard examples. Default 2.0.
+            use_masked_loss: Whether to use MaskedFocalLoss (only compute loss near splice sites)
+            context_window: Window size for MaskedFocalLoss (positions around splice sites)
+            use_hard_negative_mining: Whether to use HardNegativeMiningLoss
+            negative_ratio: Ratio of negatives to positives for HardNegativeMiningLoss
             checkpoint_dir: Directory to save checkpoints
             pin_memory: Pin memory for faster CPU-GPU transfer (for memmap data)
             non_blocking: Use non-blocking transfers for better performance
@@ -110,12 +118,33 @@ class SpliceTrainer:
         if splice_loss_type == 'focal':
             if focal_alpha is not None:
                 focal_alpha = focal_alpha.to(device)
-            self.splice_criterion = FocalLoss(
+            
+            # Create base focal loss
+            base_focal = FocalLoss(
                 alpha=focal_alpha,
                 gamma=focal_gamma,
                 reduction='mean'
             )
-            print(f"Using Focal Loss for splice site classification with gamma={focal_gamma}")
+            
+            # Wrap with masked or hard negative mining if requested
+            if use_masked_loss and use_hard_negative_mining:
+                raise ValueError("Cannot use both masked_loss and hard_negative_mining simultaneously")
+            elif use_masked_loss:
+                self.splice_criterion = MaskedFocalLoss(
+                    focal_loss=base_focal,
+                    context_window=context_window
+                )
+                print(f"Using Masked Focal Loss with gamma={focal_gamma}, context_window={context_window}")
+            elif use_hard_negative_mining:
+                self.splice_criterion = HardNegativeMiningLoss(
+                    focal_loss=base_focal,
+                    negative_ratio=negative_ratio
+                )
+                print(f"Using Hard Negative Mining Focal Loss with gamma={focal_gamma}, negative_ratio={negative_ratio}")
+            else:
+                self.splice_criterion = base_focal
+                print(f"Using Focal Loss for splice site classification with gamma={focal_gamma}")
+            
             if focal_alpha is not None:
                 print(f"  Alpha weights: {focal_alpha}")
         elif splice_loss_type == 'cross_entropy':
@@ -488,11 +517,21 @@ class SpliceTrainer:
                 usage_targets_central = usage_targets
                 
                 # Compute splice classification loss
-                splice_logits = output['splice_logits']                
-                splice_loss = self.splice_criterion(
-                    splice_logits.reshape(-1, splice_logits.size(-1)),
-                    splice_labels_central.reshape(-1)
-                )
+                splice_logits = output['splice_logits']
+                
+                # Check if loss function needs 3D input (MaskedFocalLoss)
+                if isinstance(self.splice_criterion, MaskedFocalLoss):
+                    # MaskedFocalLoss expects 3D input (batch, seq_len, num_classes)
+                    splice_loss = self.splice_criterion(
+                        splice_logits,
+                        splice_labels_central
+                    )
+                else:
+                    # Standard losses expect 2D input
+                    splice_loss = self.splice_criterion(
+                        splice_logits.reshape(-1, splice_logits.size(-1)),
+                        splice_labels_central.reshape(-1)
+                    )
                 
                 # Track splice class losses (using central region labels)
                 splice_class_losses = self._track_splice_class_losses(
@@ -806,10 +845,18 @@ class SpliceTrainer:
                     
                     # Compute losses (same as training)
                     splice_logits = output['splice_logits']
-                    splice_loss = self.splice_criterion(
-                        splice_logits.reshape(-1, splice_logits.size(-1)),
-                        splice_labels_central.reshape(-1)
-                    )
+                    
+                    # Check if loss function needs 3D input (MaskedFocalLoss)
+                    if isinstance(self.splice_criterion, MaskedFocalLoss):
+                        splice_loss = self.splice_criterion(
+                            splice_logits,
+                            splice_labels_central
+                        )
+                    else:
+                        splice_loss = self.splice_criterion(
+                            splice_logits.reshape(-1, splice_logits.size(-1)),
+                            splice_labels_central.reshape(-1)
+                        )
                     
                     # Track splice class losses
                     splice_class_losses = self._track_splice_class_losses(

@@ -310,6 +310,205 @@ class HybridUsageLoss(nn.Module):
             return total_loss
 
 
+class MaskedFocalLoss(nn.Module):
+    """
+    Focal loss that only computes loss within a context window around positive sites.
+    
+    This is useful when all sequences contain positive examples but most positions
+    are negative. By masking distant negatives, we focus learning on the relevant
+    regions around splice sites.
+    
+    Example:
+        >>> loss_fn = MaskedFocalLoss(
+        ...     focal_loss=FocalLoss(gamma=2.0, alpha=torch.tensor([0.25, 1.0, 1.0])),
+        ...     context_window=100  # Only compute loss within ±100bp of splice sites
+        ... )
+    """
+    
+    def __init__(
+        self,
+        focal_loss: FocalLoss,
+        context_window: int = 100
+    ):
+        """
+        Args:
+            focal_loss: Base focal loss to use
+            context_window: Number of positions around each positive site to include
+        """
+        super().__init__()
+        self.focal_loss = focal_loss
+        self.context_window = context_window
+    
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs: Model predictions of shape (batch, seq_len, num_classes)
+            targets: Ground truth labels of shape (batch, seq_len)
+        
+        Returns:
+            Masked focal loss value
+        """
+        if inputs.dim() == 2:
+            # Already flattened (N, C)
+            return self.focal_loss(inputs, targets)
+        
+        batch_size, seq_len, num_classes = inputs.shape
+        
+        # Create mask for positions to include in loss
+        loss_mask = torch.zeros_like(targets, dtype=torch.bool)
+        
+        for b in range(batch_size):
+            # Find positive positions
+            pos_indices = torch.where(targets[b] > 0)[0]
+            
+            if len(pos_indices) > 0:
+                # Include all positives
+                loss_mask[b, pos_indices] = True
+                
+                # Include negatives within window of positives
+                for pos_idx in pos_indices:
+                    start = max(0, pos_idx - self.context_window)
+                    end = min(seq_len, pos_idx + self.context_window + 1)
+                    loss_mask[b, start:end] = True
+            else:
+                # If no positives (shouldn't happen), include all positions
+                loss_mask[b, :] = True
+        
+        # Flatten and apply mask
+        inputs_flat = inputs.reshape(-1, num_classes)
+        targets_flat = targets.reshape(-1)
+        loss_mask_flat = loss_mask.reshape(-1)
+        
+        # Compute loss only on masked positions
+        if loss_mask_flat.sum() > 0:
+            masked_inputs = inputs_flat[loss_mask_flat]
+            masked_targets = targets_flat[loss_mask_flat]
+            
+            loss = self.focal_loss(masked_inputs, masked_targets)
+            return loss
+        else:
+            return torch.tensor(0.0, device=inputs.device, requires_grad=True)
+
+
+class HardNegativeMiningLoss(nn.Module):
+    """
+    Focus training on hard negative examples.
+    
+    Instead of using all negative positions, this loss identifies the most difficult
+    negatives (those with high predicted probability) and only trains on those plus
+    all positive examples.
+    
+    This is effective when you have many easy negatives that dominate the loss,
+    preventing the model from learning the harder cases.
+    
+    Example:
+        >>> loss_fn = HardNegativeMiningLoss(
+        ...     focal_loss=FocalLoss(gamma=2.0),
+        ...     negative_ratio=3.0  # Use 3 negatives for every positive
+        ... )
+    """
+    
+    def __init__(
+        self,
+        focal_loss: FocalLoss,
+        negative_ratio: float = 3.0
+    ):
+        """
+        Args:
+            focal_loss: Base focal loss to use
+            negative_ratio: Ratio of negative to positive examples to keep
+                          E.g., 3.0 means keep 3 negatives for each positive
+        """
+        super().__init__()
+        self.focal_loss = focal_loss
+        self.negative_ratio = negative_ratio
+    
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs: Model predictions of shape (N, C) or (batch, seq_len, num_classes)
+            targets: Ground truth labels of shape (N,) or (batch, seq_len)
+        
+        Returns:
+            Loss computed on positives + hard negatives
+        """
+        # Flatten if needed
+        if inputs.dim() == 3:
+            batch_size, seq_len, num_classes = inputs.shape
+            inputs = inputs.reshape(-1, num_classes)
+            targets = targets.reshape(-1)
+        
+        # Separate positive and negative examples
+        pos_mask = targets > 0
+        neg_mask = targets == 0
+        
+        n_positives = pos_mask.sum().item()
+        
+        if n_positives == 0:
+            # No positives, use all negatives
+            return self.focal_loss(inputs, targets)
+        
+        # Always include all positives
+        pos_inputs = inputs[pos_mask]
+        pos_targets = targets[pos_mask]
+        
+        # Compute loss for all negatives to identify hard ones
+        neg_inputs = inputs[neg_mask]
+        neg_targets = targets[neg_mask]
+        
+        if len(neg_inputs) == 0:
+            # No negatives (shouldn't happen)
+            return self.focal_loss(pos_inputs, pos_targets)
+        
+        # Get negative loss for each example
+        with torch.no_grad():
+            neg_losses = F.cross_entropy(neg_inputs, neg_targets, reduction='none')
+        
+        # Select hard negatives (highest loss = most difficult)
+        n_hard_negatives = int(n_positives * self.negative_ratio)
+        n_hard_negatives = min(n_hard_negatives, len(neg_losses))
+        
+        if n_hard_negatives > 0:
+            hard_neg_indices = torch.topk(neg_losses, n_hard_negatives).indices
+            hard_neg_inputs = neg_inputs[hard_neg_indices]
+            hard_neg_targets = neg_targets[hard_neg_indices]
+            
+            # Combine positives and hard negatives
+            combined_inputs = torch.cat([pos_inputs, hard_neg_inputs], dim=0)
+            combined_targets = torch.cat([pos_targets, hard_neg_targets], dim=0)
+        else:
+            combined_inputs = pos_inputs
+            combined_targets = pos_targets
+        
+        # Compute loss on selected examples
+        loss = self.focal_loss(combined_inputs, combined_targets)
+        return loss
+
+
+def get_splice_loss_fn(loss_type: str = 'focal', **kwargs) -> nn.Module:
+    """
+    Factory function to create splice site loss functions.
+    
+    Args:
+        loss_type: 'cross_entropy', 'focal', 'masked_focal', 'hard_negative_mining'
+        **kwargs: Additional arguments for the loss function
+    """
+    if loss_type == 'cross_entropy':
+        return nn.CrossEntropyLoss()
+    elif loss_type == 'focal':
+        return FocalLoss(**kwargs)
+    elif loss_type == 'masked_focal':
+        base_focal = FocalLoss(**kwargs.get('focal_params', {}))
+        context_window = kwargs.get('context_window', 100)
+        return MaskedFocalLoss(focal_loss=base_focal, context_window=context_window)
+    elif loss_type == 'hard_negative_mining':
+        base_focal = FocalLoss(**kwargs.get('focal_params', {}))
+        negative_ratio = kwargs.get('negative_ratio', 3.0)
+        return HardNegativeMiningLoss(focal_loss=base_focal, negative_ratio=negative_ratio)
+    else:
+        raise ValueError(f"Unknown loss type: {loss_type}")
+
+
 def get_usage_loss_fn(loss_type: str = 'weighted_mse', **kwargs) -> nn.Module:
     """
     Factory function to create usage loss functions.
