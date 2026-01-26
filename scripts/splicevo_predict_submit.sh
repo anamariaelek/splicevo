@@ -32,12 +32,12 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 SUBSET="full"
 SPECIES="mouse_rat_human"
 KB="1"
-MODEL=${SUBSET}_${SPECIES}_${KB}kb_focal
+MODEL=${SUBSET}_${SPECIES}_${KB}kb_wce_clip
 
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/test/
 MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${MODEL}/
 PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/transformer/${MODEL}/
-echo "Starting training job at "$(date)
+echo "Starting prediction job at "$(date)
 echo "Test data: ${DATA_TEST_DIR}"
 echo "Model directory: ${MODEL_DIR}"
 echo "Predictions directory: ${PREDICTIONS_DIR}"

@@ -33,6 +33,8 @@ class SpliceTrainer:
         weight_decay: float = 1e-5,
         splice_weight: float = 1.0,
         usage_weight: float = 0.5,
+        use_dynamic_loss_balancing: bool = False,
+        loss_balance_momentum: float = 0.95,
         class_weights: Optional[torch.Tensor] = None,
         splice_loss_type: str = 'cross_entropy',
         focal_alpha: Optional[torch.Tensor] = None,
@@ -69,7 +71,12 @@ class SpliceTrainer:
             learning_rate: Initial learning rate
             weight_decay: L2 regularization weight
             splice_weight: Weight for splice classification loss contribution to total loss
+                         If use_dynamic_loss_balancing=True, this represents desired percentage (0-1)
             usage_weight: Weight for usage prediction loss contribution to total loss
+                         If use_dynamic_loss_balancing=True, this represents desired percentage (0-1)
+            use_dynamic_loss_balancing: Automatically adjust effective weights to maintain desired
+                                       contribution ratios (solves focal loss multi-task issue)
+            loss_balance_momentum: Momentum for moving average of loss magnitudes (0.9-0.99)
             class_weights: Weights for each splice site class (for imbalanced data, used with CrossEntropyLoss)
             splice_loss_type: Type of loss for splice classification ('cross_entropy' or 'focal')
             focal_alpha: Alpha weights for Focal Loss (shape: [num_classes]). Example: [0.25, 1.0, 1.0]
@@ -149,6 +156,19 @@ class SpliceTrainer:
         # Loss weights for multi-task learning
         self.splice_weight = splice_weight
         self.usage_weight = usage_weight
+        self.use_dynamic_loss_balancing = use_dynamic_loss_balancing
+        self.loss_balance_momentum = loss_balance_momentum
+        
+        # Dynamic loss balancing state
+        if self.use_dynamic_loss_balancing:
+            self.loss_magnitude_ema = {
+                'splice': None,  # Exponential moving average of splice loss magnitude
+                'usage': None    # Exponential moving average of usage loss magnitude
+            }
+            print(f"\nDynamic Loss Balancing enabled:")
+            print(f"  Target splice contribution: {splice_weight*100:.1f}%")
+            print(f"  Target usage contribution: {usage_weight*100:.1f}%")
+            print(f"  Momentum: {loss_balance_momentum}")
         
         # Optimizer and scheduler
         self.optimizer = optim.AdamW(
@@ -606,11 +626,53 @@ class SpliceTrainer:
                     else:
                         usage_loss = torch.tensor(0.0, device=self.device)
             
-            # Combined loss (scale by accumulation steps)
-            loss = (
-                self.splice_weight * splice_loss +
-                self.usage_weight * usage_loss
-            ) / self.gradient_accumulation_steps
+            # Combined loss with dynamic balancing
+            if self.use_dynamic_loss_balancing and self.model.training:
+                # Update exponential moving averages of loss magnitudes
+                splice_mag = splice_loss.detach().item()
+                usage_mag = usage_loss.detach().item()
+                
+                if self.loss_magnitude_ema['splice'] is None:
+                    # Initialize on first batch
+                    self.loss_magnitude_ema['splice'] = splice_mag
+                    self.loss_magnitude_ema['usage'] = usage_mag
+                else:
+                    # Update with momentum
+                    momentum = self.loss_balance_momentum
+                    self.loss_magnitude_ema['splice'] = momentum * self.loss_magnitude_ema['splice'] + (1 - momentum) * splice_mag
+                    self.loss_magnitude_ema['usage'] = momentum * self.loss_magnitude_ema['usage'] + (1 - momentum) * usage_mag
+                
+                # Compute effective weights to achieve desired contribution ratios
+                # Goal: splice_weight * eff_splice_w * splice_loss = target_splice_contribution * total
+                #       usage_weight * eff_usage_w * usage_loss = target_usage_contribution * total
+                
+                # Normalize target weights to sum to 1
+                total_target = self.splice_weight + self.usage_weight
+                target_splice_ratio = self.splice_weight / total_target
+                target_usage_ratio = self.usage_weight / total_target
+                
+                # Compute effective weights based on EMAs
+                ema_splice = self.loss_magnitude_ema['splice']
+                ema_usage = self.loss_magnitude_ema['usage']
+                
+                # Effective weight = target_ratio / (ema_magnitude * normalization_factor)
+                # The normalization factor ensures the weighted sum equals 1
+                denominator = target_splice_ratio / ema_splice + target_usage_ratio / ema_usage
+                eff_splice_weight = (target_splice_ratio / ema_splice) / denominator
+                eff_usage_weight = (target_usage_ratio / ema_usage) / denominator
+                
+                # Apply effective weights
+                loss = (
+                    eff_splice_weight * splice_loss +
+                    eff_usage_weight * usage_loss
+                ) / self.gradient_accumulation_steps
+                
+            else:
+                # Standard fixed weighting
+                loss = (
+                    self.splice_weight * splice_loss +
+                    self.usage_weight * usage_loss
+                ) / self.gradient_accumulation_steps
             
             # Backward pass with gradient scaling
             if self.use_amp:
@@ -643,6 +705,17 @@ class SpliceTrainer:
                     self.writer.add_scalar('Train/Splice_Loss_Batch', splice_loss.item(), self.global_step)
                     self.writer.add_scalar('Train/Usage_Loss_Batch', usage_loss.item(), self.global_step)
                     self.writer.add_scalar('Train/Learning_Rate', self.optimizer.param_groups[0]['lr'], self.global_step)
+                    
+                    # Log dynamic loss balancing weights
+                    if self.use_dynamic_loss_balancing and self.loss_magnitude_ema['splice'] is not None:
+                        self.writer.add_scalar('Train/Dynamic_Splice_EMA', self.loss_magnitude_ema['splice'], self.global_step)
+                        self.writer.add_scalar('Train/Dynamic_Usage_EMA', self.loss_magnitude_ema['usage'], self.global_step)
+                        
+                        # Compute effective contribution percentages
+                        splice_contrib = (eff_splice_weight * splice_mag) / (eff_splice_weight * splice_mag + eff_usage_weight * usage_mag)
+                        usage_contrib = (eff_usage_weight * usage_mag) / (eff_splice_weight * splice_mag + eff_usage_weight * usage_mag)
+                        self.writer.add_scalar('Train/Dynamic_Splice_Contribution', splice_contrib * 100, self.global_step)
+                        self.writer.add_scalar('Train/Dynamic_Usage_Contribution', usage_contrib * 100, self.global_step)
                     
                     # Log gradient norms every N steps
                     if self.global_step % 100 == 0:
@@ -697,6 +770,11 @@ class SpliceTrainer:
         # Log splice class losses to TensorBoard
         if self.writer is not None:
             epoch_num = self.current_epoch
+            
+            # Dynamic loss balancing status
+            if self.use_dynamic_loss_balancing and self.loss_magnitude_ema['splice'] is not None:
+                self.writer.add_scalar('Dynamic_Balancing/Splice_EMA', self.loss_magnitude_ema['splice'], epoch_num)
+                self.writer.add_scalar('Dynamic_Balancing/Usage_EMA', self.loss_magnitude_ema['usage'], epoch_num)
             
             # Splice class losses
             class_tracking = self.splice_class_tracking['train'][self.current_epoch + 1]

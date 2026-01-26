@@ -581,11 +581,11 @@ def main():
         
         # Get alpha from config
         focal_alpha_config = config['training'].get('focal_alpha', None)
-        if focal_alpha_config == 'auto' or focal_alpha_config == 'balanced':
-            # Auto-calculate alpha from class weights
+        if focal_alpha_config == 'inverse' or focal_alpha_config == 'balanced':
+            # Calculate inverse frequency alpha from class weights
             if class_weights is not None:
                 focal_alpha = class_weights
-                log_print(f"  Auto-calculated alpha from class weights: {focal_alpha.tolist()}")
+                log_print(f"  Inverse frequency alpha from class weights: {focal_alpha.tolist()}")
             else:
                 focal_alpha = None
                 log_print("  No class weights available, using equal alpha weights")
@@ -676,6 +676,8 @@ def main():
         weight_decay=training_config['weight_decay'],
         splice_weight=training_config.get('splice_weight', 1.0),
         usage_weight=training_config.get('usage_weight', 0.5) if n_conditions > 0 else 0.0,
+        use_dynamic_loss_balancing=training_config.get('use_dynamic_loss_balancing', False),
+        loss_balance_momentum=training_config.get('loss_balance_momentum', 0.95),
         class_weights=class_weights_for_trainer,
         splice_loss_type=splice_loss_type,
         focal_alpha=focal_alpha,

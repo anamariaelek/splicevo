@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_mouse_rat_human
+#SBATCH --job-name=dynloss_wce
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
@@ -53,7 +53,7 @@ SPECIES="mouse_rat_human"
 KB="1"
 TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_transformer.yaml
 DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/train/
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${SUBSET}_${SPECIES}_${KB}kb_wce/
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${SUBSET}_${SPECIES}_${KB}kb_dynloss_wce/
 echo "Starting training job at "$(date)
 echo "Training config: ${TRAINING_CONFIG}"
 echo "Training data: ${DATA_TRAIN_DIR}"
