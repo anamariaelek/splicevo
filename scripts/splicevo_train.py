@@ -566,6 +566,43 @@ def main():
     n_train = int(split_ratio * len(sequences))
     class_weights = compute_class_weights(labels, config, n_train, log_print)
     
+    # Parse splice loss type
+    splice_loss_type = config['training'].get('splice_loss_type', 'cross_entropy')
+    if splice_loss_type not in ['cross_entropy', 'focal']:
+        raise ValueError(f"splice_loss_type must be 'cross_entropy' or 'focal', got: {splice_loss_type}")
+    
+    focal_alpha = None
+    focal_gamma = 2.0
+    class_weights_for_trainer = None
+    
+    if splice_loss_type == 'focal':
+        log_print("\nConfiguring Focal Loss for splice site classification...")
+        focal_gamma = config['training'].get('focal_gamma', 2.0)
+        
+        # Get alpha from config
+        focal_alpha_config = config['training'].get('focal_alpha', None)
+        if focal_alpha_config == 'auto' or focal_alpha_config == 'balanced':
+            # Auto-calculate alpha from class weights
+            if class_weights is not None:
+                focal_alpha = class_weights
+                log_print(f"  Auto-calculated alpha from class weights: {focal_alpha.tolist()}")
+            else:
+                focal_alpha = None
+                log_print("  No class weights available, using equal alpha weights")
+        elif focal_alpha_config is not None:
+            # Use provided alpha values
+            focal_alpha = torch.tensor(focal_alpha_config, dtype=torch.float32)
+            log_print(f"  Using provided alpha: {focal_alpha.tolist()}")
+        else:
+            focal_alpha = None
+            log_print("  Using equal alpha weights (None)")
+    else:
+        # Using cross_entropy loss with class weights
+        class_weights_for_trainer = class_weights
+        
+        log_print(f"  Gamma: {focal_gamma} (focusing parameter)")
+        log_print("  Note: Class weights will be ignored when using Focal Loss")
+    
     # Create model (pass usage_sse to determine n_conditions)
     model_start = time.time()
     model, n_conditions = create_model(config, usage_sse, species_mapping, log_print)
@@ -639,7 +676,10 @@ def main():
         weight_decay=training_config['weight_decay'],
         splice_weight=training_config.get('splice_weight', 1.0),
         usage_weight=training_config.get('usage_weight', 0.5) if n_conditions > 0 else 0.0,
-        class_weights=class_weights,
+        class_weights=class_weights_for_trainer,
+        splice_loss_type=splice_loss_type,
+        focal_alpha=focal_alpha,
+        focal_gamma=focal_gamma,
         checkpoint_dir=str(checkpoint_dir),
         use_tensorboard=config['output'].get('use_tensorboard', True),
         use_amp=training_config.get('use_amp', True),

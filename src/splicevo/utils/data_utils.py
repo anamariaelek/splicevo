@@ -252,11 +252,27 @@ def load_predictions(fn, keys=None, verbose=False):
                 mask_dtype = np.dtype(meta['condition_mask'].get('dtype', 'bool'))
                 mask_shape = tuple(meta['condition_mask']['shape'])
             else:
+                # Infer shape from metadata if not explicitly stored
                 mask_dtype = np.dtype(meta.get('condition_mask_dtype', 'bool'))
-                mask_shape = tuple(meta.get('condition_mask_shape'))
-            condition_mask = np.memmap(mask_path, dtype=mask_dtype, mode='r', shape=mask_shape)
-            if verbose:
-                print(f"Loaded condition mask shape: {condition_mask.shape}")
+                # Get number of sequences from any available array
+                n_sequences = None
+                if 'splice_predictions' in meta:
+                    n_sequences = meta['splice_predictions']['shape'][0]
+                elif 'labels_true' in meta:
+                    n_sequences = meta['labels_true']['shape'][0]
+                
+                # Get number of conditions from metadata
+                n_conditions = len(meta.get('conditions', []))
+                
+                if n_sequences is not None and n_conditions > 0:
+                    mask_shape = (n_sequences, n_conditions)
+                else:
+                    mask_shape = tuple(meta.get('condition_mask_shape', ()))
+            
+            if mask_shape:
+                condition_mask = np.memmap(mask_path, dtype=mask_dtype, mode='r', shape=mask_shape)
+                if verbose:
+                    print(f"Loaded condition mask shape: {condition_mask.shape}")
 
     return pred_preds, pred_probs, pred_sse, meta, true_labels, true_sse, condition_mask
 
