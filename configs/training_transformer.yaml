@@ -39,7 +39,7 @@ training:
   warmup_steps: 3000      # Linear warmup from 10% to 100% of learning_rate (about 1 epoch) 
 
   # Loss for splice site prediction
-  splice_loss_type: 'cross_entropy'  # Options: 'cross_entropy' or 'focal'
+  splice_loss_type: 'focal'  # Options: 'cross_entropy' or 'focal'
   
   # Class weights for cross_entropy loss
   class_weights: 'inverse'  # Use 'balanced', 'inverse', or specify [w0, w1, w2]
@@ -66,9 +66,8 @@ training:
   splice_weight: 0.5
   usage_weight: 0.5
   
-  # Dynamic loss balancing - automatically adjust weights for consistent contributions
+  # Dynamic loss balancing - calculate weights from first epoch for consistent contributions
   use_dynamic_loss_balancing: true  # Recommended for multi-task learning with focal loss
-  loss_balance_momentum: 0.95       # Smoothing factor for loss magnitude tracking
   
   # Training loop
   n_epochs: 50
@@ -76,10 +75,10 @@ training:
   
   # Memory optimization
   use_amp: true
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 4
   
   # DataLoader
   dataloader:
-    batch_size: 8
+    batch_size: 32
     num_workers: 8
     prefetch_factor: 2

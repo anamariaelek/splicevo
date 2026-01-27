@@ -677,7 +677,6 @@ def main():
         splice_weight=training_config.get('splice_weight', 1.0),
         usage_weight=training_config.get('usage_weight', 0.5) if n_conditions > 0 else 0.0,
         use_dynamic_loss_balancing=training_config.get('use_dynamic_loss_balancing', False),
-        loss_balance_momentum=training_config.get('loss_balance_momentum', 0.95),
         class_weights=class_weights_for_trainer,
         splice_loss_type=splice_loss_type,
         focal_alpha=focal_alpha,
