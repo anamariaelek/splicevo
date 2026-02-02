@@ -4,7 +4,7 @@
 device: cuda              # "cuda" or "cpu"
 cpu_threads: 8
 cudnn_benchmark: true
-gpu_memory_fraction: 0.9  # Reduce if using a shared GPU!
+gpu_memory_fraction: 0.8  # Reduce if using a shared GPU!
 
 # Data configuration
 data:
@@ -26,20 +26,39 @@ model:
   dilation_strategy: alternating
   alternate: 4
   bottleneck_dim: 128   # Try 128 (default), 256 (balanced), 320, or 640 (full multi-scale)
-  num_heads: 8          # Transformer heads
   num_classes: 3        # Splice donor, acceptor, not a splice site
   context_len: 450      # This must match context_size in data creation (verify in metadata.json)
   dropout: 0.4
 
+  # Pooling strategy - using SoftmaxSumPool instead of attention
+  pooling_type: 'attention'  # Options: 'attention' or 'softmax_pool'
+    
+  # Attention parameters (not used when pooling_type='softmax_pool')
+  num_heads: 8          # Transformer heads
+  
+  # SoftmaxSumPool parameters
+  mult_factor: 5.0      # Multiplication factor for softmax weighting (higher = sharper weighting)
+  mult_factor_learnable: false  # Whether mult_factor should be learnable
+
 # Training configuration
 training:
   # Optimizer
-  learning_rate: 1.0e-3
+  learning_rate: 1.0e-4
   weight_decay: 1.0e-3
   warmup_steps: 500       # Linear warmup from 10% to 100% of learning_rate (~1 epoch)
 
+  # Loss for splice site prediction
+  splice_loss_type: 'cross_entropy'  # Options: 'cross_entropy' or 'focal'
+  
+  # Class weights for cross_entropy loss
+  class_weights: 'inverse'  # Use 'balanced', 'inverse', or specify [w0, w1, w2]
+  
+  # Focal Loss parameters
+  focal_alpha: 'inverse'   # Use 'inverse' or specify [w0, w1, w2]
+  focal_gamma: 2.0         # Focusing parameter (higher = more focus on hard examples)
+
   # Loss for splice site usage (SSE)
-  usage_loss_type: 'weighted_mse'  # 'mse' or 'bce' or 'weighted_mse' or 'hybrid'
+  usage_loss_type: 'weighted_mse'  # Options: 'mse', 'bce', 'weighted_mse' or 'hybrid'
 
   # Weighted MSE parameters
   weighted_mse_extreme_low: 0.1        # Values < this are extreme near zero
@@ -55,9 +74,9 @@ training:
   # How to combine splice site and usage loss
   splice_weight: 0.5
   usage_weight: 0.5
-
-  # Class balancing (not a splice site, aceptor, donor)
-  use_class_weights: true
+  
+  # Dynamic loss balancing - calculate weights from first batches for consistent contributions of splice and usage losses
+  use_dynamic_loss_balancing: true  # Recommended for multi-task learning with focal loss
 
   # Training loop
   n_epochs: 50
@@ -68,13 +87,7 @@ training:
   gradient_accumulation_steps: 8  # Increased to maintain effective batch size
   
   # DataLoader
-  # A40 48GB: batch=16 causes OOM (tries to allocate 16.6GB for attention!)
-  # For seq_len=5900, attention matrix is B*8*5900*5900*2 bytes (fp16)
-  # B=4:  ~2.1 GB + overhead = ~6 GB (verified working)
-  # B=8:  ~4.2 GB + overhead = ~15 GB (safe compromise)
-  # B=16: ~8.4 GB + overhead = ~31 GB → OOM on A40
-  # With gradient_accumulation_steps=8: effective batch = 8*8 = 64
   dataloader:
-    batch_size: 8
+    batch_size: 32
     num_workers: 6
     prefetch_factor: 2

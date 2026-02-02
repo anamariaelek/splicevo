@@ -1,10 +1,10 @@
-# Updated training configuration for Splicevo model
+# Training configuration for Splicevo model with SoftmaxSumPool
 
 # Device configuration
 device: cuda
 cpu_threads: 8
 cudnn_benchmark: true
-gpu_memory_fraction: 1.0  # Use more GPU memory for larger batches
+gpu_memory_fraction: 0.8  # Use more GPU memory for larger batches
 
 # Data configuration
 data:
@@ -16,7 +16,7 @@ data:
 
 # Output configuration
 output:
-  checkpoint_dir: /home/elek/sds/sd17d003/Anamaria/splicevo/models/transformer/full_mouse_rat_human_5kb
+  checkpoint_dir: /home/elek/sds/sd17d003/Anamaria/splicevo/models/softmax_pool/full_mouse_rat_human_5kb
   use_tensorboard: true
 
 # Model architecture
@@ -25,21 +25,21 @@ model:
   num_resblocks: 16
   dilation_strategy: alternating
   alternate: 4 
-  bottleneck_dim: 128   # Try 128 (default), 256 (balanced), 320, or 640 (full multi-scale)
+  bottleneck_dim: 128   # Try 128 (default), 256 (balanced), 320, or 640 (full multi-scale)  
   num_classes: 3        # Splice donor, acceptor, not a splice site
   context_len: 450      # This must match context_size in data creation (verify in metadata.json)
   dropout: 0.4
 
-  # Pooling strategy - choose 'attention' or 'softmax_pool'
-  pooling_type: 'attention'  # Options: 'attention' or 'softmax_pool'
+  # Pooling strategy - using SoftmaxSumPool instead of attention
+  pooling_type: 'softmax_pool'  # Options: 'attention' or 'softmax_pool'
   
-  # Attention parameters (used when pooling_type='attention')
+  # Attention parameters (not used when pooling_type='softmax_pool')
   num_heads: 8          # Transformer heads
   
-  # SoftmaxSumPool parameters (used when pooling_type='softmax_pool')
-  mult_factor: 1.0      # Multiplication factor for softmax weighting
+  # SoftmaxSumPool parameters
+  mult_factor: 5.0      # Multiplication factor for softmax weighting (higher = sharper weighting)
   mult_factor_learnable: false  # Whether mult_factor should be learnable
-
+  
 # Training configuration
 training:
   # Optimizer
@@ -75,7 +75,7 @@ training:
   splice_weight: 0.5
   usage_weight: 0.5
   
-  # Dynamic loss balancing - calculate weights from first epoch for consistent contributions
+  # Dynamic loss balancing - calculate weights from first batches for consistent contributions of splice and usage losses
   use_dynamic_loss_balancing: true  # Recommended for multi-task learning with focal loss
   
   # Training loop
@@ -88,6 +88,6 @@ training:
   
   # DataLoader
   dataloader:
-    batch_size: 32
+    batch_size: 128
     num_workers: 8
     prefetch_factor: 2

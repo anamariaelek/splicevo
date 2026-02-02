@@ -26,10 +26,19 @@ model:
   dilation_strategy: alternating
   alternate: 4
   bottleneck_dim: 128   # Try 128 (default), 256 (balanced), 320, or 640 (full multi-scale)
-  num_heads: 8          # Transformer heads
   num_classes: 3        # Splice donor, acceptor, not a splice site
   context_len: 450      # This must match context_size in data creation (verify in metadata.json)
   dropout: 0.3
+
+  # Pooling strategy - using SoftmaxSumPool instead of attention
+  pooling_type: 'attention'  # Options: 'attention' or 'softmax_pool'
+    
+  # Attention parameters (not used when pooling_type='softmax_pool')
+  num_heads: 8          # Transformer heads
+  
+  # SoftmaxSumPool parameters
+  mult_factor: 5.0      # Multiplication factor for softmax weighting (higher = sharper weighting)
+  mult_factor_learnable: false  # Whether mult_factor should be learnable
 
 # Training configuration
 training:
@@ -39,14 +48,14 @@ training:
   warmup_steps: 3000
 
   # Loss for splice site prediction
-  splice_loss_type: 'cross_entropy'
-
-  # Class weights for cross_entropy loss (auto-calculate from class frequencies)
+  splice_loss_type: 'cross_entropy'  # Options: 'cross_entropy' or 'focal'
+  
+  # Class weights for cross_entropy loss
   class_weights: 'inverse'  # Use 'balanced', 'inverse', or specify [w0, w1, w2]
-
+  
   # Focal Loss parameters
-  focal_alpha: 'auto'
-  focal_gamma: 2
+  focal_alpha: 'inverse'   # Use 'inverse' or specify [w0, w1, w2]
+  focal_gamma: 2.0         # Focusing parameter (higher = more focus on hard examples)
 
   # Loss for splice site usage (SSE)
   usage_loss_type: 'weighted_mse'  # Options: 'mse', 'bce', 'weighted_mse' or 'hybrid'
@@ -66,7 +75,7 @@ training:
   splice_weight: 0.5
   usage_weight: 0.5
 
-  # Dynamic loss balancing
+  # Dynamic loss balancing - calculate weights from first batches for consistent contributions of splice and usage losses
   use_dynamic_loss_balancing: true  # Recommended for multi-task learning with focal loss
   
   # Training loop

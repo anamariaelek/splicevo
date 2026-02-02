@@ -27,13 +27,13 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
-SUBSET="full"
+SUBSET="small"
 SPECIES="mouse_rat_human"
-KB="1"
-MODEL=${SUBSET}_${SPECIES}_${KB}kb_dynloss_wce
+KB="5"
+MODEL=${SUBSET}_${SPECIES}_${KB}kb
 
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/test/
-PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/transformer/${MODEL}/
+PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/softmax_pool/${MODEL}/
 
 echo "Starting evaluation job at "$(date)
 echo "Test data: ${DATA_TEST_DIR}"

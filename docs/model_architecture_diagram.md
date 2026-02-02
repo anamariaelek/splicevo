@@ -1,5 +1,34 @@
 # SplicevoModel Architecture Diagram
 
+## Pooling/Aggregation Options
+
+**Pooling Type (config: `model.pooling_type`)**
+
+The model supports two options for aggregating sequence features after the encoder:
+
+- `attention` (default): Uses a transformer-based multi-head self-attention module to aggregate sequence features, allowing the model to learn complex dependencies across the sequence.
+- `softmax_pooling`: Uses a softmax pooling layer, which computes a learned softmax-weighted sum over the sequence, providing a simpler and more memory-efficient alternative to attention.
+
+The pooling type can be selected in the config YAML under the `model` section:
+
+```yaml
+model:
+  ...
+  pooling_type: softmax_pooling  # or 'attention'
+```
+
+**Softmax Pooling**
+
+Softmax pooling aggregates features as follows:
+
+$$
+	ext{pooled} = \sum_{i=1}^{L} \text{softmax}(w_i) \cdot x_i
+$$
+
+where $x_i$ are the sequence features and $w_i$ are learned weights for each position. This provides a global summary of the sequence, which is then broadcast to the central region for prediction.
+
+---
+
 ## Methods: Model Architecture
 
 ### Overview
@@ -302,28 +331,28 @@ The model outputs a dictionary containing:
                               ▼
                     ┌─────────────────────────────────────┐
                     │  Concatenation                      │
-                    │  5 * 128 = 640 channels            │
-                    │  Output: (B, 1900, 640)            │
+                    │  5 * 128 = 640 channels             │
+                    │  Output: (B, 1900, 640)             │
                     └─────────────────────────────────────┘
                               │
                               ▼
                     ┌─────────────────────────────────────┐
                     │  Bottleneck Fusion (1x1 conv)       │
                     │  640 → 128 channels                 │
-                    │  Output: (B, 1900, 128)            │
+                    │  Output: (B, 1900, 128)             │
                     └─────────────────────────────────────┘
                               │
                               ▼
                     ┌─────────────────────────────────────┐
                     │  ReLU + Expand (1x1 conv)           │
-                    │  Output: (B, 1900, 128)            │
+                    │  Output: (B, 1900, 128)             │
                     └─────────────────────────────────────┘
                               │
                               ▼
                     ┌─────────────────────────────────────┐
                     │  LayerNorm + Dropout (p=0.5)        │
-                    │  Output: (B, 1900, 128)            │
-                    │  Name: fused_skip                  │
+                    │  Output: (B, 1900, 128)             │
+                    │  Name: fused_skip                   │
                     └─────────────────────────────────────┘
 ```
 
@@ -334,7 +363,7 @@ The model outputs a dictionary containing:
                     │  CENTRAL REGION EXTRACTION          │
                     │  Remove context (450 bp on each end)│
                     │  Extract middle 1000 positions      │
-                    │  fused_skip[:, 450:-450, :]        │
+                    │  fused_skip[:, 450:-450, :]         │
                     └─────────────────────────────────────┘
                               │
                               ▼

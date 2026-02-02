@@ -4,6 +4,76 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Dict
 import numpy as np
 
+class SoftmaxSumPool(nn.Module):
+    """Softmax-weighted cumulative sum pooling as an alternative to attention.
+    
+    This module computes bidirectional cumulative weighted sums where weights are 
+    derived from softmax exponentials. Each position accumulates information from 
+    all previous positions (0 to i) and all following positions (i to len).
+    """
+    
+    def __init__(self, dim=-1, mult_factor=1.0, mult_factor_learnable=False, **kwargs):
+        """
+        Initialize SoftmaxSumPool.
+        
+        Args:
+            dim: Dimension along which to pool (default: -1, the sequence dimension)
+            mult_factor: Multiplication factor for the softmax weighting (default: 1.0)
+            mult_factor_learnable: Whether mult_factor should be a learnable parameter
+        """
+        super(SoftmaxSumPool, self).__init__()
+        self.mult_factor_learnable = mult_factor_learnable
+        self.min_mult_factor = mult_factor  # Store the minimum allowed value
+        
+        # Initialize learnable parameter with the given value
+        if mult_factor_learnable:
+            self.mult_factor = nn.Parameter(torch.tensor(self.min_mult_factor))
+        else:
+            self.mult_factor = torch.tensor(self.min_mult_factor)
+        
+        self.dim = dim
+
+    def forward(self, x):
+        """
+        Forward pass of bidirectional softmax sum pooling.
+        
+        Computes weighted cumulative sums from both directions:
+        - Forward: accumulates from positions 0 to i
+        - Backward: accumulates from positions i to len
+        Then combines them.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, embed_dim)
+            
+        Returns:
+            Output tensor of shape (batch_size, seq_len, embed_dim)
+        """
+        if self.mult_factor_learnable:
+            # Ensure the learnable parameter does not go below the minimum value
+            self.mult_factor.data = torch.clamp(self.mult_factor.data, min=self.min_mult_factor)
+        
+        weights = torch.exp(self.mult_factor * x)
+        weighted_x = x * weights
+        
+        # Forward direction: accumulate from 0 to i
+        cum_weights_fwd = torch.cumsum(weights, dim=self.dim)
+        cum_x_fwd = torch.cumsum(weighted_x, dim=self.dim)
+        output_fwd = cum_x_fwd / cum_weights_fwd
+        
+        # Backward direction: accumulate from i to len
+        weights_bwd = torch.flip(weights, [self.dim])
+        weighted_x_bwd = torch.flip(weighted_x, [self.dim])
+        cum_weights_bwd = torch.cumsum(weights_bwd, dim=self.dim)
+        cum_x_bwd = torch.cumsum(weighted_x_bwd, dim=self.dim)
+        output_bwd = cum_x_bwd / cum_weights_bwd
+        output_bwd = torch.flip(output_bwd, [self.dim])
+        
+        # Combine forward and backward (average)
+        output = (output_fwd + output_bwd) / 2.0
+        
+        return output
+
+
 class MultiHeadAttention(nn.Module):
     """Multi-head self-attention layer with residual connection."""
     
@@ -101,20 +171,86 @@ class MultiHeadAttention(nn.Module):
         return out
 
 
-class TransformerModule(nn.Module):
-    """Transformer module with multi-head self-attention."""
+class PoolingModule(nn.Module):
+    """Pooling module that can use either multi-head attention or softmax pooling."""
     
-    def __init__(self, embed_dim: int, num_heads: int = 8, dropout: float = 0.0):
+    def __init__(self, embed_dim: int, pooling_type: str = 'attention', 
+                 num_heads: int = 8, dropout: float = 0.0,
+                 mult_factor: float = 1.0, mult_factor_learnable: bool = False):
+        """
+        Initialize pooling module.
+        
+        Args:
+            embed_dim: Embedding dimension
+            pooling_type: 'attention' or 'softmax_pool'
+            num_heads: Number of attention heads (only used if pooling_type='attention')
+            dropout: Dropout rate (only used if pooling_type='attention')
+            mult_factor: Softmax pooling multiplication factor (only used if pooling_type='softmax_pool')
+            mult_factor_learnable: Whether mult_factor is learnable (only used if pooling_type='softmax_pool')
+        """
+        super().__init__()
+        self.pooling_type = pooling_type
+        
+        if pooling_type == 'attention':
+            self.pooling = MultiHeadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
+        elif pooling_type == 'softmax_pool':
+            self.pooling = SoftmaxSumPool(
+                dim=-1, 
+                mult_factor=mult_factor,
+                mult_factor_learnable=mult_factor_learnable
+            )
+            # Add residual connection and normalization for softmax pooling
+            self.norm = nn.LayerNorm(embed_dim)
+            self.dropout = nn.Dropout(dropout)
+        else:
+            raise ValueError(f"Unknown pooling_type: {pooling_type}. Choose 'attention' or 'softmax_pool'.")
+    
+    def forward(self, x):
+        """
+        Forward pass through pooling.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, embed_dim)
+            
+        Returns:
+            Output tensor of shape (batch_size, seq_len, embed_dim)
+        """
+        if self.pooling_type == 'attention':
+            return self.pooling(x)
+        else:  # softmax_pool
+            residual = x
+            out = self.pooling(x)
+            out = self.norm(out + residual)
+            out = self.dropout(out)
+            return out
+
+
+class TransformerModule(nn.Module):
+    """Transformer module with multi-head self-attention or softmax pooling."""
+    
+    def __init__(self, embed_dim: int, pooling_type: str = 'attention',
+                 num_heads: int = 8, dropout: float = 0.0,
+                 mult_factor: float = 1.0, mult_factor_learnable: bool = False):
         """
         Initialize transformer module.
         
         Args:
             embed_dim: Embedding dimension
-            num_heads: Number of attention heads (embed_dim must be divisible by num_heads)
+            pooling_type: 'attention' or 'softmax_pool'
+            num_heads: Number of attention heads (only used if pooling_type='attention')
+            mult_factor: Softmax pooling multiplication factor (only used if pooling_type='softmax_pool')
+            mult_factor_learnable: Whether mult_factor is learnable (only used if pooling_type='softmax_pool')
             dropout: Dropout rate
         """
         super().__init__()
-        self.attention = MultiHeadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
+        self.pooling = PoolingModule(
+            embed_dim=embed_dim,
+            pooling_type=pooling_type,
+            num_heads=num_heads,
+            mult_factor=mult_factor,
+            mult_factor_learnable=mult_factor_learnable,
+            dropout=dropout
+        )
     
     def forward(self, x):
         """
@@ -126,7 +262,7 @@ class TransformerModule(nn.Module):
         Returns:
             Output tensor of shape (batch_size, seq_len, embed_dim)
         """
-        return self.attention(x)
+        return self.pooling(x)
 
 
 class ResBlock(nn.Module):
@@ -429,8 +565,11 @@ class SplicevoModel(nn.Module):
                  num_classes: int = 3,
                  n_conditions: int = 5,
                  context_len: int = 450,
+                 pooling_type: str = 'attention',
                  num_heads: int = 8,
                  dropout: float = 0.3,
+                 mult_factor: float = 1.0,
+                 mult_factor_learnable: bool = False,
                  usage_loss_type: str = 'weighted_mse',
                  n_species: int = 1,
                  species_names: Optional[list] = None,
@@ -446,8 +585,11 @@ class SplicevoModel(nn.Module):
             num_classes: Number of splice site classes
             n_conditions: Number of conditions (tissues/timepoints) for SSE prediction
             context_len: Number of positions on each end as context
-            num_heads: Number of attention heads in transformer
+            pooling_type: 'attention' or 'softmax_pool'
+            num_heads: Number of attention heads in transformer (only used if pooling_type='attention')
             dropout: Dropout rate
+            mult_factor: Softmax pooling multiplication factor (only used if pooling_type='softmax_pool')
+            mult_factor_learnable: Whether mult_factor is learnable (only used if pooling_type='softmax_pool')
             usage_loss_type: Type of usage loss ('mse', 'weighted_mse', 'hybrid')
             n_species: Number of species (creates separate output heads per species)
             species_names: Optional list of species names
@@ -481,11 +623,14 @@ class SplicevoModel(nn.Module):
             bottleneck_dim=bottleneck_dim
         )
         
-        # Transformer module (multi-head self-attention)
+        # Transformer module (multi-head self-attention or softmax pooling)
         self.transformer = TransformerModule(
-            embed_dim=self.bottleneck_dim, 
-            num_heads=num_heads, 
-            dropout=dropout
+            embed_dim=self.bottleneck_dim,
+            pooling_type=pooling_type,
+            num_heads=num_heads,
+            dropout=dropout,
+            mult_factor=mult_factor,
+            mult_factor_learnable=mult_factor_learnable
         )
         
         # Output heads for splice site classification (one per species)

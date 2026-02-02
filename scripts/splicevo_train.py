@@ -363,11 +363,14 @@ def create_model(config: dict, usage_sse: Optional[np.ndarray], species_mapping:
         'num_classes': model_config.get('num_classes', 3),
         'n_conditions': n_conditions,
         'context_len': model_config.get('context_len', 4500),
+        'pooling_type': model_config.get('pooling_type', 'attention'),
         'num_heads': model_config.get('num_heads', 8),
         'bottleneck_dim': model_config.get('bottleneck_dim', None),  # None defaults to embed_dim
         'dropout': model_config.get('dropout', 0.5),
+        'mult_factor': model_config.get('mult_factor', 1.0),
+        'mult_factor_learnable': model_config.get('mult_factor_learnable', False),
         'usage_loss_type': usage_loss_type,
-        'n_species': n_species
+        'n_species': n_species,
     }
     model = SplicevoModel(**model_params)
     
@@ -377,11 +380,15 @@ def create_model(config: dict, usage_sse: Optional[np.ndarray], species_mapping:
     log_fn(f"  bottleneck_dim: {model_params['bottleneck_dim'] or model_params['embed_dim']}")
     log_fn(f"  num_resblocks: {model_params['num_resblocks']}")
     log_fn(f"  dilation_strategy: {model_params['dilation_strategy']}")
+    log_fn(f"  pooling_type: {model_params['pooling_type']}")
     log_fn(f"  num_heads: {model_params['num_heads']}")
     log_fn(f"  num_classes: {model_params['num_classes']}")
     log_fn(f"  n_conditions: {model_params['n_conditions']}")
     log_fn(f"  usage_loss_type: {usage_loss_type}")
     log_fn(f"  n_species: {model_params['n_species']}")
+    if model_params['pooling_type'] == 'softmax_pool':
+        log_fn(f"  mult_factor: {model_params['mult_factor']}")
+        log_fn(f"  mult_factor_learnable: {model_params['mult_factor_learnable']}")
     if n_species > 1:
         log_fn(f"  species_mapping: {species_mapping}")
     

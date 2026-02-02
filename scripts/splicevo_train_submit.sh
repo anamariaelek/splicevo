@@ -50,10 +50,10 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 # Inputs
 SUBSET="full"
 SPECIES="mouse_rat_human"
-KB="1"
-TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_transformer.yaml
+KB="5"
+TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_softmax_pool.yaml
 DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/train/
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/transformer/${SUBSET}_${SPECIES}_${KB}kb_dynloss_focal/
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/models/softmax_pool/${SUBSET}_${SPECIES}_${KB}kb/
 echo "Starting training job at "$(date)
 echo "Training config: ${TRAINING_CONFIG}"
 echo "Training data: ${DATA_TRAIN_DIR}"
