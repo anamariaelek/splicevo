@@ -30,7 +30,7 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 SUBSET="full"
 SPECIES="mouse_rat_human"
 KB="1"
-MODEL=${SUBSET}_${SPECIES}_${KB}kb_dynloss_focal
+MODEL=${SUBSET}_${SPECIES}_${KB}kb_dynloss_wce
 
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/test/
 PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/transformer/${MODEL}/

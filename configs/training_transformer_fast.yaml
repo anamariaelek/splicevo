@@ -1,4 +1,4 @@
-# Updated training configuration for Splicevo model
+# Fast training configuration - optimized for speed
 
 # Device configuration
 device: cuda
@@ -11,42 +11,42 @@ data:
   path: /home/elek/sds/sd17d003/Anamaria/splicevo/data/splits_full_5kb/mouse_rat_human/
   use_mmap: true
   train_split: 0.8
-  normalization_method: none    # SSE needs no normalization (already [0,1])
-  usage_types: ['sse']          # Only SSE for usage training
+  normalization_method: none
+  usage_types: ['sse']
 
 # Output configuration
 output:
-  checkpoint_dir: /home/elek/sds/sd17d003/Anamaria/splicevo/models/transformer/full_mouse_rat_human_5kb
+  checkpoint_dir: /home/elek/sds/sd17d003/Anamaria/splicevo/models/transformer/full_mouse_rat_human_5kb_fast
   use_tensorboard: true
 
-# Model architecture
+# Model architecture - slightly smaller for faster training
 model:
   embed_dim: 128
-  num_resblocks: 16
+  num_resblocks: 12      # Reduced from 16 (25% fewer layers)
   dilation_strategy: alternating
-  alternate: 4 
+  alternate: 4
   bottleneck_dim: 128   # Try 128 (default), 256 (balanced), 320, or 640 (full multi-scale)
   num_heads: 8          # Transformer heads
   num_classes: 3        # Splice donor, acceptor, not a splice site
   context_len: 450      # This must match context_size in data creation (verify in metadata.json)
-  dropout: 0.4
+  dropout: 0.3
 
 # Training configuration
 training:
   # Optimizer
   learning_rate: 1.0e-4
   weight_decay: 1.0e-3
-  warmup_steps: 3000      # Linear warmup from 10% to 100% of learning_rate (about 1 epoch) 
+  warmup_steps: 3000
 
   # Loss for splice site prediction
-  splice_loss_type: 'focal'  # Options: 'cross_entropy' or 'focal'
-  
-  # Class weights for cross_entropy loss
+  splice_loss_type: 'cross_entropy'
+
+  # Class weights for cross_entropy loss (auto-calculate from class frequencies)
   class_weights: 'inverse'  # Use 'balanced', 'inverse', or specify [w0, w1, w2]
-  
+
   # Focal Loss parameters
-  focal_alpha: 'inverse'   # Use 'inverse' or specify [w0, w1, w2]
-  focal_gamma: 2.0         # Focusing parameter (higher = more focus on hard examples)
+  focal_alpha: 'auto'
+  focal_gamma: 2
 
   # Loss for splice site usage (SSE)
   usage_loss_type: 'weighted_mse'  # Options: 'mse', 'bce', 'weighted_mse' or 'hybrid'
@@ -65,20 +65,20 @@ training:
   # How to combine splice site and usage loss
   splice_weight: 0.5
   usage_weight: 0.5
-  
-  # Dynamic loss balancing - calculate weights from first epoch for consistent contributions
+
+  # Dynamic loss balancing
   use_dynamic_loss_balancing: true  # Recommended for multi-task learning with focal loss
   
   # Training loop
   n_epochs: 50
   early_stopping_patience: 5
-  
+
   # Memory optimization
   use_amp: true
-  gradient_accumulation_steps: 4
-  
-  # DataLoader
+  gradient_accumulation_steps: 4  # Reduce accumulation with larger batches
+
+  # DataLoader - maximally optimized
   dataloader:
-    batch_size: 32
-    num_workers: 8
-    prefetch_factor: 2
+    batch_size: 32       # Large batch for maximum throughput
+    num_workers: 16      # More workers for data loading
+    prefetch_factor: 6   # Aggressive prefetching

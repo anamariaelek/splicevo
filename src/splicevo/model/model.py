@@ -481,16 +481,20 @@ class SplicevoModel(nn.Module):
             bottleneck_dim=bottleneck_dim
         )
         
-        # Transformer module (multi-head self-attention) - uses bottleneck_dim
-        self.transformer = TransformerModule(embed_dim=self.bottleneck_dim, num_heads=num_heads, dropout=dropout)
+        # Transformer module (multi-head self-attention)
+        self.transformer = TransformerModule(
+            embed_dim=self.bottleneck_dim, 
+            num_heads=num_heads, 
+            dropout=dropout
+        )
         
-        # Output heads for splice site classification (one per species) - use bottleneck_dim
+        # Output heads for splice site classification (one per species)
         self.splice_classifiers = nn.ModuleDict({
             name: nn.Conv1d(self.bottleneck_dim, num_classes, kernel_size=1)
             for name in self.species_names
         })
         
-        # Output heads for usage prediction (one per species) - use bottleneck_dim
+        # Output heads for usage prediction (one per species)
         self.usage_predictors = nn.ModuleDict({
             name: nn.Conv1d(self.bottleneck_dim, n_conditions, kernel_size=1)
             for name in self.species_names

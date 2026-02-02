@@ -468,8 +468,8 @@ class SpliceTrainer:
         total_weighted_splice_loss = 0  # Track weighted splice loss contribution
         total_weighted_usage_loss = 0   # Track weighted usage loss contribution
         n_batches = 0
-        batch_count = 0  # DEBUG counter
-        train_epoch_count = getattr(self, 'train_epoch_count', 0) + 1  # DEBUG counter
+        batch_count = 0 
+        train_epoch_count = getattr(self, 'train_epoch_count', 0) + 1
         self.train_epoch_count = train_epoch_count
         
         # Track SSE losses for this epoch
