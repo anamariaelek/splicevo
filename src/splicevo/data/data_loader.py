@@ -19,6 +19,166 @@ from ..utils.sequence_utils import complement_sequence
 nuc_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
 
 
+def load_sparse_usage(memmap_dir: Union[str, Path]) -> pd.DataFrame:
+    """
+    Load sparse usage data from a saved directory.
+    
+    Args:
+        memmap_dir: Directory containing usage.parquet
+        
+    Returns:
+        DataFrame with columns: sample_idx, position, condition_idx, alpha, beta, sse
+    """
+    memmap_dir = Path(memmap_dir)
+    usage_file = memmap_dir / 'usage.parquet'
+    
+    if not usage_file.exists():
+        raise FileNotFoundError(f"Sparse usage file not found: {usage_file}")
+    
+    return pd.read_parquet(usage_file)
+
+
+def sparse_to_dense_batch(usage_df: pd.DataFrame,
+                         sample_indices: np.ndarray,
+                         window_size: int,
+                         n_conditions: int) -> Dict[str, np.ndarray]:
+    """
+    Convert sparse usage data to dense arrays for a specific batch of samples.
+    
+    This is designed for efficient batch loading during training - converts only
+    the requested samples to dense format on-the-fly.
+    
+    Args:
+        usage_df: Sparse usage DataFrame (from load_sparse_usage)
+        sample_indices: Array of sample indices to load
+        window_size: Size of each window
+        n_conditions: Number of conditions
+        
+    Returns:
+        Dictionary with keys 'alpha', 'beta', 'sse' containing dense arrays of shape
+        (batch_size, window_size, n_conditions) with NaN for missing values
+    """
+    batch_size = len(sample_indices)
+    
+    # Filter to only the requested samples
+    sample_set = set(sample_indices)
+    batch_data = usage_df[usage_df['sample_idx'].isin(sample_set)]
+    
+    # Initialize dense arrays with NaN
+    usage_arrays = {
+        'alpha': np.full((batch_size, window_size, n_conditions), np.nan, dtype=np.float32),
+        'beta': np.full((batch_size, window_size, n_conditions), np.nan, dtype=np.float32),
+        'sse': np.full((batch_size, window_size, n_conditions), np.nan, dtype=np.float32)
+    }
+    
+    # Create mapping from original sample_idx to batch position
+    sample_idx_map = {orig_idx: batch_pos for batch_pos, orig_idx in enumerate(sample_indices)}
+    
+    # Fill in values efficiently using vectorized operations where possible
+    for row in batch_data.itertuples(index=False):
+        batch_idx = sample_idx_map[row.sample_idx]
+        pos = row.position
+        cond = row.condition_idx
+        usage_arrays['alpha'][batch_idx, pos, cond] = row.alpha
+        usage_arrays['beta'][batch_idx, pos, cond] = row.beta
+        usage_arrays['sse'][batch_idx, pos, cond] = row.sse
+    
+    return usage_arrays
+
+
+def sparse_labels_to_dense_batch(labels_df: pd.DataFrame,
+                                sample_indices: np.ndarray,
+                                window_size: int) -> np.ndarray:
+    """
+    Convert sparse label data to dense arrays for a specific batch of samples.
+    
+    This is designed for efficient batch loading during training - converts only
+    the requested samples to dense format on-the-fly.
+    
+    Args:
+        labels_df: Sparse labels DataFrame with columns [sample_idx, position, label]
+        sample_indices: Array of sample indices to load
+        window_size: Size of each window
+        
+    Returns:
+        Dense labels array of shape (batch_size, window_size) with 0 for unlabeled positions
+    """
+    batch_size = len(sample_indices)
+    
+    # Filter to only the requested samples
+    sample_set = set(sample_indices)
+    batch_data = labels_df[labels_df['sample_idx'].isin(sample_set)]
+    
+    # Initialize dense array with zeros (no splice site)
+    labels = np.zeros((batch_size, window_size), dtype=np.int8)
+    
+    # Create mapping from original sample_idx to batch position
+    sample_idx_map = {orig_idx: batch_pos for batch_pos, orig_idx in enumerate(sample_indices)}
+    
+    # Fill in label values
+    for row in batch_data.itertuples(index=False):
+        batch_idx = sample_idx_map[row.sample_idx]
+        pos = row.position
+        labels[batch_idx, pos] = row.label
+    
+    return labels
+
+
+def load_memmap_data(memmap_dir: Union[str, Path],
+                    load_labels: bool = False,
+                    load_usage: bool = False) -> Tuple[np.ndarray, Optional[pd.DataFrame], Optional[pd.DataFrame], pd.DataFrame]:
+    """
+    Load data from memory-mapped files created by MultiGenomeDataLoader.to_arrays().
+    
+    Args:
+        memmap_dir: Directory containing the memmap files
+        load_labels: If True, loads sparse labels as a DataFrame. If False, returns None for labels.
+        load_usage: If True, loads sparse usage as a DataFrame. If False, returns None for usage.
+        
+    Returns:
+        Tuple of (sequences, labels_df_or_none, usage_df_or_none, metadata)
+        - sequences: memmap array of shape (n_samples, seq_length, 4)
+        - labels: DataFrame with sparse labels data if load_labels=True, else None
+        - usage: DataFrame with sparse usage data if load_usage=True, else None
+        - metadata: DataFrame with sample metadata
+    """
+    memmap_dir = Path(memmap_dir)
+    
+    # Load metadata
+    with open(memmap_dir / 'metadata.json', 'r') as f:
+        meta = json.load(f)
+    
+    # Load sequences as memmap
+    sequences = np.memmap(
+        memmap_dir / 'sequences.mmap',
+        dtype=meta['sequences_dtype'],
+        mode='r',
+        shape=tuple(meta['sequences_shape'])
+    )
+    
+    # Load sparse labels if requested
+    labels = None
+    if load_labels:
+        labels_file = memmap_dir / 'labels.parquet'
+        if labels_file.exists():
+            labels = pd.read_parquet(labels_file)
+    
+    # Load sparse usage if requested
+    usage = None
+    if load_usage:
+        usage_file = memmap_dir / 'usage.parquet'
+        if usage_file.exists():
+            usage = pd.read_parquet(usage_file)
+    
+    # Load metadata
+    metadata = pd.DataFrame()
+    metadata_file = memmap_dir / 'metadata.csv'
+    if metadata_file.exists():
+        metadata = pd.read_csv(metadata_file)
+    
+    return sequences, labels, usage, metadata
+
+
 class MultiGenomeDataLoader:
     """
     Data loader for multi-genome splice site prediction.
@@ -38,29 +198,6 @@ class MultiGenomeDataLoader:
         self.usage_conditions: List[Dict[str, str]] = []  # List of condition metadata
         self.condition_to_key: Dict[str, str] = {}  # Maps (tissue, timepoint) to condition_key
     
-    def _encode_ohe_window(self, seq: str, start: int, length: int) -> np.ndarray:
-        """
-        Encode a window of a DNA sequence into one-hot representation.
-        
-        This is more memory efficient than encoding the entire sequence and then slicing,
-        as it only allocates memory for the requested window.
-        
-        Args:
-            seq: DNA sequence string
-            start: Start position in the sequence
-            length: Length of window to encode
-            
-        Returns:
-            One-hot encoded array of shape (length, 4)
-        """
-        ohe = np.zeros((length, 4), dtype=np.float32)
-        for i in range(length):
-            nuc = seq[start + i]
-            idx = nuc_to_idx.get(nuc, 4)
-            if idx < 4:
-                ohe[i, idx] = 1.0
-        return ohe
-        
     def add_genome(self, 
                    genome_id: str, 
                    genome_path: Union[str, Path], 
@@ -87,7 +224,30 @@ class MultiGenomeDataLoader:
             chromosomes=chromosomes,
             metadata=metadata
         )
+
+    def _encode_ohe_window(self, seq: str, start: int, length: int) -> np.ndarray:
+        """
+        Encode a window of a DNA sequence into one-hot representation.
+        
+        This is more memory efficient than encoding the entire sequence and then slicing,
+        as it only allocates memory for the requested window.
+        
+        Args:
+            seq: DNA sequence string
+            start: Start position in the sequence
+            length: Length of window to encode
             
+        Returns:
+            One-hot encoded array of shape (length, 4)
+        """
+        ohe = np.zeros((length, 4), dtype=np.float32)
+        for i in range(length):
+            nuc = seq[start + i]
+            idx = nuc_to_idx.get(nuc, 4)
+            if idx < 4:
+                ohe[i, idx] = 1.0
+        return ohe
+        
     def _collect_all_positions(self, 
                              transcripts: List[Transcript],
                              genome_id: str) -> Tuple[List[Dict], int]:
@@ -418,7 +578,9 @@ class MultiGenomeDataLoader:
             return {}
 
         if usage_arrays is None:
-            sequences, labels, usage_arrays, metadata = self.to_arrays()
+            # This method needs usage arrays, which are no longer returned by to_arrays()
+            # Users should load sparse usage and reconstruct as needed
+            raise ValueError("usage_arrays must be provided. Use the module-level functions load_sparse_usage() and sparse_to_dense_batch() to reconstruct usage arrays.")
 
         info = {
             'n_samples': usage_arrays['alpha'].shape[0],
@@ -508,23 +670,24 @@ class MultiGenomeDataLoader:
                              window_size: int,
                              context_size: int,
                              total_window: int,
-                             genome_cache: Optional[Dict] = None) -> Tuple[List[np.ndarray], List[np.ndarray], Dict[str, List[np.ndarray]], List[Dict]]:
+                             genome_cache: Optional[Dict] = None) -> Tuple[List[np.ndarray], List[np.ndarray], List[Dict], List[Dict]]:
         """
         Process windows for a single gene (parallelizable).
         
         Memory-optimized version:
         - Encodes sequences on-demand per window instead of pre-computing full gene
-        - Stores sparse usage data instead of full NaN-filled arrays
+        - Returns sparse usage data (coordinate list) instead of dense NaN-filled arrays
         
         Args:
             genome_cache: Optional pre-loaded genome to avoid repeated loading
         
         Returns:
-            Tuple of (sequences, labels, usage_dict, metadata_rows)
+            Tuple of (sequences, labels, usage_sparse_list, metadata_rows)
+            usage_sparse_list: List of dicts with keys: sample_idx, position, condition_idx, alpha, beta, sse
         """
         sequences = []
         labels_list = []
-        usage_dict = {'alpha': [], 'beta': [], 'sse': []}
+        usage_sparse_list = []  # List of sparse coordinate dicts
         metadata_rows = []
         
         # Use cached genome if available, otherwise load it
@@ -564,7 +727,7 @@ class MultiGenomeDataLoader:
         try:
             seq = genome.get_seq(chrom, actual_start + 1, actual_end, rc=False)
         except Exception:
-            return sequences, labels_list, usage_dict, metadata_rows
+            return sequences, labels_list, usage_sparse_list, metadata_rows
         
         # Ensure seq is a string
         if not isinstance(seq, str):
@@ -655,30 +818,36 @@ class MultiGenomeDataLoader:
                                 usage_beta_dict[window_pos][cond_idx] = stats['beta']
                                 usage_sse_dict[window_pos][cond_idx] = stats['sse']
             
-            # Convert sparse dicts to dense arrays with NaN (only at append time)
-            # This defers allocation until necessary and keeps memory minimal during processing
-            usage_alpha = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
-            usage_beta = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
-            usage_sse = np.full((window_size, n_conditions), np.nan, dtype=np.float32)
+            # Store sparse usage coordinates (no dense array conversion)
+            # This saves massive amounts of memory by only storing non-NaN values
+            window_idx = len(sequences)  # Index of this window in the output
             
             for window_pos in usage_alpha_dict:
-                for cond_idx, val in usage_alpha_dict[window_pos].items():
-                    usage_alpha[window_pos, cond_idx] = val
+                for cond_idx in usage_alpha_dict[window_pos].keys():
+                    usage_sparse_list.append({
+                        'sample_idx': window_idx,
+                        'position': window_pos,
+                        'condition_idx': cond_idx,
+                        'alpha': usage_alpha_dict[window_pos][cond_idx],
+                        'beta': usage_beta_dict[window_pos][cond_idx],
+                        'sse': usage_sse_dict[window_pos][cond_idx]
+                    })
             
-            for window_pos in usage_beta_dict:
-                for cond_idx, val in usage_beta_dict[window_pos].items():
-                    usage_beta[window_pos, cond_idx] = val
-                    
-            for window_pos in usage_sse_dict:
-                for cond_idx, val in usage_sse_dict[window_pos].items():
-                    usage_sse[window_pos, cond_idx] = val
+            # Store sparse labels (only non-zero positions)
+            # This saves space since most positions are label=0
+            labels_sparse_list = []
+            for pos, label_val in enumerate(labels):
+                if label_val != 0:  # Only store donors (1) and acceptors (2)
+                    labels_sparse_list.append({
+                        'sample_idx': window_idx,
+                        'position': pos,
+                        'label': label_val
+                    })
             
             # Store this window's data
             sequences.append(ohe_seq)
-            labels_list.append(labels)
-            usage_dict['alpha'].append(usage_alpha)
-            usage_dict['beta'].append(usage_beta)
-            usage_dict['sse'].append(usage_sse)
+            # Return sparse labels instead of dense
+            labels_list.extend(labels_sparse_list)
 
             # Create metadata for this window
             metadata_row = {
@@ -693,7 +862,8 @@ class MultiGenomeDataLoader:
             }
             metadata_rows.append(metadata_row)
         
-        return sequences, labels_list, usage_dict, metadata_rows
+        # labels_list now contains sparse label coordinates, not dense arrays
+        return sequences, labels_list, usage_sparse_list, metadata_rows
 
     def to_arrays(self,
                   window_size: int = 1000,
@@ -701,9 +871,13 @@ class MultiGenomeDataLoader:
                   alpha_threshold: Optional[int] = None,
                   n_workers: Optional[int] = None,
                   use_parallel: bool = True,
-                  save_memmap: Optional[Union[str, Path]] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], pd.DataFrame]:
+                  save_memmap: Optional[Union[str, Path]] = None) -> Tuple[np.ndarray, pd.DataFrame]:
         """
         Convert loaded data to arrays for ML training.
+        
+        Labels and usage data are saved in sparse parquet format. Use the module-level
+        functions sparse_labels_to_dense_batch() and sparse_to_dense_batch() to reconstruct
+        dense arrays for specific batches during training.
         
         Args:
             window_size: Size of the window containing splice sites
@@ -714,7 +888,9 @@ class MultiGenomeDataLoader:
             save_memmap: Optional path to save arrays as memmap files
         
         Returns:
-            Tuple of (sequences, labels, usage_arrays, metadata_df)
+            Tuple of (sequences, metadata_df)
+            - sequences: memmap array if save_memmap specified, otherwise numpy array
+            - metadata_df: DataFrame with sample metadata
         """
         if not self.loaded_data:
             raise ValueError("No data loaded. Call load_all_genomes_data() first.")
@@ -780,39 +956,10 @@ class MultiGenomeDataLoader:
                 shape=seq_shape
             )
             
-            labels = np.memmap(
-                save_memmap / 'labels.mmap',
-                dtype=np.int8,
-                mode='w+',
-                shape=label_shape
-            )
-            
-            usage_arrays = {
-                'alpha': np.memmap(
-                    save_memmap / 'usage_alpha.mmap',
-                    dtype=np.float32,
-                    mode='w+',
-                    shape=usage_shape
-                ),
-                'beta': np.memmap(
-                    save_memmap / 'usage_beta.mmap',
-                    dtype=np.float32,
-                    mode='w+',
-                    shape=usage_shape
-                ),
-                'sse': np.memmap(
-                    save_memmap / 'usage_sse.mmap',
-                    dtype=np.float32,
-                    mode='w+',
-                    shape=usage_shape
-                )
-            }
-            
-            # Initialize usage arrays with NaN
-            print("Initializing usage arrays with NaN...")
-            for key in ['alpha', 'beta', 'sse']:
-                usage_arrays[key][:] = np.nan
-                usage_arrays[key].flush()
+            # Note: Labels and usage data will be saved in sparse format (parquet), not memmap
+            # This saves massive amounts of space and time
+            all_labels_sparse = []  # Collect sparse label coordinates
+            all_usage_sparse = []  # Collect sparse usage coordinates
             
             # Fill memmap arrays incrementally
             print("\nProcessing genes and writing to memmap...")
@@ -823,8 +970,8 @@ class MultiGenomeDataLoader:
             # Non-memmap path: collect in memory
             print("Collecting windows from all genes...")
             all_sequences = []
-            all_labels = []
-            all_usage = {'alpha': [], 'beta': [], 'sse': []}
+            all_labels_sparse = []  # Collect sparse label coordinates
+            all_usage_sparse = []  # Collect sparse coordinate list
             all_metadata_rows = []
 
         for genome_id in loaded_genomes:
@@ -868,7 +1015,7 @@ class MultiGenomeDataLoader:
                                      unit="gene",
                                      mininterval=0.5):
                         try:
-                            seq_list, lbl_list, usage_dict, metadata_rows = future.result(timeout=120)
+                            seq_list, labels_sparse, usage_sparse, metadata_rows = future.result(timeout=120)
                             
                             if save_memmap:
                                 # Write incrementally to memmap (memory efficient)
@@ -880,10 +1027,14 @@ class MultiGenomeDataLoader:
                                         break
                                     
                                     sequences[current_idx:end_idx] = np.array(seq_list, dtype=np.float32)
-                                    labels[current_idx:end_idx] = np.array(lbl_list, dtype=np.int8)
                                     
-                                    for key in ['alpha', 'beta', 'sse']:
-                                        usage_arrays[key][current_idx:end_idx] = np.array(usage_dict[key], dtype=np.float32)
+                                    # Adjust sample_idx in sparse labels and usage to match global indices
+                                    for item in labels_sparse:
+                                        item['sample_idx'] += current_idx
+                                    for item in usage_sparse:
+                                        item['sample_idx'] += current_idx
+                                    all_labels_sparse.extend(labels_sparse)
+                                    all_usage_sparse.extend(usage_sparse)
                                     
                                     all_metadata_rows.extend(metadata_rows)
                                     current_idx = end_idx
@@ -891,16 +1042,19 @@ class MultiGenomeDataLoader:
                                     # Periodic flush to disk
                                     if len(all_metadata_rows) % 500 == 0:
                                         sequences.flush()
-                                        labels.flush()
-                                        for key in usage_arrays:
-                                            usage_arrays[key].flush()
                             else:
                                 # Collect in memory for non-memmap mode
+                                n_windows = len(seq_list)
+                                # Adjust sample_idx to global indices
+                                current_base = len(all_sequences)
+                                for item in labels_sparse:
+                                    item['sample_idx'] += current_base
+                                for item in usage_sparse:
+                                    item['sample_idx'] += current_base
+                                
                                 all_sequences.extend(seq_list)
-                                all_labels.extend(lbl_list)
-                                all_usage['alpha'].extend(usage_dict['alpha'])
-                                all_usage['beta'].extend(usage_dict['beta'])
-                                all_usage['sse'].extend(usage_dict['sse'])
+                                all_labels_sparse.extend(labels_sparse)
+                                all_usage_sparse.extend(usage_sparse)
                                 all_metadata_rows.extend(metadata_rows)
                                 
                         except Exception as e:
@@ -912,7 +1066,7 @@ class MultiGenomeDataLoader:
                                                        desc=f"  {genome_id} genes",
                                                        unit="gene"):
                     try:
-                        seq_list, lbl_list, usage_dict, metadata_rows = self._process_gene_windows(
+                        seq_list, labels_sparse, usage_sparse, metadata_rows = self._process_gene_windows(
                             genome_id, gene_id, df_gene,
                             splice_site_index, condition_to_idx, n_conditions,
                             window_size, context_size, total_window,
@@ -929,131 +1083,138 @@ class MultiGenomeDataLoader:
                                     break
                                 
                                 sequences[current_idx:end_idx] = np.array(seq_list, dtype=np.float32)
-                                labels[current_idx:end_idx] = np.array(lbl_list, dtype=np.int8)
                                 
-                                for key in ['alpha', 'beta', 'sse']:
-                                    usage_arrays[key][current_idx:end_idx] = np.array(usage_dict[key], dtype=np.float32)
+                                # Adjust sample_idx in sparse labels and usage to match global indices
+                                for item in labels_sparse:
+                                    item['sample_idx'] += current_idx
+                                for item in usage_sparse:
+                                    item['sample_idx'] += current_idx
+                                all_labels_sparse.extend(labels_sparse)
+                                all_usage_sparse.extend(usage_sparse)
                                 
                                 all_metadata_rows.extend(metadata_rows)
                                 current_idx = end_idx
                         else:
                             # Collect in memory
-                            all_sequences.extend(seq_list)
-                            all_labels.extend(lbl_list)
-                            all_usage['alpha'].extend(usage_dict['alpha'])
-                            all_usage['beta'].extend(usage_dict['beta'])
-                            all_usage['sse'].extend(usage_dict['sse'])
-                            all_metadata_rows.extend(metadata_rows)
+                            n_windows = len(seq_list)
+                            # Adjust sample_idx to global indices
+                            current_base = len(all_sequences)
+                            for item in labels_sparse:
+                                item['sample_idx'] += current_base
+                            for item in usage_sparse:
+                                item['sample_idx'] += current_base
                             
+                            all_sequences.extend(seq_list)
+                            all_labels_sparse.extend(labels_sparse)
+                            all_usage_sparse.extend(usage_sparse)
+                            all_metadata_rows.extend(metadata_rows)
+                    
                     except Exception as e:
                         print(f"Warning: Failed to process gene {gene_id}: {e}")
         
         # Finalize arrays
         if save_memmap:
-            # Trim arrays to actual size (we over-allocated by 10%)
+            # Save sparse labels data as parquet
+            print(f"Saving sparse labels data ({len(all_labels_sparse)} entries)...")
+            labels_df = pd.DataFrame(all_labels_sparse)
+            # Convert to appropriate dtypes for efficiency
+            labels_df['sample_idx'] = labels_df['sample_idx'].astype(np.int32)
+            labels_df['position'] = labels_df['position'].astype(np.int16)
+            labels_df['label'] = labels_df['label'].astype(np.int8)
+            labels_df.to_parquet(save_memmap / 'labels.parquet', compression='snappy', index=False)
+            print(f"Sparse labels data saved to {save_memmap / 'labels.parquet'}")
+            
+            # Save sparse usage data as parquet
+            print(f"Saving sparse usage data ({len(all_usage_sparse)} entries)...")
+            usage_df = pd.DataFrame(all_usage_sparse)
+            # Convert to appropriate dtypes for efficiency
+            usage_df['sample_idx'] = usage_df['sample_idx'].astype(np.int32)
+            usage_df['position'] = usage_df['position'].astype(np.int16)
+            usage_df['condition_idx'] = usage_df['condition_idx'].astype(np.int8)
+            usage_df.to_parquet(save_memmap / 'usage.parquet', compression='snappy', index=False)
+            print(f"Sparse usage data saved to {save_memmap / 'usage.parquet'}")
+            
+            # Trim sequences array to actual size (we over-allocated by 10%)
             if current_idx < len(sequences):
                 print(f"Trimming memmap arrays from {len(sequences)} to {current_idx} windows...")
-                # Create properly-sized memmaps
+                # Create properly-sized memmap
                 sequences_trimmed = np.memmap(
                     save_memmap / 'sequences.mmap',
                     dtype=np.float32,
                     mode='r+',
                     shape=(current_idx, sequences.shape[1], sequences.shape[2])
                 )
-                labels_trimmed = np.memmap(
-                    save_memmap / 'labels.mmap',
-                    dtype=np.int8,
-                    mode='r+',
-                    shape=(current_idx, labels.shape[1])
-                )
-                usage_arrays_trimmed = {}
-                for key in ['alpha', 'beta', 'sse']:
-                    usage_arrays_trimmed[key] = np.memmap(
-                        save_memmap / f'usage_{key}.mmap',
-                        dtype=np.float32,
-                        mode='r+',
-                        shape=(current_idx, usage_arrays[key].shape[1], usage_arrays[key].shape[2])
-                    )
                 
-                # Replace references
+                # Replace reference
                 sequences = sequences_trimmed
-                labels = labels_trimmed
-                usage_arrays = usage_arrays_trimmed
             
             # Final flush
-            print("Flushing memmap arrays...")
+            print("Flushing sequences memmap...")
             sequences.flush()
-            labels.flush()
-            for key in usage_arrays:
-                usage_arrays[key].flush()
             
             n_samples = current_idx
             
             # Save metadata
             metadata_dict = {
                 'sequences_shape': list(sequences.shape),
-                'labels_shape': list(labels.shape),
-                'usage_shape': list(usage_arrays['alpha'].shape),
                 'sequences_dtype': 'float32',
-                'labels_dtype': 'int8',
-                'usage_dtype': 'float32',
+                'labels_format': 'sparse',
+                'labels_sparse_entries': len(all_labels_sparse),
                 'window_size': window_size,
                 'context_size': context_size,
-                'n_conditions': n_conditions
+                'n_conditions': n_conditions,
+                'usage_format': 'sparse',
+                'usage_sparse_entries': len(all_usage_sparse)
             }
             
             with open(save_memmap / 'metadata.json', 'w') as f:
                 json.dump(metadata_dict, f, indent=2)
             
             print(f"Memory-mapped files saved to: {save_memmap}")
-
-            # Print statistics
-            for key in usage_arrays:
-                n_nan = np.isnan(usage_arrays[key]).sum()
-                n_nonzero = np.count_nonzero(usage_arrays[key])
-                print(f"  {key}: {n_nan} NaN values, {n_nonzero} non-zero values")
-            
+            print(f"Sparse labels statistics:")
+            print(f"  Total entries: {len(all_labels_sparse)}")
+            print(f"Sparse usage statistics:")
+            print(f"  Total entries: {len(all_usage_sparse)}")
+            print(f"  Sparsity: {100 * len(all_usage_sparse) / (n_samples * window_size * n_conditions):.4f}%")
             
         else:
-            # Create regular numpy arrays
+            # Create regular numpy arrays (no memmap)
             print("Converting to numpy arrays...")
             sequences = np.array(all_sequences, dtype=np.float32)
-            labels = np.array(all_labels, dtype=np.int8)
-            usage_arrays = {
-                'alpha': np.array(all_usage['alpha'], dtype=np.float32),
-                'beta': np.array(all_usage['beta'], dtype=np.float32),
-                'sse': np.array(all_usage['sse'], dtype=np.float32)
-            }
             n_samples = len(sequences)
-        
-        # Apply alpha threshold if specified
-        if alpha_threshold is not None:
-            print(f"Applying alpha threshold: {alpha_threshold}")
-            mask = usage_arrays['alpha'] < alpha_threshold
-            for key in ['alpha', 'beta', 'sse']:
-                usage_arrays[key][mask] = 0
-                if save_memmap:
-                    usage_arrays[key].flush()
-
-        # Print statistics
-        for key in usage_arrays:
-            n_nan = np.isnan(usage_arrays[key]).sum()
-            n_nonzero = np.count_nonzero(usage_arrays[key])
-            print(f"  {key}: {n_nan} NaN values, {n_nonzero} non-zero values")
+            
+            print(f"Collected {len(all_labels_sparse)} sparse label entries")
+            print(f"Collected {len(all_usage_sparse)} sparse usage entries")
+            if len(all_usage_sparse) > 0:
+                sparsity = 100 * len(all_usage_sparse) / (n_samples * window_size * n_conditions)
+                print(f"  Sparsity: {sparsity:.4f}%")
         
         metadata = pd.DataFrame(all_metadata_rows)
         
+        # Save metadata to CSV if using memmap
+        if save_memmap:
+            metadata.to_csv(save_memmap / 'metadata.csv', index=False)
+            print(f"Saved metadata to {save_memmap / 'metadata.csv'}")
+        
         # Validation
-        assert labels.shape[0] == n_samples, "Labels shape mismatch"
-        assert usage_arrays['alpha'].shape[0] == n_samples, "Usage arrays shape mismatch"
+        if save_memmap:
+            assert sequences.shape[0] == n_samples, "Sequences shape mismatch"
+        else:
+            assert len(sequences) == n_samples, "Sequences count mismatch"
         assert len(metadata) == n_samples, "Metadata mismatch"
 
         print(f"Created {n_samples} windowed examples")
-        print(f"  Sequence shape: {sequences.shape}")
-        print(f"  Labels shape: {labels.shape}")
-        print(f"  Usage arrays shape: {usage_arrays['alpha'].shape}")
-        print(f"  Total donor sites: {(labels == 1).sum()}")
-        print(f"  Total acceptor sites: {(labels == 2).sum()}")
-        print(f"  Total no-site positions: {(labels == 0).sum()}")
+        print(f"  Sequence shape: {sequences.shape if save_memmap else (len(sequences), sequences[0].shape)}")
         
-        return sequences, labels, usage_arrays, metadata
+        # Calculate and display label statistics from sparse format
+        total_donors = len([e for e in all_labels_sparse if e['label'] == 1])
+        total_acceptors = len([e for e in all_labels_sparse if e['label'] == 2])
+        
+        if save_memmap:
+            print(f"  Labels stored in sparse format: labels.parquet")
+            print(f"  Usage stored in sparse format: usage.parquet")
+        
+        print(f"  Total donor sites: {total_donors}")
+        print(f"  Total acceptor sites: {total_acceptors}")
+        
+        return sequences, metadata

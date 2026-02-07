@@ -743,7 +743,8 @@ class SplicevoModel(nn.Module):
         self.output_type = output_type
     
     def predict(self, sequences, species_ids=None, batch_size: int = 32, 
-                stream_to_disk: Optional[Dict[str, np.memmap]] = None):
+                stream_to_disk: Optional[Dict[str, np.memmap]] = None,
+                sparse_format: bool = False):
         """
         Predict splice sites and usage statistics for central region with batching.
         
@@ -757,9 +758,17 @@ class SplicevoModel(nn.Module):
             stream_to_disk: Optional dict of memmap arrays to write results directly to disk
                            Keys: 'splice_logits', 'splice_probs', 'splice_predictions', 'usage_predictions'
                            If provided, results are written directly without accumulating in memory
+            sparse_format: If True, return predictions in sparse DataFrame format (only non-zero predictions)
+                          If False (default), return dense numpy arrays
             
         Returns:
-            Dictionary with numpy arrays for central region (or None if stream_to_disk is used)
+            If sparse_format=True:
+                Dictionary with:
+                    - 'labels_sparse': DataFrame with columns (sample_idx, position, label)
+                    - 'probs_sparse': DataFrame with columns (sample_idx, position, class_id, probability)
+                    - 'usage_sparse': DataFrame with columns (sample_idx, position, condition_id, value)
+            If sparse_format=False:
+                Dictionary with numpy arrays for central region (or None if stream_to_disk is used)
         """
         import numpy as np
         
@@ -855,7 +864,7 @@ class SplicevoModel(nn.Module):
                         torch.cuda.empty_cache()
             
             # Return None when streaming to disk
-            return None
+            # return None
         
         else:
             # Original in-memory accumulation mode
@@ -916,6 +925,81 @@ class SplicevoModel(nn.Module):
                 splice_probs = splice_probs[0]
                 splice_predictions = splice_predictions[0]
                 usage_predictions = usage_predictions[0]
+        
+        # Convert to sparse format if requested
+        if sparse_format:
+            import pandas as pd
+            
+            n_samples, central_len = splice_predictions.shape
+            n_conditions = usage_predictions.shape[-1]
+            num_classes = splice_probs.shape[-1]
+            
+            # Convert splice predictions to sparse format
+            # Only store non-zero predictions (positions with actual splice sites)
+            splice_rows = []
+            probs_rows = []
+            for sample_id in range(n_samples):
+                for position in range(central_len):
+                    label = splice_predictions[sample_id, position]
+                    if label > 0:  # Only store non-background positions
+                        splice_rows.append({
+                            'sample_idx': sample_id,
+                            'position': position,
+                            'label': label
+                        })
+                        # Store probabilities for all classes at this position
+                        for class_id in range(num_classes):
+                            probs_rows.append({
+                                'sample_idx': sample_id,
+                                'position': position,
+                                'class_id': class_id,
+                                'probability': splice_probs[sample_id, position, class_id]
+                            })
+            
+            labels_sparse_df = pd.DataFrame(splice_rows)
+            if len(labels_sparse_df) > 0:
+                labels_sparse_df = labels_sparse_df.astype({'sample_idx': 'int32', 'position': 'int32', 'label': 'int8'})
+            
+            probs_sparse_df = pd.DataFrame(probs_rows)
+            if len(probs_sparse_df) > 0:
+                probs_sparse_df = probs_sparse_df.astype({
+                    'sample_idx': 'int32',
+                    'position': 'int32',
+                    'class_id': 'int8',
+                    'probability': 'float32'
+                })
+            
+            # Convert usage predictions to sparse format
+            # Only store values where splice sites were predicted
+            usage_rows = []
+            for sample_id in range(n_samples):
+                for position in range(central_len):
+                    for condition_id in range(n_conditions):
+                        value = usage_predictions[sample_id, position, condition_id]
+                        # Store all values (including zeros) where splice sites were predicted
+                        # This matches the ground truth format where usage is defined at splice sites
+                        if splice_predictions[sample_id, position] > 0:
+                            usage_rows.append({
+                                'sample_idx': sample_id,
+                                'position': position,
+                                'condition_idx': condition_id,
+                                'value': value
+                            })
+            
+            usage_sparse_df = pd.DataFrame(usage_rows)
+            if len(usage_sparse_df) > 0:
+                usage_sparse_df = usage_sparse_df.astype({
+                    'sample_idx': 'int32',
+                    'position': 'int32',
+                    'condition_idx': 'int16',
+                    'value': 'float32'
+                })
+            
+            return {
+                'labels_sparse': labels_sparse_df,
+                'probs_sparse': probs_sparse_df,
+                'usage_sparse': usage_sparse_df
+            }
         
         return {
             'splice_logits': splice_logits,

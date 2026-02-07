@@ -33,7 +33,7 @@ KB="5"
 MODEL=${SUBSET}_${SPECIES}_${KB}kb
 
 DATA_TEST_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/test/
-PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/softmax_pool/${MODEL}/
+PREDICTIONS_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/predictions/transformer/${MODEL}/
 
 echo "Starting evaluation job at "$(date)
 echo "Test data: ${DATA_TEST_DIR}"

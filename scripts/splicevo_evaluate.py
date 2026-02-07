@@ -18,7 +18,98 @@ from sklearn.metrics import precision_recall_curve, auc, mean_squared_error
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from splicevo.utils.data_utils import load_processed_data, load_predictions
+from splicevo.data.data_loader import load_memmap_data
+
+
+def load_sparse_predictions(pred_dir: Path, test_data_dir: Path, log_fn=print) -> Tuple:
+    """
+    Load predictions and ground truth from sparse parquet format.
+    
+    Args:
+        pred_dir: Directory containing prediction parquet files
+        test_data_dir: Directory containing test data
+        log_fn: Logging function
+    
+    Returns:
+        Tuple of (pred_labels, pred_probs, pred_usage, metadata, true_labels, true_usage)
+        All as dense numpy arrays for compatibility with evaluation functions
+    """
+    log_fn("Loading sparse predictions...")
+    
+    # Load metadata
+    meta_file = pred_dir / 'predictions_metadata.json'
+    with open(meta_file, 'r') as f:
+        pred_meta = json.load(f)
+    
+    # Load test data metadata to get dimensions
+    test_meta_file = test_data_dir / 'metadata.json'
+    with open(test_meta_file, 'r') as f:
+        test_meta = json.load(f)
+    
+    # Get dimensions from test data
+    sequences, labels_true_sparse, usage_true_sparse, metadata = load_memmap_data(
+        test_data_dir,
+        load_labels=True,
+        load_usage=True
+    )
+    
+    n_samples = sequences.shape[0]
+    seq_len = sequences.shape[1]
+    context_len = test_meta.get('context_len', 450)
+    central_len = seq_len - 2 * context_len
+    
+    # Determine number of conditions from usage data
+    if usage_true_sparse is not None and len(usage_true_sparse) > 0:
+        if 'condition_idx' in usage_true_sparse.columns:
+            n_conditions = usage_true_sparse['condition_idx'].max() + 1
+        else:
+            # Try to infer from test metadata
+            n_conditions = len(test_meta.get('condition_names', []))
+            if n_conditions == 0:
+                # Default fallback
+                n_conditions = 8
+                log_fn(f"  Warning: Could not determine n_conditions from data, using default: {n_conditions}")
+    else:
+        # Try to infer from test metadata
+        n_conditions = len(test_meta.get('condition_names', []))
+        if n_conditions == 0:
+            n_conditions = 0
+            log_fn(f"  Warning: No usage data found, n_conditions set to 0")
+    
+    log_fn(f"  Dimensions: {n_samples} samples, central length: {central_len}, conditions: {n_conditions}")
+    
+    # Initialize dense arrays
+    pred_labels = np.zeros((n_samples, central_len), dtype=np.int8)
+    pred_probs = np.zeros((n_samples, central_len, 3), dtype=np.float32)  # 3 classes
+    
+    if n_conditions > 0:
+        pred_usage = np.zeros((n_samples, central_len, n_conditions), dtype=np.float32)
+        true_usage = np.full((n_samples, central_len, n_conditions), np.nan, dtype=np.float32)
+    else:
+        pred_usage = np.zeros((n_samples, central_len, 0), dtype=np.float32)
+        true_usage = np.full((n_samples, central_len, 0), np.nan, dtype=np.float32)
+    
+    # Load predicted labels
+    labels_pred_file = pred_dir / 'labels_pred.parquet'
+    if labels_pred_file.exists():
+        labels_pred_df = pd.read_parquet(labels_pred_file)
+        pred_labels = labels_pred_df
+    
+    # Load predicted probabilities
+    probs_pred_file = pred_dir / 'probs_pred.parquet'
+    if probs_pred_file.exists():
+        probs_pred_df = pd.read_parquet(probs_pred_file)
+        log_fn(f"  Loaded {len(probs_pred_df)} predicted probability entries")
+        pred_probs = probs_pred_df
+    
+    # Load predicted usage
+    usage_pred_file = pred_dir / 'usage_pred.parquet'
+    if usage_pred_file.exists() and n_conditions > 0:
+        usage_pred_df = pd.read_parquet(usage_pred_file)
+        log_fn(f"  Loaded {len(usage_pred_df)} predicted usage entries")
+        pred_usage = usage_pred_df
+    
+    return pred_labels, pred_probs, pred_usage, test_meta, metadata
 
 
 def setup_logging(log_file: Optional[str] = None, quiet: bool = False):
@@ -34,52 +125,113 @@ def setup_logging(log_file: Optional[str] = None, quiet: bool = False):
     return log_fn
 
 
-def evaluate_splice_site_classification(
-    true_labels: np.ndarray,
-    pred_labels: np.ndarray,
-    pred_probs: np.ndarray,
-    output_dir: Path,
-    log_fn=print
-) -> Dict:
-    """Evaluate splice site classification performance."""
-    log_fn("="*60)
-    log_fn("SPLICE SITE CLASSIFICATION EVALUATION")
-    log_fn("="*60)
+def evaluate_splice_site_classification(true_labels, pred_probs, output_dir: Path, log_fn=print) -> Dict:
+    """
+    Evaluate splice site classification performance.
+    
+    Args:
+        true_labels: DataFrame with columns (sample_idx, position, label) or numpy array
+        pred_probs: DataFrame with columns (sample_idx, position, class_id, probability) or numpy array
+        output_dir: Output directory for plots
+        log_fn: Logging function
+    """
     
     results = {}
     
-    # PR-AUC scores
+    # Handle DataFrame inputs efficiently
+    if isinstance(pred_probs, pd.DataFrame):
+        log_fn("Processing sparse probability predictions...")
+        
+        # Pivot pred_probs to have class_id as columns
+        pred_wide = pred_probs.pivot_table(
+            index=['sample_idx', 'position'],
+            columns='class_id',
+            values='probability',
+            fill_value=0.0
+        )
+        pred_wide.columns = [f'prob_class_{int(c)}' for c in pred_wide.columns]
+        pred_wide = pred_wide.reset_index()
+        
+        if isinstance(true_labels, pd.DataFrame):
+            
+            # Merge true labels with predictions
+            merged = pred_wide.merge(
+                true_labels[['sample_idx', 'position', 'label']],
+                on=['sample_idx', 'position'],
+                how='left'
+            )
+            merged['label'] = merged['label'].fillna(0).astype(int)
+        else:
+            # true_labels is numpy array - need to convert positions to labels
+            log_fn("Converting numpy true labels to match predictions...")
+            merged = pred_wide.copy()
+            merged['label'] = 0  # default background
+            # This would need custom logic to map from array indices
+            
+        log_fn(f"Evaluating {len(merged)} positions...")
+        
+        # Build evaluation arrays for each class
+        y_true_by_class = {}
+        y_scores_by_class = {}
+        
+        for class_idx in range(3):
+            prob_col = f'prob_class_{class_idx}'
+            
+            if class_idx == 0:
+                # Background: positive if NOT this class
+                y_true_by_class[class_idx] = (merged['label'] != class_idx).astype(int).values
+                y_scores_by_class[class_idx] = (1 - merged[prob_col]).values
+            else:
+                # Splice sites: positive if IS this class
+                y_true_by_class[class_idx] = (merged['label'] == class_idx).astype(int).values
+                y_scores_by_class[class_idx] = merged[prob_col].values
+    
+    else:
+        # Handle numpy array inputs (backwards compatibility)
+        log_fn("Processing dense array predictions...")
+        
+        if isinstance(true_labels, np.ndarray):
+            y_true_by_class = {}
+            y_scores_by_class = {}
+            
+            for class_idx in range(3):
+                if class_idx == 0:
+                    y_true_by_class[class_idx] = (true_labels != class_idx).astype(int).reshape(-1)
+                    y_scores_by_class[class_idx] = (1 - pred_probs[:, :, class_idx]).reshape(-1)
+                else:
+                    y_true_by_class[class_idx] = (true_labels == class_idx).astype(int).reshape(-1)
+                    y_scores_by_class[class_idx] = pred_probs[:, :, class_idx].reshape(-1)
+        else:
+            raise ValueError("Unsupported combination of input types")
+    
+    # Calculate PR-AUC scores
     log_fn("Calculating Precision-Recall AUC scores...")
     pr_auc_scores = {}
     class_labels = {0: 'no splice site', 1: 'donor', 2: 'acceptor'}
     class_colors = {0: 'tab:blue', 1: 'tab:orange', 2: 'tab:green'}
-    
-    total_positions = true_labels.shape[0] * true_labels.shape[1]
     
     plt.figure(figsize=(5, 4))
     for class_idx in range(3):
         color = class_colors[class_idx]
         label = class_labels[class_idx]
         
-        if class_idx == 0:
-            y_true = (true_labels != class_idx).astype(int).reshape(-1)
-            y_scores = 1 - pred_probs[:, :, class_idx].reshape(-1)
-            freq = np.sum(true_labels != class_idx) / total_positions
+        y_true = y_true_by_class[class_idx]
+        y_scores = y_scores_by_class[class_idx]
+        
+        if len(y_true) > 0 and np.sum(y_true) > 0:
+            precision, recall, _ = precision_recall_curve(y_true, y_scores)
+            pr_auc = auc(recall, precision)
+            pr_auc_scores[class_idx] = pr_auc
+            
+            plt.plot(
+                recall, precision,
+                label=f"{label} (AUC = {pr_auc:.3f})",
+                linewidth=2,
+                color=color
+            )
         else:
-            y_true = (true_labels == class_idx).astype(int).reshape(-1)
-            y_scores = pred_probs[:, :, class_idx].reshape(-1)
-            freq = np.sum(true_labels == class_idx) / total_positions
-        
-        precision, recall, _ = precision_recall_curve(y_true, y_scores)
-        pr_auc = auc(recall, precision)
-        pr_auc_scores[class_idx] = pr_auc
-        
-        plt.plot(
-            recall, precision,
-            label=f"{label} (AUC = {pr_auc:.3f})",
-            linewidth=2,
-            color=color
-        )
+            pr_auc_scores[class_idx] = 0.0
+            log_fn(f"  Warning: No positive samples for {label}")
     
     plt.xlabel("Recall", fontsize=12)
     plt.ylabel("Precision", fontsize=12)
@@ -101,186 +253,74 @@ def evaluate_splice_site_classification(
     # Top-k accuracy
     log_fn("Calculating top-k accuracy...")
     def top_k_accuracy(y_true, y_scores):
-        k = np.sum(y_true)
+        k = int(np.sum(y_true))
         if k == 0:
             return 0.0
-        threshold = np.sort(y_scores)[-k]
+        threshold = np.sort(y_scores)[-k] if k <= len(y_scores) else y_scores.min()
         y_pred = (y_scores >= threshold).astype(int)
         accuracy = np.sum((y_pred == 1) & (y_true == 1)) / k
         return accuracy
     
     top_k_acc = {}
     for class_idx in range(3):
-        if class_idx == 0:
-            y_true = (true_labels != class_idx).astype(int)
-            y_scores = 1 - pred_probs[:, :, class_idx]
-        else:
-            y_true = (true_labels == class_idx).astype(int)
-            y_scores = pred_probs[:, :, class_idx]
+        y_true = y_true_by_class[class_idx]
+        y_scores = y_scores_by_class[class_idx]
         
-        y_true = y_true.reshape(-1)
-        y_scores = y_scores.reshape(-1)
-        acc = top_k_accuracy(y_true, y_scores)
-        top_k_acc[class_idx] = acc
-        log_fn(f"  Top-k accuracy for {class_labels[class_idx]}: {acc:.4f}")
+        if len(y_true) > 0:
+            acc = top_k_accuracy(y_true, y_scores)
+            top_k_acc[class_idx] = acc
+            log_fn(f"  Top-k accuracy for {class_labels[class_idx]}: {acc:.4f}")
+        else:
+            top_k_acc[class_idx] = 0.0
     
     results['top_k_acc'] = top_k_acc
     
     return results
 
 
-def evaluate_splice_usage_regression(
-    true_sse: np.ndarray,
-    pred_sse: np.ndarray,
-    species_ids: np.ndarray,
-    species_id_to_name: Dict,
-    meta: Dict,
-    output_dir: Path,
-    log_fn=print
-) -> Dict:
-    """Evaluate splice usage (SSE) prediction performance."""
-    log_fn("="*60)
-    log_fn("SPLICE USAGE REGRESSION EVALUATION")
-    log_fn("="*60)
-    
-    results = {}
-    
-    # Calculate MSE for each species and condition
-    log_fn("Calculating MSE for each species and condition...")
-    conds = meta['conditions']
-    mse_dict = {}
-    
-    for sp in set(species_ids):
-        sp_indices = [i for i, s in enumerate(species_ids) if s == sp]
-        sp_n = species_id_to_name[sp]
-        
-        for i, _ in enumerate(conds):
-            id = f"{sp_n}_{conds[i]}"
-            true_sse_ = true_sse[sp_indices, :, i]
-            pred_sse_ = pred_sse[sp_indices, :, i]
-            
-            # Replace NaN values
-            true_sse_ = np.nan_to_num(true_sse_)
-            mask = ~np.isnan(true_sse_)
-            
-            true_sse_vals = true_sse_[mask]
-            pred_sse_vals = pred_sse_[mask]
-            
-            if len(true_sse_vals) > 0:
-                mse = mean_squared_error(true_sse_vals, pred_sse_vals)
-                mse_dict[id] = mse
-    
-    # Create MSE dataframe
-    mse_df = pd.DataFrame(list(mse_dict.items()), columns=['Sample', 'MSE'])
-    mse_df[['Species', 'Tissue', 'Timepoint']] = mse_df['Sample'].str.split('_', expand=True)
-    mse_df['Timepoint'] = mse_df['Timepoint'].astype(int)
-    mse_df.sort_values(['Species', 'Tissue', "Timepoint"], ascending=True, inplace=True)
-    
-    for _, row in mse_df.iterrows():
-        rmse = np.sqrt(row['MSE'])
-        log_fn(f"  {row['Sample']}: RMSE = {rmse:.4f}")
-    
-    results['mse_df'] = mse_df
-    
-    # Plot RMSE by species
-    log_fn("Plotting RMSE by species...")
-    plt.figure(figsize=(9, 3))
-    species_list = mse_df['Species'].unique()
-    
-    for i, species in enumerate(species_list):
-        plt.subplot(1, len(species_list), i + 1)
-        for tissue in mse_df[mse_df['Species'] == species]['Tissue'].unique():
-            tissue_data = mse_df[(mse_df['Species'] == species) & (mse_df['Tissue'] == tissue)]
-            plt.plot(
-                tissue_data['Timepoint'].astype(int),
-                np.sqrt(tissue_data['MSE']),
-                marker='o',
-                label=tissue
-            )
-        
-        plt.title(f'SSE prediction: {species}', fontsize=12)
-        plt.xlabel('Timepoint', fontsize=10)
-        plt.ylabel('RMSE', fontsize=10)
-        plt.ylim(0, np.sqrt(mse_df['MSE']).max() * 1.1)
-        plt.grid()
-    
-    plt.tight_layout()
-    plt.legend(title='Tissue', fontsize=8, bbox_to_anchor=(1.05, 0.5), loc='center left')
-    
-    rmse_plot = output_dir / "splice_usage_rmse.png"
-    plt.savefig(rmse_plot, dpi=150, bbox_inches='tight')
-    plt.close()
-    log_fn(f"Saved RMSE plot to {rmse_plot}")
-    
-    return results
-
-
-def prepare_matched_positions(
-    true_sse: np.ndarray,
-    pred_sse: np.ndarray,
-    meta: Dict,
-    log_fn=print
-) -> pd.DataFrame:
-    """Prepare matched SSE positions across timepoints."""
-    log_fn("Preparing matched SSE positions...")
-    
-    num_sequences = true_sse.shape[0]
-    conds = meta['conditions']
-    matched_positions = {}
-    
-    for seq_idx in range(num_sequences):
-        # Find positions where all tissues are not NaN
-        valid_positions = np.where(np.all(~np.isnan(true_sse[seq_idx, :, :]), axis=1))[0]
-        
-        if len(valid_positions) == 0:
-            continue
-        
-        for pos in valid_positions:
-            true_vals = true_sse[seq_idx, pos, :]
-            pred_vals = pred_sse[seq_idx, pos, :]
-            true_vals = np.nan_to_num(true_vals)
-            matched_positions[(seq_idx, pos)] = {"true": true_vals, "pred": pred_vals}
-    
-    log_fn(f"  Found {len(matched_positions)} matched positions")
-    
-    # Convert to dataframe
-    all_data = []
-    for (seq_idx, pos), vals in matched_positions.items():
-        for tissue_idx in range(len(conds)):
-            all_data.append({
-                'sequence': seq_idx,
-                'position': pos,
-                'group': conds[tissue_idx],
-                'true_SSE': vals['true'][tissue_idx],
-                'pred_SSE': vals['pred'][tissue_idx]
-            })
-    
-    all_data_df = pd.DataFrame(all_data)
-    all_data_df['Tissue'] = all_data_df['group'].apply(lambda x: x.split('_')[0])
-    all_data_df['Timepoint'] = all_data_df['group'].apply(lambda x: int(x.split('_')[1]))
-    
-    return all_data_df
-
-
-def calculate_tissue_correlations(all_data_df: pd.DataFrame, log_fn=print) -> pd.DataFrame:
+def calculate_condition_correlations(all_data_df: pd.DataFrame, group_by=['tissue'], log_fn=print) -> pd.DataFrame:
     """Calculate correlation between predicted and true SSE values."""
     log_fn("Calculating correlations...")
     
+    # Get valid positions where we have both true and predicted SSE
+    valid_data = all_data_df.dropna(subset=['true_sse', 'pred_sse'])
+    log_fn(f"  Valid positions with both true and predicted SSE: {len(valid_data)} (%{len(valid_data) / len(all_data_df) * 100:.2f}%)")
+
+    # Add condition annotation if available
+    if 'condition_idx' not in valid_data.columns:
+        log_fn("  Warning: 'condition_idx' column not found, adding default condition")
+        valid_data['condition_idx'] = 0
+
+    # Group by specified columns to get correlations
     correlation_results = []
-    for (seq_idx, pos, tissue), group in all_data_df.groupby(['sequence', 'position', 'Tissue']):
-        true_vals = group['true_SSE'].values
-        pred_vals = group['pred_SSE'].values
+    for group_var, group in valid_data.groupby(group_by):
+        true_vals = group['true_sse'].values
+        pred_vals = group['pred_sse'].values
         
         if len(true_vals) < 2:
             continue
         
         correlation = np.corrcoef(true_vals, pred_vals)[0, 1]
-        correlation_results.append({
-            'sequence': seq_idx,
-            'position': pos,
-            'tissue': tissue,
-            'correlation': correlation
-        })
+        
+        # Build result dict with proper column names
+        result = {}
+        if len(group_by) == 1:
+            result[group_by[0]] = group_var
+        else:
+            for i, col in enumerate(group_by):
+                result[col] = group_var[i]
+        result['correlation'] = correlation
+        result['num_positions'] = len(group)
+        
+        correlation_results.append(result)
+    
+    # Create DataFrame with proper handling of empty results
+    if len(correlation_results) == 0:
+        # Return empty DataFrame with expected columns
+        cols = group_by + ['correlation', 'num_positions']
+        correlation_df = pd.DataFrame(columns=cols)
+        log_fn("  Warning: No correlations calculated (all groups have < 2 samples)")
+        return correlation_df
     
     correlation_df = pd.DataFrame(correlation_results)
     
@@ -294,19 +334,19 @@ def calculate_tissue_correlations(all_data_df: pd.DataFrame, log_fn=print) -> pd
     return correlation_df
 
 
-def plot_sse_density(all_data_df: pd.DataFrame, output_dir: Path, log_fn=print):
+def plot_sse_density(all_data_df: pd.DataFrame, output_dir: Path, group_by=['tissue'], log_fn=print):
     """Plot density of predicted vs true SSE values."""
     log_fn("Plotting SSE density...")
     
-    samples = all_data_df['group'].unique()[0:1]  # Only first timepoint
+    samples = all_data_df[group_by[0]].unique()
     num_tissues = len(samples)
     num_cols = 1
     num_rows = (num_tissues + num_cols - 1) // num_cols
     
     fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols * 4, num_rows * 4), squeeze=False)
     
-    for i, tissue in enumerate(samples):
-        tissue_data = all_data_df[all_data_df['group'] == tissue]
+    for i, condition in enumerate(samples):
+        condition_data = all_data_df[all_data_df[group_by[0]] == condition]
         
         row = i // num_cols
         col = i % num_cols
@@ -314,8 +354,8 @@ def plot_sse_density(all_data_df: pd.DataFrame, output_dir: Path, log_fn=print):
         
         # 2D density plot
         sns.kdeplot(
-            x=tissue_data['true_SSE'],
-            y=tissue_data['pred_SSE'],
+            x=condition_data['true_sse'],
+            y=condition_data['pred_sse'],
             levels=10,
             fill=True,
             cmap="rocket_r",
@@ -324,17 +364,17 @@ def plot_sse_density(all_data_df: pd.DataFrame, output_dir: Path, log_fn=print):
         
         # Top histogram (True SSE)
         ax_histx = ax.inset_axes([0, 1.05, 1, 0.2], sharex=ax)
-        ax_histx.hist(tissue_data['true_SSE'], bins=30, color='gray', alpha=0.7)
+        ax_histx.hist(condition_data['true_sse'], bins=30, color='gray', alpha=0.7)
         ax_histx.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
         
         # Right histogram (Pred SSE)
         ax_histy = ax.inset_axes([1.05, 0, 0.2, 1], sharey=ax)
-        ax_histy.hist(tissue_data['pred_SSE'], bins=30, orientation='horizontal', color='gray', alpha=0.7)
+        ax_histy.hist(condition_data['pred_sse'], bins=30, orientation='horizontal', color='gray', alpha=0.7)
         ax_histy.tick_params(axis="y", which="both", left=False, right=False, labelleft=False)
         
         # Add mean lines
-        mean_true = tissue_data['true_SSE'].mean()
-        mean_pred = tissue_data['pred_SSE'].mean()
+        mean_true = condition_data['true_sse'].mean()
+        mean_pred = condition_data['pred_sse'].mean()
         ax.axvline(mean_true, color='red', linestyle='--', linewidth=1, label='Mean True')
         ax.axhline(mean_pred, color='red', linestyle='--', linewidth=1, label='Mean Pred')
         
@@ -348,209 +388,6 @@ def plot_sse_density(all_data_df: pd.DataFrame, output_dir: Path, log_fn=print):
     plt.savefig(density_plot, dpi=150)
     plt.close()
     log_fn(f"Saved density plot to {density_plot}")
-
-
-def plot_correlation_distribution(correlation_df: pd.DataFrame, output_dir: Path, log_fn=print):
-    """Plot distribution of correlations."""
-    log_fn("Plotting correlation distribution...")
-    
-    sorted_corr = np.sort(correlation_df['correlation'].dropna())
-    cdf = np.arange(1, len(sorted_corr) + 1) / len(sorted_corr)
-    
-    fig, ax1 = plt.subplots(figsize=(5, 3.5))
-    ax1.hist(correlation_df['correlation'].dropna(), bins=50, color='#66c2a5', edgecolor='black')
-    ax1.set_xlabel('Correlation Coefficient', fontsize=12)
-    ax1.set_ylabel('Frequency', fontsize=12, color='#4daf4a')
-    ax1.tick_params(axis='y', labelcolor='#4daf4a')
-    
-    ax2 = ax1.twinx()
-    ax2.plot(sorted_corr, cdf, color='#fc8d62', linewidth=2, label='CDF')
-    ax2.set_ylabel('CDF', fontsize=12, color='#ff7f00')
-    ax2.tick_params(axis='y', labelcolor='#ff7f00')
-    
-    plt.title('Distribution of Correlation\nTrue vs Predicted SSE', fontsize=14)
-    ax1.grid(alpha=0.3)
-    fig.tight_layout()
-    
-    corr_plot = output_dir / "correlation_distribution.png"
-    plt.savefig(corr_plot, dpi=150)
-    plt.close()
-    log_fn(f"Saved correlation distribution plot to {corr_plot}")
-
-
-def plot_correlation_by_tissue(
-    correlation_df: pd.DataFrame,
-    output_dir: Path,
-    log_fn=print
-):
-    """Plot correlation distribution by tissue."""
-    log_fn("Plotting correlations by tissue...")
-    
-    tissue_colors = {
-        'Brain': '#3399cc',
-        'Cerebellum': '#34ccff',
-        'Heart': '#cc0100',
-        'Kidney': '#cc9900',
-        'Liver': '#339900',
-        'Ovary': '#cc329a',
-        'Testis': '#ff6600'
-    }
-    
-    unique_tissues = correlation_df['tissue'].unique()
-    num_tissues = len(unique_tissues)
-    num_cols = 3
-    num_rows = (num_tissues + num_cols - 1) // num_cols
-    
-    fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols * 3, num_rows * 2), squeeze=False)
-    
-    for i, tissue in enumerate(unique_tissues):
-        row = i // num_cols
-        col = i % num_cols
-        ax = axs[row, col]
-        
-        tissue_corrs = correlation_df[correlation_df['tissue'] == tissue]['correlation'].dropna()
-        tissue_color = tissue_colors.get(tissue, '#000000')
-        
-        ax.hist(tissue_corrs, bins=30, color=tissue_color, edgecolor='black')
-        ax.set_title(f'Tissue: {tissue}', fontsize=12)
-        ax.set_xlabel("Pearson's Correlation", fontsize=10)
-        ax.set_ylabel('Frequency', fontsize=10)
-        ax.set_xlim(-1, 1)
-        ax.grid(alpha=0.3)
-    
-    # Remove extra subplots
-    for j in range(i + 1, num_rows * num_cols):
-        row = j // num_cols
-        col = j % num_cols
-        fig.delaxes(axs[row][col])
-    
-    plt.tight_layout()
-    tissue_plot = output_dir / "correlation_by_tissue.png"
-    plt.savefig(tissue_plot, dpi=150)
-    plt.close()
-    log_fn(f"Saved tissue correlation plot to {tissue_plot}")
-
-
-def plot_top_correlation_examples(
-    all_data_df: pd.DataFrame,
-    correlation_df: pd.DataFrame,
-    output_dir: Path,
-    n_examples: int = 7,
-    log_fn=print
-):
-    """Plot top correlation examples showing SSE trends across timepoints."""
-    log_fn(f"Plotting top {n_examples} correlation examples...")
-    
-    # Define tissue colors
-    tissue_colors = {
-        'Brain': '#3399cc',
-        'Cerebellum': '#34ccff',
-        'Heart': '#cc0100',
-        'Kidney': '#cc9900',
-        'Liver': '#339900',
-        'Ovary': '#cc329a',
-        'Testis': '#ff6600'
-    }
-    
-    # Select top examples (skip first, it might be too perfect)
-    top_examples = correlation_df.sort_values(by='correlation', ascending=False)[1:n_examples+1]
-    
-    if len(top_examples) == 0:
-        log_fn("  No examples to plot")
-        return
-    
-    # Filter data for top examples
-    plot_df = all_data_df[
-        (all_data_df['sequence'].isin(top_examples['sequence'])) & 
-        (all_data_df['position'].isin(top_examples['position']))
-    ].copy()
-    
-    plot_df['site'] = plot_df['sequence'].astype(str) + '_' + plot_df['position'].astype(str)
-    plot_df['tissue'] = plot_df['group'].apply(lambda x: x.split('_')[0])
-    plot_df['timepoint'] = plot_df['group'].apply(lambda x: x.split('_')[1])
-    
-    unique_sites = plot_df['site'].unique()
-    timepoint_order = sorted(plot_df['timepoint'].unique(), key=lambda x: int(''.join(filter(str.isdigit, x))))
-    plot_df['timepoint'] = pd.Categorical(plot_df['timepoint'], categories=timepoint_order, ordered=True)
-    
-    n_sites = len(unique_sites)
-    n_tissues = len(plot_df['tissue'].unique())
-    
-    fig, axes = plt.subplots(
-        n_tissues, n_sites,
-        figsize=(2.5 * n_sites, 2.5 * n_tissues),
-        sharex='col',
-        squeeze=False
-    )
-    
-    legend_handles, legend_labels = [], []
-    
-    for col_idx, site in enumerate(unique_sites):
-        site_data = plot_df[plot_df['site'] == site]
-        for tissue in site_data['tissue'].unique():
-            row_idx = list(plot_df['tissue'].unique()).index(tissue)
-            tissue_data = site_data[site_data['tissue'] == tissue].sort_values('timepoint')
-            color = tissue_colors.get(tissue, '#000000')
-            
-            x_values = tissue_data['timepoint'].cat.codes
-            y_sse_true = tissue_data['true_SSE'].values
-            y_sse_pred = tissue_data['pred_SSE'].values
-            correlation = np.corrcoef(y_sse_true, y_sse_pred)[0, 1]
-            
-            # True SSE: solid line
-            line_true, = axes[row_idx, col_idx].plot(
-                x_values, y_sse_true,
-                label=f'{tissue} True',
-                color=color,
-                linewidth=2,
-                linestyle='-'
-            )
-            axes[row_idx, col_idx].scatter(x_values, y_sse_true, color=color, marker='o', s=36)
-            
-            # Predicted SSE: dashed line
-            line_pred, = axes[row_idx, col_idx].plot(
-                x_values, y_sse_pred,
-                label=f'{tissue} Pred',
-                color=color,
-                linewidth=2,
-                linestyle='--'
-            )
-            axes[row_idx, col_idx].scatter(x_values, y_sse_pred, color=color, marker='x', s=36)
-            
-            if col_idx == 0:
-                legend_handles.extend([line_true, line_pred])
-                legend_labels.extend([f'{tissue} True', f'{tissue} Pred'])
-            
-            axes[row_idx, col_idx].set_ylim(0, 1)
-            axes[row_idx, col_idx].set_title(f'{site}\n{correlation:.3f}', fontsize=14)
-            axes[row_idx, col_idx].set_xticks(range(len(timepoint_order)))
-            axes[row_idx, col_idx].set_xticklabels(timepoint_order, rotation=90)
-            axes[row_idx, col_idx].grid(True, alpha=0.3)
-    
-    # Set y labels for first column
-    for row_idx in range(n_tissues):
-        axes[row_idx, 0].set_ylabel('SSE', fontsize=12, fontweight='bold')
-    
-    # Set x labels for last row
-    for col_idx in range(n_sites):
-        axes[-1, col_idx].set_xlabel('Timepoint', fontsize=12, fontweight='bold')
-    
-    fig.legend(
-        legend_handles, legend_labels,
-        loc='lower center',
-        bbox_to_anchor=(1.05, 0.5),
-        title='Tissue',
-        title_fontsize=14,
-        fontsize=12,
-        ncol=1
-    )
-    
-    plt.tight_layout(rect=[0, 0.05, 1, 1])
-    
-    top_examples_plot = output_dir / "top_correlation_examples.png"
-    plt.savefig(top_examples_plot, dpi=150, bbox_inches='tight')
-    plt.close()
-    log_fn(f"Saved top correlation examples plot to {top_examples_plot}")
 
 
 def save_results_summary(
@@ -614,80 +451,102 @@ def main():
     log_file = output_dir / "evaluation.log"
     log_fn = setup_logging(str(log_file), quiet=args.quiet)
     
-    log_fn("="*60)
-    log_fn("SPLICEVO MODEL EVALUATION")
-    log_fn("="*60)
+    log_fn("Starting evaluation of model predictions")
     log_fn(f"Test data directory: {test_data_dir}")
     log_fn(f"Predictions directory: {pred_dir}")
     log_fn(f"Output directory: {output_dir}")
     log_fn(f"Start time: {datetime.now().isoformat()}")
     
     try:
-        # Load test data
-        log_fn("Loading test data...")
-        test_seq, test_labels, test_alpha, test_beta, test_sse, test_species, test_condition_mask = load_processed_data(str(test_data_dir))
-        log_fn(f"  Sequences shape: {test_seq.shape}")
-        log_fn(f"  Labels shape: {test_labels.shape}")
-        log_fn(f"  SSE shape: {test_sse.shape}")
-        if test_condition_mask is not None:
-            log_fn(f"  Condition mask shape: {test_condition_mask.shape}")
-        
-        # Load metadata
-        meta_fn = test_data_dir / "metadata.json"
-        with open(meta_fn, "r") as f:
-            test_meta = json.load(f)
-        
-        # Load predictions
+
+        # Load true labels and usage (sparse format)
+        log_fn("Loading true labels and usage...")
+        sequences, true_labels, true_sse, true_metadata = load_memmap_data(
+            test_data_dir,
+            load_labels=True,
+            load_usage=True
+        )
+        log_fn(f"  Sequences shape: {sequences.shape}")
+        log_fn(f"  True labels shape: {true_labels.shape}")
+        log_fn(f"  True SSE shape: {true_sse.shape}")
+
+        # Load predictions (sparse format)
         log_fn("Loading predictions...")
-        pred_labels, pred_probs, pred_sse, meta, true_labels, true_sse, condition_mask = load_predictions(str(pred_dir))
+        pred_labels, pred_probs, pred_sse, pred_meta, pred_metadata = load_sparse_predictions(
+            pred_dir, test_data_dir, log_fn
+        )
         log_fn(f"  Predicted labels shape: {pred_labels.shape}")
         log_fn(f"  Predicted probs shape: {pred_probs.shape}")
         log_fn(f"  Predicted SSE shape: {pred_sse.shape}")
         
-        # Create species mapping
-        species_ids = np.array([test_meta['species_mapping'][sp] for sp in test_meta['species_mapping'].keys()])
-        species_id_to_name = {v: k for k, v in test_meta['species_mapping'].items()}
+        # Get species info from test metadata
+        if 'species_mapping' in pred_meta:
+            species_mapping = pred_meta['species_mapping']
+            species_ids = np.array(list(species_mapping.values()))
+            species_id_to_name = {v: k for k, v in species_mapping.items()}
+        else:
+            # Default: single species
+            species_ids = np.array([0])
+            species_id_to_name = {0: 'unknown'}
+        log_fn(f"  Species: {species_id_to_name}")
         
         # Evaluate splice site classification
-        eval_results = evaluate_splice_site_classification(
-            true_labels, pred_labels, pred_probs, output_dir, log_fn
+        splice_eval = evaluate_splice_site_classification(
+            true_labels, pred_probs, output_dir, log_fn
         )
         
-        # Evaluate splice usage regression
-        eval_results.update(
-            evaluate_splice_usage_regression(
-                true_sse, pred_sse, species_ids, species_id_to_name, meta, output_dir, log_fn
+        # Combine true and predicted SSE dataframes on sample_idx, position_idx, and condition_idx
+        log_fn("Combining true and predicted SSE data for correlation analysis...")
+        # Combine true and predicted usage into one dataframe
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            all_sse = pd.merge(
+                true_sse, pred_sse, how='outer', on=['sample_idx', 'position', 'condition_idx']
             )
-        )
-        
-        # Prepare matched positions
-        all_data_df = prepare_matched_positions(true_sse, pred_sse, meta, log_fn)
+            # Rename 'value' to predicted_usage' and 'sse' to 'true_usage' for clarity
+            all_sse = all_sse.rename(columns={'value': 'pred_sse', 'sse': 'true_sse'})
+
+        # Add condition names
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            condition_mapping = pred_meta.get('usage_condition_mapping', {})
+            all_sse['condition_name'] = all_sse['condition_idx'].apply(
+                lambda idx: condition_mapping.get(str(idx), {}).get('condition_key', None) if pd.notna(idx) else None
+            )
+
+        # Extract tissue and timepoint from condition_name column (format: Tissue_timepoint)
+        # Only process rows where condition_name is not None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            all_sse['tissue'] = all_sse['condition_name'].str.split('_').str[0]
+            all_sse['timepoint'] = all_sse['condition_name'].str.split('_').str[1]
+            # Convert timepoint to int, handling NaN values
+            all_sse['timepoint'] = pd.to_numeric(all_sse['timepoint'], errors='coerce').astype('Int64')
+        # Convert timepoint to int, handling NaN values
+        all_sse['timepoint'] = pd.to_numeric(all_sse['timepoint'], errors='coerce').astype('Int64')
         
         # Save matched positions
         matched_file = output_dir / "matched_sse_positions.csv"
-        all_data_df.to_csv(matched_file, index=False)
+        all_sse.to_csv(matched_file, index=False)
         log_fn(f"Saved matched positions to {matched_file}")
         
         # Calculate correlations
-        correlation_df = calculate_tissue_correlations(all_data_df, log_fn)
+        correlation_df = calculate_condition_correlations(all_sse, log_fn=log_fn)
         
         # Save correlation table
         correlation_file = output_dir / "sse_correlation_per_position.csv"
         correlation_df.to_csv(correlation_file, index=False)
         log_fn(f"Saved correlation table to {correlation_file}")
         
-        # Generate plots
-        plot_sse_density(all_data_df, output_dir, log_fn)
-        plot_correlation_distribution(correlation_df, output_dir, log_fn)
-        plot_correlation_by_tissue(correlation_df, output_dir, log_fn)
-        plot_top_correlation_examples(all_data_df, correlation_df, output_dir, log_fn=log_fn)
+        # Generate correlation plots
+        plot_sse_density(all_sse, output_dir, log_fn=log_fn)
         
         # Save results summary
-        save_results_summary(eval_results, output_dir, log_fn)
+        save_results_summary(splice_eval, output_dir, log_fn)
         
-        log_fn("="*60)
-        log_fn("EVALUATION COMPLETED SUCCESSFULLY")
-        log_fn("="*60)
+        log_fn("Evaluation completed successfully")
         log_fn(f"End time: {datetime.now().isoformat()}")
         
     except Exception as e:

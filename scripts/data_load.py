@@ -252,14 +252,15 @@ log_print(f"Loading splice sites completed in {step4_time:.2f} seconds")
 log_print(f"Memory usage after step 4: {mem_after_step4:.2f} GB\n")
 
 # Step 5: Extract sequences and labels
-log_print( "\nStep 5: Extracting sequences and labels to arrays...")
+log_print( "\nStep 5: Extracting sequences and labels...")
 step5_start = time.time()
 
 # If not a dry run, extract arrays
 if not dry_run:
     # Get all sequences and save directly to memmap
+    # Labels and usage are automatically saved as sparse parquet files
     log_print(f"Converting to arrays and saving to memmap (window={window_size}, context={context_size})...")
-    sequences, labels, usage_arrays, metadata = loader.to_arrays(
+    sequences, metadata = loader.to_arrays(
         window_size=window_size,
         context_size=context_size,
         alpha_threshold=alpha_threshold,
@@ -269,13 +270,7 @@ if not dry_run:
     )
     log_print(f"Generated {len(sequences)} sequence windows")
     log_print(f"Sequence shape: {sequences.shape}")
-    log_print(f"Label shape: {labels.shape}")
-    if usage_arrays:
-        for key, arr in usage_arrays.items():
-            log_print(f"Usage array '{key}' shape: {arr.shape}")
-            # Check if any values are not NaN
-            if np.all(np.isnan(arr)):
-                log_print(f"  Warning: All values in usage array '{key}' are NaN")
+    log_print(f"Labels and usage saved in sparse parquet format")
         
     step5_time = time.time() - step5_start
     
@@ -288,8 +283,7 @@ if not dry_run:
 else:
     log_print("Dry run specified, skipping array extraction.")
     sequences = np.array([])
-    labels = np.array([])
-    usage_arrays = {}
+    metadata = pd.DataFrame()
     step5_time = time.time() - step5_start
     log_print(f"Dry run completed in {step5_time:.2f} seconds\n")
 
@@ -297,13 +291,15 @@ else:
 log_print( "\nStep 6: Saving metadata...")
 step6_start = time.time()
 
-# Keep track of usage condition mapping 
+# Keep track of usage condition mapping (index -> condition info)
 usage_condition_mapping = {}
+usage_condition_names = []
 if len(conditions_df) > 0:
     for idx, row in conditions_df.iterrows():
         cond = row['condition_key']
-        usage_condition_mapping[cond] = {
-            'idx': int(idx),
+        usage_condition_names.append(cond)
+        usage_condition_mapping[str(idx)] = {
+            'condition_key': cond,
             'tissue': row.get('tissue', ''),
             'timepoint': row.get('timepoint', ''),
             'display_name': row.get('display_name', cond)
@@ -323,26 +319,32 @@ metadata_json = {
     
     # Array shapes and dtypes
     'sequences_shape': list(sequences.shape),
-    'labels_shape': list(labels.shape),
     'sequences_dtype': str(sequences.dtype),
-    'labels_dtype': str(labels.dtype),
-    'usage_conditions': list(usage_condition_mapping.keys()),
+    'labels_format': 'sparse',
+    'usage_conditions': usage_condition_names,
     'usage_condition_mapping': usage_condition_mapping,
     
     # File paths
     'files': {
         'sequences': os.path.join(genome_output_dir, 'sequences.mmap'),
-        'labels': os.path.join(genome_output_dir, 'labels.mmap'),
         'metadata': os.path.join(genome_output_dir, 'metadata.csv'),
     }
 }
 
-# Add usage array info if present
-if usage_arrays:
-    for key, arr in usage_arrays.items():
-        metadata_json[f'{key}_shape'] = list(arr.shape)
-        metadata_json[f'{key}_dtype'] = str(arr.dtype)
-        metadata_json['files'][f'{key}'] = os.path.join(genome_output_dir, f'usage_{key}.mmap')
+# Check for sparse labels file
+labels_sparse_path = os.path.join(genome_output_dir, 'labels.parquet')
+if os.path.exists(labels_sparse_path):
+    labels_df = pd.read_parquet(labels_sparse_path)
+    metadata_json['labels_sparse_entries'] = len(labels_df)
+    metadata_json['files']['labels_sparse'] = labels_sparse_path
+
+# Check for sparse usage file
+usage_sparse_path = os.path.join(genome_output_dir, 'usage.parquet')
+if os.path.exists(usage_sparse_path):
+    metadata_json['usage_format'] = 'sparse'
+    usage_df = pd.read_parquet(usage_sparse_path)
+    metadata_json['usage_sparse_entries'] = len(usage_df)
+    metadata_json['files']['usage_sparse'] = usage_sparse_path
 
 metadata_json_path = os.path.join(genome_output_dir, 'metadata.json')
 log_print(f"Saving metadata to {metadata_json_path}")

@@ -313,7 +313,13 @@ for genome_id in sorted(genome_dirs):
     usage_columns = meta.get('usage_conditions', [])
     all_usage_conditions.update(usage_columns)
 
-common_usage_conditions = sorted(list(all_usage_conditions))
+# Natural sort for conditions (so Brain_5 comes before Brain_10)
+import re
+def natural_sort_key(s):
+    """Sort strings with embedded numbers naturally."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
+
+common_usage_conditions = sorted(list(all_usage_conditions), key=natural_sort_key)
 log_print(f"  Common usage conditions: {common_usage_conditions}")
 
 step4_time = time.time() - step4_start
@@ -330,6 +336,12 @@ train_dir = os.path.join(output_dir, 'train')
 test_dir = os.path.join(output_dir, 'test')
 os.makedirs(train_dir, exist_ok=True)
 os.makedirs(test_dir, exist_ok=True)
+
+# Track which species have which conditions (for condition masking)
+species_condition_mapping = {}  # species_name -> list of condition indices
+
+# Track which species have which conditions (for condition masking)
+species_condition_mapping = {}  # species_name -> list of condition indices
 
 # First pass: count sequences to determine mmap shapes
 train_count = 0
@@ -355,35 +367,22 @@ with open(os.path.join(first_genome_dir, 'metadata.json'), 'r') as f:
     first_meta = json.load(f)
 
 seq_dtype = first_meta['sequences_dtype']
-label_dtype = first_meta['labels_dtype']
 seq_window_size = first_meta['sequences_shape'][1]
-label_window_size = first_meta['labels_shape'][1]
-
-alpha_dtype = first_meta.get('alpha_dtype', 'float32')
-beta_dtype = first_meta.get('beta_dtype', 'float32')
-sse_dtype = first_meta.get('sse_dtype', 'float32')
-
+window_size = seq_window_size  # Same for sequences and labels
 n_usage_conditions = len(common_usage_conditions)
 
 # Initialize memory-mapped output files
 train_sequences_mmap = None
-train_labels_mmap = None
-train_species_ids_mmap = None
-train_usage_alpha_mmap = None
-train_usage_beta_mmap = None
-train_usage_sse_mmap = None
-train_condition_mask_mmap = None
-
 test_sequences_mmap = None
-test_labels_mmap = None
-test_species_ids_mmap = None
-test_usage_alpha_mmap = None
-test_usage_beta_mmap = None
-test_usage_sse_mmap = None
-test_condition_mask_mmap = None
 
 train_metadata_list = []
 test_metadata_list = []
+
+# Lists to collect sparse labels and usage data
+train_labels_list = []
+test_labels_list = []
+train_usage_sparse_list = []
+test_usage_sparse_list = []
 
 train_offset = 0
 test_offset = 0
@@ -433,63 +432,68 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
     
     # Open memmap files without loading into memory (memory efficient)
     seq_shape = tuple(meta['sequences_shape'])
-    labels_shape = tuple(meta['labels_shape'])
     
     log_print(f"    Opening sequences memmap (not loading into memory)...")
     sequences_mmap = np.memmap(os.path.join(genome_dir, 'sequences.mmap'), 
                               dtype=seq_dtype, mode='r', shape=seq_shape)
     
-    log_print(f"    Opening labels memmap (not loading into memory)...")
-    labels_mmap = np.memmap(os.path.join(genome_dir, 'labels.mmap'), 
-                           dtype=label_dtype, mode='r', shape=labels_shape)
+    # Load sparse labels data
+    labels_sparse_path = os.path.join(genome_dir, 'labels.parquet')
+    labels_sparse_df = None
+    if os.path.exists(labels_sparse_path):
+        log_print(f"    Loading sparse labels data...")
+        labels_sparse_df = pd.read_parquet(labels_sparse_path)
+        log_print(f"    Loaded {len(labels_sparse_df)} sparse label entries")
+    else:
+        log_print(f"    No labels data found for {genome_id}")
     
-    # Open usage array memmaps if they exist
-    usage_alpha_mmap = None
-    usage_beta_mmap = None
-    usage_sse_mmap = None
+    # Load sparse usage data
+    usage_sparse_path = os.path.join(genome_dir, 'usage.parquet')
     genome_usage_conditions = meta.get('usage_conditions', [])
     
-    usage_alpha_path = os.path.join(genome_dir, 'usage_alpha.mmap')
-    if os.path.exists(usage_alpha_path):
-        usage_alpha_shape = tuple(meta['alpha_shape'])
-        log_print(f"    Opening usage_alpha memmap (not loading into memory)...")
-        usage_alpha_mmap = np.memmap(usage_alpha_path, dtype=alpha_dtype, mode='r', shape=usage_alpha_shape)
+    usage_sparse_df = None
+    if os.path.exists(usage_sparse_path):
+        log_print(f"    Loading sparse usage data...")
+        usage_sparse_df = pd.read_parquet(usage_sparse_path)
+        log_print(f"    Loaded {len(usage_sparse_df)} sparse usage entries")
+    else:
+        log_print(f"    No usage data found for {genome_id}")
     
-    usage_beta_path = os.path.join(genome_dir, 'usage_beta.mmap')
-    if os.path.exists(usage_beta_path):
-        usage_beta_shape = tuple(meta['beta_shape'])
-        log_print(f"    Opening usage_beta memmap (not loading into memory)...")
-        usage_beta_mmap = np.memmap(usage_beta_path, dtype=beta_dtype, mode='r', shape=usage_beta_shape)
+    # Track which conditions this species has (map to global condition indices)
+    genome_common_name = meta.get('genome_config', {}).get('common_name', genome_id)
+    if genome_common_name not in species_condition_mapping:
+        species_condition_mapping[genome_common_name] = []
+        for genome_cond in genome_usage_conditions:
+            if genome_cond in common_usage_conditions:
+                global_idx = common_usage_conditions.index(genome_cond)
+                if global_idx not in species_condition_mapping[genome_common_name]:
+                    species_condition_mapping[genome_common_name].append(global_idx)
     
-    usage_sse_path = os.path.join(genome_dir, 'usage_sse.mmap')
-    if os.path.exists(usage_sse_path):
-        usage_sse_shape = tuple(meta['sse_shape'])
-        log_print(f"    Opening usage_sse memmap (not loading into memory)...")
-        usage_sse_mmap = np.memmap(usage_sse_path, dtype=sse_dtype, mode='r', shape=usage_sse_shape)
+    # Track which conditions this species has (map to global condition indices)
+    genome_common_name = meta.get('genome_config', {}).get('common_name', genome_id)
+    if genome_common_name not in species_condition_mapping:
+        species_condition_mapping[genome_common_name] = []
+        for genome_cond in genome_usage_conditions:
+            if genome_cond in common_usage_conditions:
+                global_idx = common_usage_conditions.index(genome_cond)
+                if global_idx not in species_condition_mapping[genome_common_name]:
+                    species_condition_mapping[genome_common_name].append(global_idx)
     
-    # Helper to reorder usage conditions
-    def reorder_usage_to_common(usage_array, genome_conds, target_conds):
-        """Reorder usage array columns to match target conditions."""
-        if usage_array is None:
-            return None
-        n_seqs, window_size, _ = usage_array.shape
-        reordered = np.zeros((n_seqs, window_size, len(target_conds)), dtype=usage_array.dtype)
-        cond_to_idx = {cond: idx for idx, cond in enumerate(genome_conds)}
-        for target_idx, target_cond in enumerate(target_conds):
-            if target_cond in cond_to_idx:
-                source_idx = cond_to_idx[target_cond]
-                reordered[:, :, target_idx] = usage_array[:, :, source_idx]
-        return reordered
-    
-    # Helper to build condition mask for genome
-    def build_condition_mask(genome_conds, target_conds):
-        """Build binary mask indicating which conditions are valid for this genome."""
-        mask = np.zeros(len(target_conds), dtype=np.bool_)
-        cond_to_idx = {cond: idx for idx, cond in enumerate(genome_conds)}
-        for target_idx, target_cond in enumerate(target_conds):
-            if target_cond in cond_to_idx:
-                mask[target_idx] = True
-        return mask
+    # Helper to remap sparse usage condition indices
+    def remap_sparse_condition_indices(sparse_df, genome_conds, target_conds):
+        """Remap condition_idx in sparse dataframe to match target conditions."""
+        if sparse_df is None or len(sparse_df) == 0:
+            return sparse_df
+        # Create mapping from genome condition index to target condition index
+        idx_mapping = {}
+        for genome_idx, genome_cond in enumerate(genome_conds):
+            if genome_cond in target_conds:
+                target_idx = target_conds.index(genome_cond)
+                idx_mapping[genome_idx] = target_idx
+        # Filter and remap
+        filtered = sparse_df[sparse_df['condition_idx'].isin(idx_mapping.keys())].copy()
+        filtered['condition_idx'] = filtered['condition_idx'].map(idx_mapping)
+        return filtered
     
     # Process train sequences
     if train_indices:
@@ -499,29 +503,6 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
             train_sequences_mmap = np.memmap(os.path.join(train_dir, 'sequences.mmap'), 
                                             dtype=seq_dtype, mode='w+', 
                                             shape=(train_count, seq_window_size, 4))
-            train_labels_mmap = np.memmap(os.path.join(train_dir, 'labels.mmap'), 
-                                         dtype=label_dtype, mode='w+', 
-                                         shape=(train_count, label_window_size))
-            train_species_ids_mmap = np.memmap(os.path.join(train_dir, 'species_ids.mmap'), 
-                                              dtype=np.int32, mode='w+', 
-                                              shape=(train_count,))
-            if usage_alpha_mmap is not None:
-                train_usage_alpha_mmap = np.memmap(os.path.join(train_dir, 'usage_alpha.mmap'), 
-                                                  dtype=alpha_dtype, mode='w+', 
-                                                  shape=(train_count, label_window_size, n_usage_conditions))
-            if usage_beta_mmap is not None:
-                train_usage_beta_mmap = np.memmap(os.path.join(train_dir, 'usage_beta.mmap'), 
-                                                 dtype=beta_dtype, mode='w+', 
-                                                 shape=(train_count, label_window_size, n_usage_conditions))
-            if usage_sse_mmap is not None:
-                train_usage_sse_mmap = np.memmap(os.path.join(train_dir, 'usage_sse.mmap'), 
-                                                dtype=sse_dtype, mode='w+', 
-                                                shape=(train_count, label_window_size, n_usage_conditions))
-            
-            # Create condition mask array
-            train_condition_mask_mmap = np.memmap(os.path.join(train_dir, 'condition_mask.mmap'),
-                                                 dtype=np.bool_, mode='w+',
-                                                 shape=(train_count, n_usage_conditions))
         
         # Write train data in batches to avoid memory spikes
         n_train = len(train_indices)
@@ -535,33 +516,28 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
             
             # Copy batch directly from source memmap to dest memmap (memory efficient)
             train_sequences_mmap[train_offset:train_offset + batch_size_actual] = sequences_mmap[batch_indices]
-            train_labels_mmap[train_offset:train_offset + batch_size_actual] = labels_mmap[batch_indices]
-            train_species_ids_mmap[train_offset:train_offset + batch_size_actual] = genome_idx
             
-            if usage_alpha_mmap is not None:
-                train_alpha = reorder_usage_to_common(usage_alpha_mmap[batch_indices], 
-                                                     genome_usage_conditions, 
-                                                     common_usage_conditions)
-                train_usage_alpha_mmap[train_offset:train_offset + batch_size_actual] = train_alpha
-                del train_alpha
+            # Handle sparse labels data
+            if labels_sparse_df is not None:
+                # Filter to batch samples, remap sample_idx to target indices
+                batch_labels = labels_sparse_df[labels_sparse_df['sample_idx'].isin(batch_indices)].copy()
+                # Create mapping from source to target indices
+                idx_map = {src: train_offset + i for i, src in enumerate(batch_indices)}
+                batch_labels['sample_idx'] = batch_labels['sample_idx'].map(idx_map)
+                train_labels_list.append(batch_labels)
             
-            if usage_beta_mmap is not None:
-                train_beta = reorder_usage_to_common(usage_beta_mmap[batch_indices], 
-                                                    genome_usage_conditions, 
-                                                    common_usage_conditions)
-                train_usage_beta_mmap[train_offset:train_offset + batch_size_actual] = train_beta
-                del train_beta
-            
-            if usage_sse_mmap is not None:
-                train_sse = reorder_usage_to_common(usage_sse_mmap[batch_indices], 
-                                                   genome_usage_conditions, 
-                                                   common_usage_conditions)
-                train_usage_sse_mmap[train_offset:train_offset + batch_size_actual] = train_sse
-                del train_sse
-            
-            # Write condition mask (same for all sequences from this genome)
-            genome_mask = build_condition_mask(genome_usage_conditions, common_usage_conditions)
-            train_condition_mask_mmap[train_offset:train_offset + batch_size_actual] = genome_mask
+            # Handle sparse usage data
+            if usage_sparse_df is not None:
+                # Filter to batch samples and remap
+                batch_sparse = usage_sparse_df[usage_sparse_df['sample_idx'].isin(batch_indices)].copy()
+                # Remap condition indices to common conditions
+                batch_sparse = remap_sparse_condition_indices(batch_sparse, 
+                                                             genome_usage_conditions,
+                                                             common_usage_conditions)
+                # Adjust sample_idx to global train offset
+                idx_map = {orig: new for new, orig in enumerate(batch_indices, start=train_offset)}
+                batch_sparse['sample_idx'] = batch_sparse['sample_idx'].map(idx_map)
+                train_usage_sparse_list.append(batch_sparse)
             
             train_offset += batch_size_actual
     
@@ -570,32 +546,9 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
         # Initialize mmap files on first write
         if test_sequences_mmap is None:
             log_print(f"    Initializing test mmap files...")
-            test_sequences_mmap = np.memmap(os.path.join(test_dir, 'sequences.mmap'), 
-                                           dtype=seq_dtype, mode='w+', 
+            test_sequences_mmap = np.memmap(os.path.join(test_dir, 'sequences.mmap'),
+                                            dtype=seq_dtype, mode='w+', 
                                            shape=(test_count, seq_window_size, 4))
-            test_labels_mmap = np.memmap(os.path.join(test_dir, 'labels.mmap'), 
-                                        dtype=label_dtype, mode='w+', 
-                                        shape=(test_count, label_window_size))
-            test_species_ids_mmap = np.memmap(os.path.join(test_dir, 'species_ids.mmap'), 
-                                             dtype=np.int32, mode='w+', 
-                                             shape=(test_count,))
-            if usage_alpha_mmap is not None:
-                test_usage_alpha_mmap = np.memmap(os.path.join(test_dir, 'usage_alpha.mmap'), 
-                                                 dtype=alpha_dtype, mode='w+', 
-                                                 shape=(test_count, label_window_size, n_usage_conditions))
-            if usage_beta_mmap is not None:
-                test_usage_beta_mmap = np.memmap(os.path.join(test_dir, 'usage_beta.mmap'), 
-                                                dtype=beta_dtype, mode='w+', 
-                                                shape=(test_count, label_window_size, n_usage_conditions))
-            if usage_sse_mmap is not None:
-                test_usage_sse_mmap = np.memmap(os.path.join(test_dir, 'usage_sse.mmap'), 
-                                               dtype=sse_dtype, mode='w+', 
-                                               shape=(test_count, label_window_size, n_usage_conditions))
-            
-            # Create condition mask array
-            test_condition_mask_mmap = np.memmap(os.path.join(test_dir, 'condition_mask.mmap'),
-                                                dtype=np.bool_, mode='w+',
-                                                shape=(test_count, n_usage_conditions))
         
         # Write test data in batches to avoid memory spikes
         n_test = len(test_indices)
@@ -609,65 +562,46 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
             
             # Copy batch directly from source memmap to dest memmap (memory efficient)
             test_sequences_mmap[test_offset:test_offset + batch_size_actual] = sequences_mmap[batch_indices]
-            test_labels_mmap[test_offset:test_offset + batch_size_actual] = labels_mmap[batch_indices]
-            test_species_ids_mmap[test_offset:test_offset + batch_size_actual] = genome_idx
             
-            if usage_alpha_mmap is not None:
-                test_alpha = reorder_usage_to_common(usage_alpha_mmap[batch_indices], 
-                                                    genome_usage_conditions, 
-                                                    common_usage_conditions)
-                test_usage_alpha_mmap[test_offset:test_offset + batch_size_actual] = test_alpha
-                del test_alpha
+            # Handle sparse labels data
+            if labels_sparse_df is not None:
+                # Filter to batch samples, remap sample_idx to target indices
+                batch_labels = labels_sparse_df[labels_sparse_df['sample_idx'].isin(batch_indices)].copy()
+                # Create mapping from source to target indices
+                idx_map = {src: test_offset + i for i, src in enumerate(batch_indices)}
+                batch_labels['sample_idx'] = batch_labels['sample_idx'].map(idx_map)
+                test_labels_list.append(batch_labels)
             
-            if usage_beta_mmap is not None:
-                test_beta = reorder_usage_to_common(usage_beta_mmap[batch_indices], 
-                                                   genome_usage_conditions, 
-                                                   common_usage_conditions)
-                test_usage_beta_mmap[test_offset:test_offset + batch_size_actual] = test_beta
-                del test_beta
-            
-            if usage_sse_mmap is not None:
-                test_sse = reorder_usage_to_common(usage_sse_mmap[batch_indices], 
-                                                  genome_usage_conditions, 
-                                                  common_usage_conditions)
-                test_usage_sse_mmap[test_offset:test_offset + batch_size_actual] = test_sse
-                del test_sse
-            
-            # Write condition mask (same for all sequences from this genome)
-            genome_mask = build_condition_mask(genome_usage_conditions, common_usage_conditions)
-            test_condition_mask_mmap[test_offset:test_offset + batch_size_actual] = genome_mask
+            # Handle sparse usage data
+            if usage_sparse_df is not None:
+                # Filter to batch samples and remap
+                batch_sparse = usage_sparse_df[usage_sparse_df['sample_idx'].isin(batch_indices)].copy()
+                # Remap condition indices to common conditions
+                batch_sparse = remap_sparse_condition_indices(batch_sparse, 
+                                                             genome_usage_conditions,
+                                                             common_usage_conditions)
+                # Adjust sample_idx to global test offset
+                idx_map = {orig: new for new, orig in enumerate(batch_indices, start=test_offset)}
+                batch_sparse['sample_idx'] = batch_sparse['sample_idx'].map(idx_map)
+                test_usage_sparse_list.append(batch_sparse)
             
             test_offset += batch_size_actual
     
     log_print(f"    Genome {genome_id} processed")
-    # Close memmap references to free file handles
-    del sequences_mmap, labels_mmap, usage_alpha_mmap, usage_beta_mmap, usage_sse_mmap, metadata
+    # Close references to free file handles
+    del sequences_mmap, metadata
+    if usage_sparse_df is not None:
+        del usage_sparse_df
     gc.collect()
     
     log_print(f"    Memory after processing: {get_memory_usage():.2f} GB")
 
 # Flush and close mmap files
 if train_sequences_mmap is not None:
-    del train_sequences_mmap, train_labels_mmap, train_species_ids_mmap
-    if train_usage_alpha_mmap is not None:
-        del train_usage_alpha_mmap
-    if train_usage_beta_mmap is not None:
-        del train_usage_beta_mmap
-    if train_usage_sse_mmap is not None:
-        del train_usage_sse_mmap
-    if train_condition_mask_mmap is not None:
-        del train_condition_mask_mmap
+    del train_sequences_mmap
 
 if test_sequences_mmap is not None:
-    del test_sequences_mmap, test_labels_mmap, test_species_ids_mmap
-    if test_usage_alpha_mmap is not None:
-        del test_usage_alpha_mmap
-    if test_usage_beta_mmap is not None:
-        del test_usage_beta_mmap
-    if test_usage_sse_mmap is not None:
-        del test_usage_sse_mmap
-    if test_condition_mask_mmap is not None:
-        del test_condition_mask_mmap
+    del test_sequences_mmap
 
 # Save metadata
 log_print(f"\n  Saving metadata...")
@@ -683,6 +617,58 @@ if test_metadata_list:
     test_metadata_df.to_csv(os.path.join(test_dir, 'metadata.csv'), index=False)
     log_print(f"    Test metadata: {len(test_metadata_df)} entries")
 
+# Save sparse labels data if any was collected
+if train_labels_list:
+    log_print(f"\n  Saving sparse labels data...")
+    train_labels_sparse = pd.concat(train_labels_list, ignore_index=True)
+    # Convert to efficient dtypes
+    train_labels_sparse['sample_idx'] = train_labels_sparse['sample_idx'].astype(np.int32)
+    train_labels_sparse['position'] = train_labels_sparse['position'].astype(np.int16)
+    train_labels_sparse['label'] = train_labels_sparse['label'].astype(np.int8)
+    train_labels_sparse.to_parquet(os.path.join(train_dir, 'labels.parquet'), 
+                                   compression='snappy', index=False)
+    log_print(f"    Train sparse labels: {len(train_labels_sparse)} entries")
+    del train_labels_sparse
+
+if test_labels_list:
+    test_labels_sparse = pd.concat(test_labels_list, ignore_index=True)
+    # Convert to efficient dtypes
+    test_labels_sparse['sample_idx'] = test_labels_sparse['sample_idx'].astype(np.int32)
+    test_labels_sparse['position'] = test_labels_sparse['position'].astype(np.int16)
+    test_labels_sparse['label'] = test_labels_sparse['label'].astype(np.int8)
+    test_labels_sparse.to_parquet(os.path.join(test_dir, 'labels.parquet'), 
+                                  compression='snappy', index=False)
+    log_print(f"    Test sparse labels: {len(test_labels_sparse)} entries")
+    del test_labels_sparse
+
+# Save sparse usage data if any was collected
+if train_usage_sparse_list:
+    log_print(f"\n  Saving sparse usage data...")
+    train_usage_sparse = pd.concat(train_usage_sparse_list, ignore_index=True)
+    # Convert to efficient dtypes
+    train_usage_sparse['sample_idx'] = train_usage_sparse['sample_idx'].astype(np.int32)
+    train_usage_sparse['position'] = train_usage_sparse['position'].astype(np.int16)
+    train_usage_sparse['condition_idx'] = train_usage_sparse['condition_idx'].astype(np.int8)
+    train_usage_sparse.to_parquet(os.path.join(train_dir, 'usage.parquet'), 
+                                  compression='snappy', index=False)
+    log_print(f"    Train sparse usage: {len(train_usage_sparse)} entries")
+    sparsity = 100 * len(train_usage_sparse) / (train_offset * window_size * n_usage_conditions)
+    log_print(f"    Train sparsity: {sparsity:.4f}%")
+    del train_usage_sparse
+
+if test_usage_sparse_list:
+    test_usage_sparse = pd.concat(test_usage_sparse_list, ignore_index=True)
+    # Convert to efficient dtypes
+    test_usage_sparse['sample_idx'] = test_usage_sparse['sample_idx'].astype(np.int32)
+    test_usage_sparse['position'] = test_usage_sparse['position'].astype(np.int16)
+    test_usage_sparse['condition_idx'] = test_usage_sparse['condition_idx'].astype(np.int8)
+    test_usage_sparse.to_parquet(os.path.join(test_dir, 'usage.parquet'), 
+                                 compression='snappy', index=False)
+    log_print(f"    Test sparse usage: {len(test_usage_sparse)} entries")
+    sparsity = 100 * len(test_usage_sparse) / (test_offset * window_size * n_usage_conditions)
+    log_print(f"    Test sparsity: {sparsity:.4f}%")
+    del test_usage_sparse
+
 # Helper function to create metadata.json
 def create_split_metadata(output_split_dir, n_sequences, common_usage_conditions,
                          genome_dirs_list, input_dir, pov_genome):
@@ -696,32 +682,38 @@ def create_split_metadata(output_split_dir, n_sequences, common_usage_conditions
     window_size = pov_summary.get('window_size', 1000)
     context_size = pov_summary.get('context_size', 450)
     
+    # Create usage condition mapping (index -> condition info)
+    usage_condition_mapping = {}
+    for idx, cond_key in enumerate(common_usage_conditions):
+        usage_condition_mapping[str(idx)] = {
+            'condition_key': cond_key,
+            'display_name': cond_key
+        }
+    
     # Build consolidated metadata
     metadata = {
         'sequences_shape': [n_sequences, seq_window_size, 4],
-        'labels_shape': [n_sequences, label_window_size],
         'sequences_dtype': seq_dtype,
-        'labels_dtype': label_dtype,
-        'usage_conditions': common_usage_conditions,
+        'labels_format': 'sparse',
         'window_size': window_size,
         'context_size': context_size,
-        'species_ids_dtype': 'int32',
-        'species_ids_shape': [n_sequences],
+        'usage_conditions': common_usage_conditions,
+        'usage_condition_mapping': usage_condition_mapping,
+        'species_condition_mapping': species_condition_mapping,
     }
     
-    # Add usage array info if present (check for file existence)
-    if os.path.exists(os.path.join(output_split_dir, 'usage_alpha.mmap')):
-        metadata['alpha_shape'] = [n_sequences, label_window_size, len(common_usage_conditions)]
-        metadata['alpha_dtype'] = alpha_dtype
-    if os.path.exists(os.path.join(output_split_dir, 'usage_beta.mmap')):
-        metadata['beta_shape'] = [n_sequences, label_window_size, len(common_usage_conditions)]
-        metadata['beta_dtype'] = beta_dtype
-    if os.path.exists(os.path.join(output_split_dir, 'usage_sse.mmap')):
-        metadata['sse_shape'] = [n_sequences, label_window_size, len(common_usage_conditions)]
-        metadata['sse_dtype'] = sse_dtype
-    if os.path.exists(os.path.join(output_split_dir, 'condition_mask.mmap')):
-        metadata['condition_mask_shape'] = [n_sequences, len(common_usage_conditions)]
-        metadata['condition_mask_dtype'] = 'bool'
+    # Add labels info if present (sparse format only)
+    labels_sparse_path = os.path.join(output_split_dir, 'labels.parquet')
+    if os.path.exists(labels_sparse_path):
+        labels_df = pd.read_parquet(labels_sparse_path)
+        metadata['labels_sparse_entries'] = len(labels_df)
+    
+    # Add usage array info if present (sparse format only)
+    usage_sparse_path = os.path.join(output_split_dir, 'usage.parquet')
+    if os.path.exists(usage_sparse_path):
+        metadata['usage_format'] = 'sparse'
+        usage_df = pd.read_parquet(usage_sparse_path)
+        metadata['usage_sparse_entries'] = len(usage_df)
     
     # Collect species mapping
     species_mapping = {}

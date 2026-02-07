@@ -2,6 +2,7 @@
 
 import torch
 import numpy as np
+import pandas as pd
 from pathlib import Path
 import argparse
 import json
@@ -14,7 +15,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from splicevo.model import SplicevoModel
-from splicevo.training.normalization import denormalize_usage, load_normalization_stats
+from splicevo.data.data_loader import load_memmap_data
 
 
 def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=print):
@@ -30,7 +31,7 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
     config_path = checkpoint_path.parent / 'training_config.json'
     condition_info = None
     usage_loss_type = 'weighted_mse'  # default
-    usage_types = ['sse', 'alpha', 'beta']  # default: all types
+    usage_types = ['sse']  # default
     
     if config_path.exists():
         log_fn(f"Loading model config from {config_path}...")
@@ -45,9 +46,7 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
         # Get usage types from data config
         if 'data' in training_config['config']:
             usage_types = training_config['config']['data'].get('usage_types', ['sse', 'alpha', 'beta'])
-            log_fn(f"Usage types trained: {usage_types}")
             usage_types = [utype for utype in usage_types if utype in ['sse', 'alpha', 'beta']]  # validate types
-            log_fn(f"  -> Using types: {usage_types}")
         else:
             log_fn("Warning: No usage_types found in config, using default [sse, alpha, beta]")
         
@@ -67,46 +66,48 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
         # If usage_classifier exists, it was trained with hybrid loss
         if 'encoder.usage_classifier.weight' in state_dict:
             usage_loss_type = 'hybrid'
-            log_fn("Detected usage_classifier in checkpoint -> using hybrid loss mode")
 
     # Infer n_conditions from checkpoint state_dict
     usage_predictor_keys = [k for k in state_dict.keys() if 'usage_predictor' in k]
     
     if usage_predictor_keys:
-        log_fn(f"\nFound usage_predictor keys: {usage_predictor_keys}")
         # Look for species-specific usage predictors
         species_keys = [k for k in usage_predictor_keys if 'species_' in k and 'weight' in k]
         
         if species_keys:
+            # Get number of species
+            n_species = len(species_keys)
+            model_config['n_species'] = n_species
             # Get shape from first species predictor
             sample_key = species_keys[0]
             weight_shape = state_dict[sample_key].shape
             n_conditions = weight_shape[0]
-            log_fn(f"Inferred n_conditions from {sample_key}: shape={weight_shape} -> n_conditions={n_conditions}")
             model_config['n_conditions'] = n_conditions
         else:
             log_fn("Warning: Found usage_predictor but no species-specific predictors")
+            model_config.setdefault('n_species', 1)
             model_config.setdefault('n_conditions', 0)
     else:
         log_fn("Warning: Could not find usage_predictor in checkpoint")
+        model_config.setdefault('n_species', 1)
         model_config.setdefault('n_conditions', 0)
     
     # Set defaults for other model parameters
-    model_config.setdefault('embed_dim', 128)
-    model_config.setdefault('num_resblocks', 8)
-    model_config.setdefault('dilation_strategy', 'alternating')
-    model_config.setdefault('alternate', 2)
-    model_config.setdefault('num_classes', 3)
-    model_config.setdefault('context_len', 4500)
-    model_config.setdefault('dropout', 0.0)
-    model_config['usage_loss_type'] = usage_loss_type
+    #model_config.setdefault('embed_dim', 128)
+    #model_config.setdefault('num_resblocks', 8)
+    #model_config.setdefault('dilation_strategy', 'alternating')
+    #model_config.setdefault('alternate', 2)
+    #model_config.setdefault('num_classes', 3)
+    #model_config.setdefault('context_len', 4500)
+    #model_config.setdefault('dropout', 0.0)
+    #model_config['usage_loss_type'] = usage_loss_type
     
     log_fn("\nModel configuration:")
     for key, value in model_config.items():
         log_fn(f"  {key}: {value}")
     
-    # Create model with inferred config (remove usage_types as it's not a model parameter)
-    model_config_for_init = {k: v for k, v in model_config.items() if k != 'usage_types'}
+    # Create model with inferred config 
+    model_config_for_init = {k: v for k, v in model_config.items()}
     
     from splicevo.model import SplicevoModel
     model = SplicevoModel(**model_config_for_init)
@@ -117,254 +118,125 @@ def load_model_and_config(checkpoint_path: str, device: str = 'cpu', log_fn=prin
     model.eval()
     
     log_fn(f"Model loaded successfully!")
-    log_fn(f"Usage types: {usage_types}")
     
     return model, model_config, condition_info
 
 
-def load_test_data(data_path: str, use_memmap: bool = False, log_fn=print) -> Dict[str, np.ndarray]:
-    """Load test dataset from .npz file or memmap directory."""
+def load_test_data(data_path: str, log_fn=print):
+    """Load test dataset using sparse format (same as training script)."""
     data_path = Path(data_path)
     
-    if use_memmap or data_path.is_dir():
-        # Load from memmap directory
-        if data_path.is_file() and data_path.suffix == '.npz':
-            # Convert .npz path to memmap directory
-            mmap_dir = data_path.parent / data_path.stem
-        else:
-            mmap_dir = data_path
-        
-        log_fn(f"\nLoading test data with memory mapping from {mmap_dir}...")
-        
-        # Load metadata
-        meta_path = mmap_dir / 'metadata.json'
-        if not meta_path.exists():
-            raise FileNotFoundError(f"Missing metadata.json in {mmap_dir}")
-        
-        with open(meta_path, 'r') as f:
-            meta = json.load(f)
-        
-        # Load memmap arrays
-        seq_dtype = np.dtype(meta.get('sequences_dtype', 'float32'))
-        lbl_dtype = np.dtype(meta.get('labels_dtype', 'int8'))
-        usage_dtype = np.dtype(meta.get('alpha_dtype', 'float32'))
-        usage_shape = tuple(meta['alpha_shape'])
-
-        sequences = np.memmap(
-            mmap_dir / 'sequences.mmap',
-            dtype=seq_dtype,
-            mode='r',
-            shape=tuple(meta['sequences_shape'])
-        )
-        
-        labels = np.memmap(
-            mmap_dir / 'labels.mmap',
-            dtype=lbl_dtype,
-            mode='r',
-            shape=tuple(meta['labels_shape'])
-        )
-        
-        # Load usage arrays if they exist
-        data = {
-            'sequences': sequences,
-            'labels': labels
-        }
-        
-        usage_files = {
-            'usage_alpha': mmap_dir / 'usage_alpha.mmap',
-            'usage_beta': mmap_dir / 'usage_beta.mmap',
-            'usage_sse': mmap_dir / 'usage_sse.mmap'
-        }
-        
-        for key, filepath in usage_files.items():
-            if filepath.exists():
-                data[key] = np.memmap(
-                    filepath,
-                    dtype=usage_dtype,
-                    mode='r',
-                    shape=usage_shape
-                )
-        
-        log_fn(f"Available keys: {list(data.keys())}")
-        log_fn(f"Sequences shape: {sequences.shape}")
-        log_fn(f"Splice labels shape: {labels.shape}")
-        
-        for key in ['usage_alpha', 'usage_beta', 'usage_sse']:
-            if key in data:
-                log_fn(f"{key.capitalize()} shape: {data[key].shape}")
-        
-        # Load condition mask if available
-        mask_path = mmap_dir / 'condition_mask.mmap'
-        if mask_path.exists() and 'condition_mask_shape' in meta:
-            mask_dtype = np.dtype(meta.get('condition_mask_dtype', 'bool'))
-            mask_shape = tuple(meta['condition_mask_shape'])
-            data['condition_mask'] = np.memmap(
-                mask_path,
-                dtype=mask_dtype,
-                mode='r',
-                shape=mask_shape
-            )
-            log_fn(f"Condition mask shape: {data['condition_mask'].shape}")
-        
+    log_fn(f"\nLoading test data from {data_path}...")
+    
+    # Check if required files exist
+    seq_file = data_path / 'sequences.mmap'
+    labels_file = data_path / 'labels.parquet'
+    
+    if not seq_file.exists():
+        raise FileNotFoundError(f"Sequences file not found: {seq_file}")
+    if not labels_file.exists():
+        raise FileNotFoundError(f"Sparse labels file not found: {labels_file}")
+    
+    # Load using the same function as training
+    sequences, labels_sparse_df, usage_sparse_df, metadata = load_memmap_data(
+        data_path,
+        load_labels=True,
+        load_usage=True
+    )
+    
+    log_fn(f"  Sequences: {sequences.shape}")
+    if labels_sparse_df is not None:
+        log_fn(f"  Splice labels: {len(labels_sparse_df)} entries (sparse format)")
+    if usage_sparse_df is not None:
+        log_fn(f"  Usage data: {len(usage_sparse_df)} entries (sparse format)")
+    
+    # Load metadata
+    meta_path = data_path / 'metadata.json'
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Metadata file not found: {meta_path}")
+    
+    with open(meta_path, 'r') as f:
+        meta = json.load(f)
+    
+    window_size = meta.get('window_size')
+    if window_size is None:
+        raise ValueError("window_size not found in metadata.json")
+    log_fn(f"  Window size: {window_size}")
+    
+    # Get species mapping if available
+    species_mapping = meta.get('species_mapping', {})
+    if species_mapping:
+        log_fn(f"  Species mapping: {species_mapping}")
+    
+    # Load species IDs from metadata CSV
+    species_ids = None
+    if metadata is not None and 'species_id' in metadata.columns:
+        species_ids = metadata['species_id'].values.astype(np.int32)
+        log_fn(f"  Species IDs: {len(species_ids)} entries (unique ids: {np.unique(species_ids)})")
     else:
-        # Load from .npz file (in-memory)
-        log_fn(f"\nLoading test data from {data_path}...")
-        data_npz = np.load(data_path)
-        
-        data = {key: data_npz[key] for key in data_npz.keys()}
-        
-        log_fn(f"Available keys: {list(data.keys())}")
-        log_fn(f"Sequences shape: {data['sequences'].shape}")
-        log_fn(f"Splice labels shape: {data['labels'].shape}")
-        
-        if 'usage_alpha' in data:
-            log_fn(f"Usage alpha shape: {data['usage_alpha'].shape}")
-            log_fn(f"Usage beta shape: {data['usage_beta'].shape}")
-            log_fn(f"Usage SSE shape: {data['usage_sse'].shape}")
+        log_fn(f"  No species_id column found in {metadata}, check your file!")
     
-    return data
+    log_fn(f"Loaded {len(sequences)} samples")
 
-
-def denormalize_predictions(
-    predictions: Dict[str, np.ndarray],
-    normalization_stats_path: str,
-    n_samples: int
-) -> Dict[str, np.ndarray]:
-    """
-    Denormalize usage predictions back to original scale.
-    
-    Args:
-        predictions: Dictionary with model predictions
-        normalization_stats_path: Path to normalization stats JSON
-        n_samples: Number of samples (for per-sample denormalization)
-    
-    Returns:
-        Dictionary with denormalized predictions
-    """
-    print(f"\nDenormalizing predictions using stats from {normalization_stats_path}...")
-    
-    stats = load_normalization_stats(normalization_stats_path)
-    
-    usage_preds = predictions['usage_predictions']  # (n_samples, seq_len, n_conditions, 3)
-    
-    # Denormalize each component (alpha, beta, sse)
-    denorm_alpha = np.zeros_like(usage_preds[..., 0])
-    denorm_beta = np.zeros_like(usage_preds[..., 1])
-    denorm_sse = np.zeros_like(usage_preds[..., 2])
-    
-    for i in range(n_samples):
-        # Alpha (acceptor usage)
-        denorm_alpha[i] = denormalize_usage(
-            usage_preds[i, :, :, 0],
-            stats,
-            key='alpha',
-            sample_idx=i if stats['method'] == 'per_sample_cpm' else None
-        )
-        
-        # Beta (donor usage)
-        denorm_beta[i] = denormalize_usage(
-            usage_preds[i, :, :, 1],
-            stats,
-            key='beta',
-            sample_idx=i if stats['method'] == 'per_sample_cpm' else None
-        )
-        
-        # SSE (usually identity transform, but apply anyway)
-        denorm_sse[i] = denormalize_usage(
-            usage_preds[i, :, :, 2],
-            stats,
-            key='sse',
-            sample_idx=i if stats['method'] == 'per_sample_cpm' else None
-        )
-        
-        if (i + 1) % 100 == 0:
-            print(f"  Denormalized {i+1}/{n_samples} samples...")
-    
-    denormalized = {
-        'usage_alpha_original': denorm_alpha,
-        'usage_beta_original': denorm_beta,
-        'usage_sse_original': denorm_sse
+    return {
+        'sequences': sequences,
+        'labels_sparse': labels_sparse_df,
+        'usage_sparse': usage_sparse_df,
+        'species_ids': species_ids,
+        'window_size': window_size,
+        'species_mapping': species_mapping,
+        'metadata': metadata
     }
-    
-    print(f"Denormalization complete!")
-    print(f"  Alpha range: [{denorm_alpha.min():.2f}, {denorm_alpha.max():.2f}]")
-    print(f"  Beta range: [{denorm_beta.min():.2f}, {denorm_beta.max():.2f}]")
-    print(f"  SSE range: [{denorm_sse.min():.2f}, {denorm_sse.max():.2f}]")
-    
-    return denormalized
 
 
-def save_predictions_memmap(
-    predictions: Dict[str, np.ndarray],
+def save_predictions_sparse(
+    labels_sparse_df: pd.DataFrame,
+    probs_sparse_df: pd.DataFrame,
+    usage_sparse_df: pd.DataFrame,
     output_dir: Path,
-    save_logits: bool = False,
-    condition_info: Optional[list] = None,
+    condition_info: Optional[dict] = None,
     log_fn=print
 ):
-    """Save predictions as memory-mapped files."""
+    """Save predictions in sparse format (parquet files)."""
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    log_fn(f"\nSaving predictions as memmap to {output_dir}...")
+    log_fn(f"\nSaving predictions to {output_dir}...")
     
-    # Save each array as memmap
-    for key, array in predictions.items():
-        if key == 'splice_logits' and not save_logits:
-            continue
-        
-        filepath = output_dir / f'{key}.mmap'
-        log_fn(f"  Writing {key}: {array.shape} -> {filepath.name}")
-        
-        # Create memmap file
-        mmap_array = np.memmap(
-            filepath,
-            dtype=array.dtype,
-            mode='w+',
-            shape=array.shape
-        )
-        
-        # Write data
-        mmap_array[:] = array[:]
-        mmap_array.flush()
-        del mmap_array
+    # Save splice predictions
+    labels_path = output_dir / 'labels_pred.parquet'
+    labels_sparse_df.to_parquet(labels_path, index=False, compression='snappy')
+    log_fn(f"  Splice predictions: {len(labels_sparse_df)} entries -> {labels_path.name}")
     
-    # Save metadata including condition info
+    # Save splice probabilities
+    if len(probs_sparse_df) > 0:
+        probs_path = output_dir / 'probs_pred.parquet'
+        probs_sparse_df.to_parquet(probs_path, index=False, compression='snappy')
+        log_fn(f"  Splice probabilities: {len(probs_sparse_df)} entries -> {probs_path.name}")
+    
+    # Save usage predictions
+    if len(usage_sparse_df) > 0:
+        usage_path = output_dir / 'usage_pred.parquet'
+        usage_sparse_df.to_parquet(usage_path, index=False, compression='snappy')
+        log_fn(f"  Usage predictions: {len(usage_sparse_df)} entries -> {usage_path.name}")
+    
+    # Save metadata
     metadata = {
-        key: {
-            'shape': list(array.shape),
-            'dtype': str(array.dtype)
-        }
-        for key, array in predictions.items()
-        if key != 'splice_logits' or save_logits
+        'format': 'sparse',
+        'labels_entries': len(labels_sparse_df),
+        'probs_entries': len(probs_sparse_df),
+        'usage_entries': len(usage_sparse_df),
+        'labels_columns': list(labels_sparse_df.columns) if len(labels_sparse_df) > 0 else [],
+        'probs_columns': list(probs_sparse_df.columns) if len(probs_sparse_df) > 0 else [],
+        'usage_columns': list(usage_sparse_df.columns) if len(usage_sparse_df) > 0 else []
     }
     
-    # Add condition mapping
     if condition_info is not None:
         metadata['conditions'] = condition_info
     
-    with open(output_dir / 'metadata.json', 'w') as f:
+    with open(output_dir / 'predictions_metadata.json', 'w') as f:
         json.dump(metadata, f, indent=2)
     
-    log_fn(f"Memmap files saved successfully!")
-
-
-def save_predictions_npz(
-    output_data: Dict[str, np.ndarray],
-    output_path: Path,
-    condition_info: Optional[list] = None,
-    log_fn=print
-):
-    """Save predictions as compressed .npz file."""
-    log_fn(f"\nSaving predictions to {output_path}...")
-    np.savez_compressed(output_path, **output_data)
-    
-    # Also save condition info as separate JSON
-    if condition_info is not None:
-        condition_file = output_path.with_suffix('.metadata.json')
-        with open(condition_file, 'w') as f:
-            json.dump({'conditions': condition_info}, f, indent=2)
-        log_fn(f"Condition mapping saved to {condition_file}")
-    
-    log_fn(f"File size: {output_path.stat().st_size / 1024 / 1024:.1f} MB")
+    log_fn(f"Predictions saved successfully in sparse format!")
 
 
 def main():
@@ -372,23 +244,15 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True,
                         help='Path to model checkpoint')
     parser.add_argument('--test-data', type=str, required=True,
-                        help='Path to test data (.npz file or memmap directory)')
-    parser.add_argument('--normalization-stats', type=str, required=False,
-                        help='Path to normalization stats (.json file) - not needed for SSE-only models')
+                        help='Path to test data directory')
     parser.add_argument('--output', type=str, required=True,
-                        help='Path to save predictions (.npz file or directory for memmap)')
+                        help='Path to save predictions directory')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda or cpu)')
     parser.add_argument('--batch-size', type=int, default=32,
                         help='Batch size for inference')
     parser.add_argument('--gpu-memory-fraction', type=float, default=None,
                         help='Fraction of GPU memory to use (0.0-1.0). If not set, uses all available memory.')
-    parser.add_argument('--no-use-memmap', dest='use_memmap', action='store_false', default=True,
-                        help='Disable memory-mapped data loading (default: enabled)')
-    parser.add_argument('--no-save-memmap', dest='save_memmap', action='store_false', default=True,
-                        help='Disable saving predictions as memmap (default: enabled)')
-    parser.add_argument('--save-logits', action='store_true',
-                        help='Save raw logits (large file)')
     parser.add_argument('--quiet', action='store_true',
                         help='Suppress console output (log to file only)')
     
@@ -398,21 +262,12 @@ def main():
     script_start_time = time.time()
     
     # Create output directory
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Setup logging
-    if args.save_memmap:
-        output_dir = Path(args.output)
-        if output_dir.suffix == '.npz':
-            output_dir = output_dir.parent / output_dir.stem
-        log_dir = output_dir
-    else:
-        log_dir = output_path.parent
-    
-    log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = log_dir / f'prediction_log_{timestamp}.txt'
+    log_file = output_dir / f'prediction_log_{timestamp}.txt'
     
     # Redirect stdout and stderr to log file if quiet mode
     if args.quiet:
@@ -471,8 +326,10 @@ def main():
         
         # Load test data
         data_start = time.time()
-        test_data = load_test_data(args.test_data, use_memmap=args.use_memmap, log_fn=log_print)
+        test_data = load_test_data(args.test_data, log_fn=log_print)
         sequences = test_data['sequences']
+        species_ids = test_data.get('species_ids')
+        window_size = test_data['window_size']
         n_samples = sequences.shape[0]
         seq_len = sequences.shape[1]
         data_time = time.time() - data_start
@@ -485,188 +342,56 @@ def main():
         log_print(f"\nMaking predictions on {n_samples} samples...")
         log_print(f"  Sequence length: {seq_len}, Central length: {central_len}")
         log_print(f"  Conditions: {n_conditions}")
-        log_print(f"Using batch size: {args.batch_size}")
-        log_print(f"Memory-mapped data: {isinstance(sequences, np.memmap)}")
+        log_print(f"  Using batch size: {args.batch_size}")
+        log_print(f"  Memory-mapped data: {isinstance(sequences, np.memmap)}")
         
         predict_start = time.time()
         
-        if args.save_memmap:
-            # Streaming mode: write directly to memmap
-            log_print("Using streaming mode: writing predictions directly to disk...")
-            
-            # Prepare output directory
-            output_dir = Path(args.output)
-            if output_dir.suffix == '.npz':
-                output_dir = output_dir.parent / output_dir.stem
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create memmap output files
-            stream_mmap = {
-                'splice_probs': np.memmap(
-                    output_dir / 'splice_probs.mmap',
-                    dtype='float32', mode='w+',
-                    shape=(n_samples, central_len, 3)
-                ),
-                'splice_predictions': np.memmap(
-                    output_dir / 'splice_predictions.mmap',
-                    dtype='int64', mode='w+',
-                    shape=(n_samples, central_len)
-                ),
-                'usage_predictions': np.memmap(
-                    output_dir / 'usage_sse.mmap',
-                    dtype='float32', mode='w+',
-                    shape=(n_samples, central_len, n_conditions)
-                )
-            }
-            
-            if args.save_logits:
-                stream_mmap['splice_logits'] = np.memmap(
-                    output_dir / 'splice_logits.mmap',
-                    dtype='float32', mode='w+',
-                    shape=(n_samples, central_len, 3)
-                )
-            
-            # Run predictions with streaming
-            model.predict(
-                sequences,
-                batch_size=args.batch_size,
-                stream_to_disk=stream_mmap
-            )
-            
-            predict_time = time.time() - predict_start
-            
-            log_print(f"Predictions complete (streamed to disk)!")
-            log_print(f"  Splice probs: {stream_mmap['splice_probs'].shape}")
-            log_print(f"  Splice predictions: {stream_mmap['splice_predictions'].shape}")
-            log_print(f"  Usage SSE: {stream_mmap['usage_predictions'].shape}")
-            
-            # Copy ground truth to memmap
-            if 'labels' in test_data:
-                log_print("  Copying ground truth labels...")
-                labels_mmap = np.memmap(
-                    output_dir / 'labels_true.mmap',
-                    dtype='int8', mode='w+',
-                    shape=test_data['labels'].shape
-                )
-                labels_mmap[:] = test_data['labels'][:]
-                labels_mmap.flush()
-            
-            if 'usage_sse' in test_data:
-                log_print("  Copying ground truth SSE...")
-                sse_mmap = np.memmap(
-                    output_dir / 'usage_sse_true.mmap',
-                    dtype='float32', mode='w+',
-                    shape=test_data['usage_sse'].shape
-                )
-                sse_mmap[:] = test_data['usage_sse'][:]
-                sse_mmap.flush()
-            
-            if 'condition_mask' in test_data:
-                log_print("  Copying condition mask...")
-                mask_mmap = np.memmap(
-                    output_dir / 'condition_mask.mmap',
-                    dtype='bool', mode='w+',
-                    shape=test_data['condition_mask'].shape
-                )
-                mask_mmap[:] = test_data['condition_mask'][:]
-                mask_mmap.flush()
-                log_print(f"  Condition mask included (shape: {mask_mmap.shape})")
-            
-            # Save metadata
-            metadata = {
-                'splice_probs': {'shape': list(stream_mmap['splice_probs'].shape), 'dtype': 'float32'},
-                'splice_predictions': {'shape': list(stream_mmap['splice_predictions'].shape), 'dtype': 'int64'},
-                'usage_sse': {'shape': list(stream_mmap['usage_predictions'].shape), 'dtype': 'float32'}
-            }
-            
-            if args.save_logits:
-                metadata['splice_logits'] = {'shape': list(stream_mmap['splice_logits'].shape), 'dtype': 'float32'}
-            
-            if 'labels' in test_data:
-                metadata['labels_true'] = {'shape': list(test_data['labels'].shape), 'dtype': 'int8'}
-            if 'usage_sse' in test_data:
-                metadata['usage_sse_true'] = {'shape': list(test_data['usage_sse'].shape), 'dtype': 'float32'}
-            if 'condition_mask' in test_data:
-                metadata['condition_mask'] = {'shape': list(test_data['condition_mask'].shape), 'dtype': 'bool'}
-            
-            if condition_info is not None:
-                metadata['conditions'] = condition_info
-            
-            with open(output_dir / 'metadata.json', 'w') as f:
-                json.dump(metadata, f, indent=2)
-            
-            # Calculate total size
-            total_size = sum(f.stat().st_size for f in output_dir.glob('*.mmap'))
-            log_print(f"\nPrediction Summary:")
-            log_print(f"  Total samples: {n_samples}")
-            log_print(f"  Usage type: SSE only")
-            log_print(f"  Output directory: {output_dir}")
-            log_print(f"  Total size: {total_size / 1024 / 1024:.1f} MB")
-            
-        else:
-            # Original in-memory mode
-            log_print("Using in-memory mode: accumulating predictions in RAM...")
-            predictions = model.predict(
-                sequences,
-                batch_size=args.batch_size
-            )
-            predict_time = time.time() - predict_start
-            
-            log_print(f"Predictions complete!")
-            log_print(f"  Splice logits shape: {predictions['splice_logits'].shape}")
-            log_print(f"  Splice probs shape: {predictions['splice_probs'].shape}")
-            log_print(f"  Splice predictions shape: {predictions['splice_predictions'].shape}")
-            log_print(f"  Usage predictions shape: {predictions['usage_predictions'].shape}")
-
-            # Extract SSE predictions
-            usage_preds = predictions['usage_predictions']  # (n_samples, central_len, n_conditions)
-            
-            log_print(f"\nExtracted usage predictions:")
-            log_print(f"  SSE shape: {usage_preds.shape} (sigmoid, range [0,1])")
-            
-            output_predictions = {
-                'splice_predictions': predictions['splice_predictions'],
-                'splice_probs': predictions['splice_probs'],
-                'usage_sse': usage_preds
-            }
-            
-            if args.save_logits:
-                output_predictions['splice_logits'] = predictions['splice_logits']
-
-            # Add ground truth if available
-            ground_truth = {}
-            if 'labels' in test_data:
-                ground_truth['labels_true'] = np.array(test_data['labels'])
-            if 'usage_sse' in test_data:
-                ground_truth['usage_sse_true'] = np.array(test_data['usage_sse'])
-            if 'condition_mask' in test_data:
-                ground_truth['condition_mask'] = np.array(test_data['condition_mask'])
-                log_print(f"Condition mask included (shape: {ground_truth['condition_mask'].shape})")
-            
-            # Save predictions (in-memory mode only)
-            save_start = time.time()
-            output_path = Path(args.output)
-            output_data = {**output_predictions, **ground_truth}
-            save_predictions_npz(
-                output_data, 
-                output_path, 
-                condition_info=condition_info,
-                log_fn=log_print
-            )
-            save_time = time.time() - save_start
-            
-            log_print(f"\nPrediction Summary:")
-            log_print(f"  Total samples: {n_samples}")
-            log_print(f"  Usage type: SSE only")
-            log_print(f"  Output file: {args.output}")
+        # Run predictions in memory (with sparse format)
+        log_print("\nRunning predictions...")
+        predictions = model.predict(
+            sequences,
+            species_ids=species_ids,
+            batch_size=args.batch_size,
+            sparse_format=True
+        )
+        predict_time = time.time() - predict_start
         
-        # Timing summary (save_time already set above for both modes)
-        if args.save_memmap:
-            save_time = 0  # Already included in predict_time for streaming mode
+        labels_sparse_pred = predictions['labels_sparse']
+        probs_sparse_pred = predictions['probs_sparse']
+        usage_sparse_pred = predictions['usage_sparse']
         
-        total_time = time.time() - script_start_time
+        log_print(f"Predictions complete!")
+        log_print(f"  Splice predictions: {len(labels_sparse_pred)} non-zero entries")
+        log_print(f"  Splice probabilities: {len(probs_sparse_pred)} entries")
+        log_print(f"  Usage predictions: {len(usage_sparse_pred)} entries")
+        
+        # Save predictions
+        save_start = time.time()
+        output_dir = Path(args.output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save predictions in sparse format
+        save_predictions_sparse(
+            labels_sparse_pred,
+            probs_sparse_pred,
+            usage_sparse_pred,
+            output_dir,
+            condition_info=condition_info,
+            log_fn=log_print
+        )
+        
+        save_time = time.time() - save_start
+        
+        log_print(f"\nPrediction Summary:")
+        log_print(f"  Total samples: {n_samples}")
+        log_print(f"  Splice predictions: {len(labels_sparse_pred)} non-zero entries")
+        log_print(f"  Usage predictions: {len(usage_sparse_pred)} entries")
+        log_print(f"  Output directory: {output_dir}")
         
         # Timing summary
+        total_time = time.time() - script_start_time
+        
         log_print("")
         log_print("=" * 60)
         log_print("Timing Summary")
