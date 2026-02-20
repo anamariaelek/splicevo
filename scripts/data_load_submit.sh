@@ -24,17 +24,17 @@ GENOME="mouse_GRCm38"
 #GENOME="human_GRCh37"
 
 # Where to save
-OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_adult_5kb/
+OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_small_10kb/
 
 # Create output directory if it doesn't exist
 mkdir -p ${OUT_DIR}
 
 # Load the genome
 python ${SPLICEVO_DIR}/scripts/data_load.py \
-    --config ${SPLICEVO_DIR}/configs/genomes_adult.json \
+    --config ${SPLICEVO_DIR}/configs/genomes_small.json \
     --genome_id ${GENOME} \
     --output_dir ${OUT_DIR} \
-    --window_size 5000 \
-    --context_size 450 \
+    --window_size 10240 \
+    --context_size 0 \
     --n_cpus 4 \
     --quiet

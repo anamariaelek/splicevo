@@ -735,7 +735,7 @@ class MultiGenomeDataLoader:
         else:
             seq = seq.upper()
         
-        # For negative strand genes, reverse the sequence and apply complement
+        # For negative strand genes, apply complement
         # This preserves the biological meaning while keeping genomic coordinates
         if strand == '-':
             seq = complement_sequence(seq)  # Apply complement (not reverse complement)
@@ -748,64 +748,72 @@ class MultiGenomeDataLoader:
             seq = seq + 'N' * right_pad
         
         # Split gene into windows shifted by window_size
-        # Encode sequence on-demand per window to save memory
-        for window_start in range(0, len(seq) - total_window + 1, window_size):
+        # If gene is shorter than total_window, ensure at least one window is created (pad as needed)
+        n_windows = max(1, (len(seq) - total_window) // window_size + 1)
+        for window_idx in range(n_windows):
+            window_start = window_idx * window_size
+            # For short genes, pad sequence to total_window
+            if len(seq) < total_window:
+                pad_left = 0
+                pad_right = total_window - len(seq)
+                seq_window = seq + 'N' * pad_right
+            else:
+                seq_window = seq[window_start:window_start + total_window]
             # Calculate the genomic position of this window
             window_genomic_start = requested_start + window_start
-            
+
             # The central window spans from context_size to context_size+window_size
             window_center_genomic_start = window_genomic_start + context_size
             window_center_genomic_end = window_center_genomic_start + window_size
-            
+
             # Find splice sites in this window's central region
             sites_in_window = df_gene[
-                (df_gene['position'] >= window_center_genomic_start) & 
+                (df_gene['position'] >= window_center_genomic_start) &
                 (df_gene['position'] < window_center_genomic_end)
             ]
-            
+
             # Skip windows with no splice sites
             if len(sites_in_window) == 0:
                 continue
-            
+
             # Encode sequence on-demand for this window only (memory optimization)
-            ohe_seq = self._encode_ohe_window(seq, window_start, total_window)
-            
+            ohe_seq = self._encode_ohe_window(seq_window, 0, total_window)
+
             # Initialize label array for this window
             labels = np.zeros(window_size, dtype=np.int8)
-            
+
             # Use sparse dictionaries for usage arrays instead of full NaN arrays
             # This significantly reduces memory for genomes with many usage conditions
             usage_alpha_dict = {}
             usage_beta_dict = {}
             usage_sse_dict = {}
-            
+
             n_donor_sites = 0
             n_acceptor_sites = 0
-            
+
             # Mark positions and add usage stats for each site
             for _, site_row in sites_in_window.iterrows():
                 site_pos = site_row['position']
                 site_type = site_row['site_type']
-                
+
                 # Calculate position within the window
                 window_pos = site_pos - window_center_genomic_start
-                
+
                 if 0 <= window_pos < window_size:
                     lookup_key = (genome_id, chrom, site_pos, strand)
                     splice_site = splice_site_index.get(lookup_key)
-                    
+
                     if splice_site is not None:
                         labels[window_pos] = site_type
-                    
+
                         if site_type == 1:
                             n_donor_sites += 1
                         elif site_type == 2:
                             n_acceptor_sites += 1
-                        
+
                         # Look up usage stats on-demand instead of using pre-loaded dict
-                        # This saves memory by not storing usage for all 500k sites during step 4
                         usage_stats = self.get_usage_stats(genome_id, chrom, site_pos, strand)
-                        
+
                         # Store only non-NaN usage stats (sparse representation)
                         for condition_key, stats in usage_stats.items():
                             if condition_key in condition_to_idx:
@@ -817,33 +825,40 @@ class MultiGenomeDataLoader:
                                 usage_alpha_dict[window_pos][cond_idx] = stats['alpha']
                                 usage_beta_dict[window_pos][cond_idx] = stats['beta']
                                 usage_sse_dict[window_pos][cond_idx] = stats['sse']
-            
+
             # Store sparse usage coordinates (no dense array conversion)
-            # This saves massive amounts of memory by only storing non-NaN values
-            window_idx = len(sequences)  # Index of this window in the output
-            
+            global_window_idx = len(sequences)  # Index of this window in the output
+
             for window_pos in usage_alpha_dict:
+
+                # Use coords same as in AlphaGenome
+                #if label == 1 and strand == '+':
+                #    pos -= 2
+                #if label == 2 and strand == '-':
+                #    pos -= 2
+
                 for cond_idx in usage_alpha_dict[window_pos].keys():
                     usage_sparse_list.append({
-                        'sample_idx': window_idx,
+                        'sample_idx': global_window_idx,
                         'position': window_pos,
+                        'strand': strand,
                         'condition_idx': cond_idx,
                         'alpha': usage_alpha_dict[window_pos][cond_idx],
                         'beta': usage_beta_dict[window_pos][cond_idx],
                         'sse': usage_sse_dict[window_pos][cond_idx]
                     })
-            
+
             # Store sparse labels (only non-zero positions)
-            # This saves space since most positions are label=0
             labels_sparse_list = []
             for pos, label_val in enumerate(labels):
                 if label_val != 0:  # Only store donors (1) and acceptors (2)
                     labels_sparse_list.append({
-                        'sample_idx': window_idx,
+                        'sample_idx': global_window_idx,
                         'position': pos,
+                        'strand': strand,
                         'label': label_val
                     })
-            
+
             # Store this window's data
             sequences.append(ohe_seq)
             # Return sparse labels instead of dense
@@ -861,7 +876,7 @@ class MultiGenomeDataLoader:
                 'n_acceptor_sites': n_acceptor_sites
             }
             metadata_rows.append(metadata_row)
-        
+
         # labels_list now contains sparse label coordinates, not dense arrays
         return sequences, labels_list, usage_sparse_list, metadata_rows
 
