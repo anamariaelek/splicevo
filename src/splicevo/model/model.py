@@ -285,7 +285,7 @@ class ResBlock(nn.Module):
         
         self.bn2 = nn.BatchNorm1d(out_channels)
         self.relu2 = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, dilation=1)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=7, stride=1, padding=3, dilation=1)
         
         # Skip connection (no BN here in pre-activation)
         self.skip_connection = None
@@ -360,8 +360,8 @@ class EncoderModule(nn.Module):
         self.initial_conv = nn.Conv1d(
             in_channels=4,
             out_channels=embed_dim,
-            kernel_size=7,
-            padding=3
+            kernel_size=15,
+            padding=7
         )
 
         # Don't use batchnorm after first layer convolution, somehow it ruins interpretability 
