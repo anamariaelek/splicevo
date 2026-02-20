@@ -115,13 +115,11 @@ def load_sparse_predictions(pred_dir: Path, test_data_dir: Path, log_fn=print) -
 def setup_logging(log_file: Optional[str] = None, quiet: bool = False):
     """Setup logging to file and stdout."""
     def log_fn(msg: str):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        formatted_msg = f"[{timestamp}] {msg}"
         if not quiet:
-            print(formatted_msg)
+            print(msg)
         if log_file:
             with open(log_file, 'a') as f:
-                f.write(formatted_msg + '\n')
+                f.write(msg + '\n')
     return log_fn
 
 
@@ -286,11 +284,6 @@ def calculate_condition_correlations(all_data_df: pd.DataFrame, group_by=['tissu
     valid_data = all_data_df.dropna(subset=['true_sse', 'pred_sse'])
     log_fn(f"  Valid positions with both true and predicted SSE: {len(valid_data)} (%{len(valid_data) / len(all_data_df) * 100:.2f}%)")
 
-    # Add condition annotation if available
-    if 'condition_idx' not in valid_data.columns:
-        log_fn("  Warning: 'condition_idx' column not found, adding default condition")
-        valid_data['condition_idx'] = 0
-
     # Group by specified columns to get correlations
     correlation_results = []
     for group_var, group in valid_data.groupby(group_by):
@@ -336,58 +329,6 @@ def calculate_condition_correlations(all_data_df: pd.DataFrame, group_by=['tissu
 
 def plot_sse_density(all_data_df: pd.DataFrame, output_dir: Path, group_by=['tissue'], log_fn=print):
     """Plot density of predicted vs true SSE values."""
-    log_fn("Plotting SSE density...")
-    
-    samples = all_data_df[group_by[0]].unique()
-    num_tissues = len(samples)
-    num_cols = 1
-    num_rows = (num_tissues + num_cols - 1) // num_cols
-    
-    fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols * 4, num_rows * 4), squeeze=False)
-    
-    for i, condition in enumerate(samples):
-        condition_data = all_data_df[all_data_df[group_by[0]] == condition]
-        
-        row = i // num_cols
-        col = i % num_cols
-        ax = axs[row, col]
-        
-        # 2D density plot
-        sns.kdeplot(
-            x=condition_data['true_sse'],
-            y=condition_data['pred_sse'],
-            levels=10,
-            fill=True,
-            cmap="rocket_r",
-            ax=ax
-        )
-        
-        # Top histogram (True SSE)
-        ax_histx = ax.inset_axes([0, 1.05, 1, 0.2], sharex=ax)
-        ax_histx.hist(condition_data['true_sse'], bins=30, color='gray', alpha=0.7)
-        ax_histx.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
-        
-        # Right histogram (Pred SSE)
-        ax_histy = ax.inset_axes([1.05, 0, 0.2, 1], sharey=ax)
-        ax_histy.hist(condition_data['pred_sse'], bins=30, orientation='horizontal', color='gray', alpha=0.7)
-        ax_histy.tick_params(axis="y", which="both", left=False, right=False, labelleft=False)
-        
-        # Add mean lines
-        mean_true = condition_data['true_sse'].mean()
-        mean_pred = condition_data['pred_sse'].mean()
-        ax.axvline(mean_true, color='red', linestyle='--', linewidth=1, label='Mean True')
-        ax.axhline(mean_pred, color='red', linestyle='--', linewidth=1, label='Mean Pred')
-        
-        ax.set_xlabel('True SSE', fontsize=10)
-        ax.set_ylabel('Predicted SSE', fontsize=10)
-        ax.set_xlim(0, 1)
-        ax.grid()
-    
-    plt.tight_layout()
-    density_plot = output_dir / "sse_density.png"
-    plt.savefig(density_plot, dpi=150)
-    plt.close()
-    log_fn(f"Saved density plot to {density_plot}")
 
 
 def save_results_summary(
@@ -497,7 +438,6 @@ def main():
         
         # Combine true and predicted SSE dataframes on sample_idx, position_idx, and condition_idx
         log_fn("Combining true and predicted SSE data for correlation analysis...")
-        # Combine true and predicted usage into one dataframe
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -522,18 +462,59 @@ def main():
             warnings.simplefilter("ignore")
             all_sse['tissue'] = all_sse['condition_name'].str.split('_').str[0]
             all_sse['timepoint'] = all_sse['condition_name'].str.split('_').str[1]
-            # Convert timepoint to int, handling NaN values
             all_sse['timepoint'] = pd.to_numeric(all_sse['timepoint'], errors='coerce').astype('Int64')
-        # Convert timepoint to int, handling NaN values
-        all_sse['timepoint'] = pd.to_numeric(all_sse['timepoint'], errors='coerce').astype('Int64')
-        
+
+        # Add species information from metadata
+        true_metadata['sample_idx'] = true_metadata.index
+        all_species = true_metadata[['sample_idx', 'species_id']]
+        all_sse['species_id'] = all_sse['sample_idx'].map(all_species.set_index('sample_idx')['species_id'])
+        all_sse['species_name'] = all_sse['species_id'].map(species_id_to_name)
+
         # Save matched positions
         matched_file = output_dir / "matched_sse_positions.csv"
         all_sse.to_csv(matched_file, index=False)
         log_fn(f"Saved matched positions to {matched_file}")
         
+        # Calculate overlaps
+        all_true_sse = all_sse.dropna(subset=['true_sse'])
+        all_true_sse = all_true_sse.groupby(['sample_idx', 'position'])['true_sse'].max().reset_index()
+        all_true_sse.rename(columns={'true_sse': 'max_true_sse'}, inplace=True)
+        
+        all_predicted_sse = all_sse[['sample_idx', 'position', 'pred_sse']]
+        all_predicted_sse = all_predicted_sse.groupby(['sample_idx', 'position'])['pred_sse'].max().reset_index()
+        all_predicted_sse.rename(columns={'pred_sse': 'max_pred_sse'}, inplace=True)
+
+        all_true_sse['idx'] = all_true_sse['sample_idx'].astype(str) + "_" + all_true_sse['position'].astype(str)
+        all_predicted_sse['idx'] = all_predicted_sse['sample_idx'].astype(str) + "_" + all_predicted_sse['position'].astype(str)
+        true_labels['idx'] = true_labels['sample_idx'].astype(str) + "_" + true_labels['position'].astype(str)
+
+
+        overlap = set(all_true_sse['idx']).intersection(set(all_predicted_sse['idx']))
+        only_true = set(all_true_sse['idx']) - overlap
+        only_pred = set(all_predicted_sse['idx']) - overlap
+        log_fn(f"\nSites for which we have measured SSE data and for which we predict SSE data:")
+        log_fn(f"  Overlap: {len(overlap)} ({len(overlap) / len(set(all_true_sse['idx'])) * 100:.0f}% of sites with measured SSE data)")
+        log_fn(f"  Only measured SSE: {len(only_true)}")
+        log_fn(f"  Only predicted SSE: {len(only_pred)}")
+
+        overlap = set(all_true_sse['idx']).intersection(set(true_labels['idx']))
+        only_true = set(all_true_sse['idx']) - overlap
+        only_true_labels = set(true_labels['idx']) - overlap
+        log_fn(f"\nSites for which we hae measured SSE data and which are annotated splice sites:")
+        log_fn(f"  Overlap: {len(overlap)} ({len(overlap) / len(set(true_labels['idx'])) * 100:.0f}% of true splice sites)")
+        log_fn(f"  Only measured SSE: {len(only_true)}")
+        log_fn(f"  Only annotated: {len(only_true_labels)}")
+
+        overlap = set(all_predicted_sse['idx']).intersection(set(true_labels['idx']))
+        only_pred = set(all_predicted_sse['idx']) - overlap
+        only_true_labels = set(true_labels['idx']) - overlap
+        log_fn(f"\nSites for which we predict SSE data and which are annotated splice sites:")
+        log_fn(f"  Overlap: {len(overlap)} ({len(overlap) / len(set(true_labels['idx'])) * 100:.0f}% of true splice sites)")
+        log_fn(f"  Only predicted SSE: {len(only_pred)}")
+        log_fn(f"  Only annotated: {len(only_true_labels)}")
+
         # Calculate correlations
-        correlation_df = calculate_condition_correlations(all_sse, log_fn=log_fn)
+        correlation_df = calculate_condition_correlations(all_sse, group_by=['species_name', 'tissue', 'timepoint'], log_fn=log_fn)
         
         # Save correlation table
         correlation_file = output_dir / "sse_correlation_per_position.csv"
@@ -541,10 +522,10 @@ def main():
         log_fn(f"Saved correlation table to {correlation_file}")
         
         # Generate correlation plots
-        plot_sse_density(all_sse, output_dir, log_fn=log_fn)
+        plot_sse_density(all_sse, output_dir, group_by=['species_name', 'tissue', 'timepoint'], log_fn=log_fn)
         
         # Save results summary
-        save_results_summary(splice_eval, output_dir, log_fn)
+        save_results_summary(splice_eval, output_dir, log_fn=log_fn)
         
         log_fn("Evaluation completed successfully")
         log_fn(f"End time: {datetime.now().isoformat()}")
