@@ -700,8 +700,17 @@ class MultiGenomeDataLoader:
         strand = df_gene['strand'].iloc[0]
         
         # Get 5'-most and 3'-most positions
-        min_pos = df_gene['position'].min() 
+        min_pos = df_gene['position'].min()
         max_pos = df_gene['position'].max()
+
+        # If gene region is shorter than window_size, expand symmetrically
+        gene_length = max_pos - min_pos + 1
+        if gene_length < window_size:
+            pad_needed = window_size - gene_length
+            pad_left = pad_needed // 2
+            pad_right = pad_needed - pad_left
+            min_pos = min_pos - pad_left
+            max_pos = max_pos + pad_right
 
         # Extend the gene range for specified context
         requested_start = min_pos - context_size
@@ -740,7 +749,7 @@ class MultiGenomeDataLoader:
         if strand == '-':
             seq = complement_sequence(seq)  # Apply complement (not reverse complement)
         
-        # Add padding with 'N' if needed
+        # Add padding with 'N' if out of chr range
         if left_pad > 0:
             seq = 'N' * left_pad + seq
         
