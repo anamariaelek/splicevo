@@ -769,6 +769,7 @@ class MultiGenomeDataLoader:
         for window_idx in range(n_windows):
             window_start = window_idx * window_size
             seq_window = seq[window_start:window_start + total_window]
+
             # If at the end, pad with N if needed (this should not happen due to the way we calculated padding, but just in case)
             if len(seq_window) < total_window:
                 n_n = total_window - len(seq_window)
@@ -777,7 +778,8 @@ class MultiGenomeDataLoader:
 
             # Calculate the genomic position of this window
             window_genomic_start = requested_start + window_start
-
+            window_genomic_end = window_genomic_start + total_window
+            
             # The central window spans from context_size to context_size+window_size
             window_center_genomic_start = window_genomic_start + context_size
             window_center_genomic_end = window_center_genomic_start + window_size
@@ -887,6 +889,8 @@ class MultiGenomeDataLoader:
                 'chromosome': chrom,
                 'gene_id': gene_id,
                 'strand': strand,
+                'window_with_context_start': window_genomic_start,
+                'window_with_context_end': window_genomic_end,
                 'window_start': window_center_genomic_start,
                 'window_end': window_center_genomic_end,
                 'central_gene_start': central_start,

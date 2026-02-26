@@ -302,6 +302,11 @@ for genome_id in sorted(genome_dirs):
     all_metadata_columns.append(set(metadata.columns))
 
 common_metadata_columns = sorted(list(set.intersection(*all_metadata_columns))) if all_metadata_columns else []
+# Keep original order of columns based on the first genome's metadata file
+if all_metadata_columns:
+    first_genome_metadata = pd.read_csv(os.path.join(input_dir, sorted(genome_dirs)[0], 'metadata.csv'))
+    common_metadata_columns = [col for col in first_genome_metadata.columns if col in common_metadata_columns]
+
 log_print(f"  Common metadata columns: {common_metadata_columns}")
 
 # Identify all usage conditions across genomes
@@ -607,13 +612,27 @@ if test_sequences_mmap is not None:
 log_print(f"\n  Saving metadata...")
 if train_metadata_list:
     train_metadata_df = pd.DataFrame(train_metadata_list)
-    train_metadata_df = train_metadata_df[common_metadata_columns + ['species_id']]
+    # Use the column order from the first metadata file loaded for this split
+    # Fallback to common_metadata_columns + ['species_id'] if not available
+    if len(train_metadata_df) > 0:
+        orig_col_order = list(train_metadata_df.columns)
+        if set(common_metadata_columns + ['species_id']).issubset(orig_col_order):
+            ordered_cols = [col for col in orig_col_order if col in (common_metadata_columns + ['species_id'])]
+        else:
+            ordered_cols = common_metadata_columns + ['species_id']
+        train_metadata_df = train_metadata_df[ordered_cols]
     train_metadata_df.to_csv(os.path.join(train_dir, 'metadata.csv'), index=False)
     log_print(f"    Train metadata: {len(train_metadata_df)} entries")
 
 if test_metadata_list:
     test_metadata_df = pd.DataFrame(test_metadata_list)
-    test_metadata_df = test_metadata_df[common_metadata_columns + ['species_id']]
+    if len(test_metadata_df) > 0:
+        orig_col_order = list(test_metadata_df.columns)
+        if set(common_metadata_columns + ['species_id']).issubset(orig_col_order):
+            ordered_cols = [col for col in orig_col_order if col in (common_metadata_columns + ['species_id'])]
+        else:
+            ordered_cols = common_metadata_columns + ['species_id']
+        test_metadata_df = test_metadata_df[ordered_cols]
     test_metadata_df.to_csv(os.path.join(test_dir, 'metadata.csv'), index=False)
     log_print(f"    Test metadata: {len(test_metadata_df)} entries")
 
