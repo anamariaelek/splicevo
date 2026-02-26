@@ -700,17 +700,24 @@ class MultiGenomeDataLoader:
         strand = df_gene['strand'].iloc[0]
         
         # Get 5'-most and 3'-most positions
-        min_pos = df_gene['position'].min()
-        max_pos = df_gene['position'].max()
+        orig_min_pos = df_gene['position'].min()
+        orig_max_pos = df_gene['position'].max()
+        min_pos = orig_min_pos
+        max_pos = orig_max_pos
 
-        # If gene region is shorter than window_size, expand symmetrically
+        # Always expand region so that the last window is padded with genomic sequence up to the end of the window
         gene_length = max_pos - min_pos + 1
+        n_windows = ((gene_length - 1) // window_size) + 1
+        expanded_length = n_windows * window_size
+        pad_needed = expanded_length - gene_length
+        pad_left = 0
+        pad_right = pad_needed
+        # For short genes, pad symmetrically
         if gene_length < window_size:
-            pad_needed = window_size - gene_length
             pad_left = pad_needed // 2
             pad_right = pad_needed - pad_left
-            min_pos = min_pos - pad_left
-            max_pos = max_pos + pad_right
+        min_pos = min_pos - pad_left
+        max_pos = max_pos + pad_right
 
         # Extend the gene range for specified context
         requested_start = min_pos - context_size
@@ -726,7 +733,7 @@ class MultiGenomeDataLoader:
         except (KeyError, AttributeError):
             actual_end = requested_end
         
-        # Calculate padding needed
+        # Calculate additional padding needed if out of chr range
         left_pad = actual_start - requested_start
         right_pad = requested_end - actual_end
         
@@ -756,18 +763,18 @@ class MultiGenomeDataLoader:
         if right_pad > 0:
             seq = seq + 'N' * right_pad
         
-        # Split gene into windows shifted by window_size
-        # If gene is shorter than total_window, ensure at least one window is created (pad as needed)
-        n_windows = max(1, (len(seq) - total_window) // window_size + 1)
+
+        # Split gene into windows shifted by window_size, always pad last window with genomic sequence if needed
+        n_windows = ((max_pos - min_pos + 1) - 1) // window_size + 1
         for window_idx in range(n_windows):
             window_start = window_idx * window_size
-            # For short genes, pad sequence to total_window
-            if len(seq) < total_window:
-                pad_left = 0
-                pad_right = total_window - len(seq)
-                seq_window = seq + 'N' * pad_right
-            else:
-                seq_window = seq[window_start:window_start + total_window]
+            seq_window = seq[window_start:window_start + total_window]
+            # If at the end, pad with N if needed (this should not happen due to the way we calculated padding, but just in case)
+            if len(seq_window) < total_window:
+                n_n = total_window - len(seq_window)
+                Warning(f"Window {window_idx} for gene {gene_id} is shorter than total_window. Padding with {n_n} Ns.")
+                seq_window = seq_window + 'N' * (n_n)
+
             # Calculate the genomic position of this window
             window_genomic_start = requested_start + window_start
 
@@ -792,13 +799,12 @@ class MultiGenomeDataLoader:
             labels = np.zeros(window_size, dtype=np.int8)
 
             # Use sparse dictionaries for usage arrays instead of full NaN arrays
-            # This significantly reduces memory for genomes with many usage conditions
             usage_alpha_dict = {}
             usage_beta_dict = {}
             usage_sse_dict = {}
 
-            n_donor_sites = 0
-            n_acceptor_sites = 0
+            donor_sites = []
+            acceptor_sites = []
 
             # Mark positions and add usage stats for each site
             for _, site_row in sites_in_window.iterrows():
@@ -814,11 +820,10 @@ class MultiGenomeDataLoader:
 
                     if splice_site is not None:
                         labels[window_pos] = site_type
-
-                        if site_type == 1:
-                            n_donor_sites += 1
-                        elif site_type == 2:
-                            n_acceptor_sites += 1
+                        if site_type == 1 and window_pos not in donor_sites:
+                            donor_sites.append(window_pos)
+                        elif site_type == 2 and window_pos not in acceptor_sites:
+                            acceptor_sites.append(window_pos)
 
                         # Look up usage stats on-demand instead of using pre-loaded dict
                         usage_stats = self.get_usage_stats(genome_id, chrom, site_pos, strand)
@@ -870,10 +875,13 @@ class MultiGenomeDataLoader:
 
             # Store this window's data
             sequences.append(ohe_seq)
-            # Return sparse labels instead of dense
             labels_list.extend(labels_sparse_list)
 
-            # Create metadata for this window
+            # Track the actual transcript region (before padding) for this window
+            # The overlap of [window_center_genomic_start, window_center_genomic_end) and [orig_min_pos, orig_max_pos+1)
+            central_start = max(window_center_genomic_start, orig_min_pos)
+            central_end = min(window_center_genomic_end, orig_max_pos + 1)
+
             metadata_row = {
                 'genome_id': genome_id,
                 'chromosome': chrom,
@@ -881,8 +889,10 @@ class MultiGenomeDataLoader:
                 'strand': strand,
                 'window_start': window_center_genomic_start,
                 'window_end': window_center_genomic_end,
-                'n_donor_sites': n_donor_sites,
-                'n_acceptor_sites': n_acceptor_sites
+                'central_gene_start': central_start,
+                'central_gene_end': central_end,
+                'n_donor_sites': len(donor_sites),
+                'n_acceptor_sites': len(acceptor_sites),
             }
             metadata_rows.append(metadata_row)
 
@@ -969,8 +979,6 @@ class MultiGenomeDataLoader:
             save_memmap.mkdir(parents=True, exist_ok=True)
             
             seq_shape = (total_windows, total_window, 4)
-            label_shape = (total_windows, window_size)
-            usage_shape = (total_windows, window_size, n_conditions)
             
             print(f"Pre-allocating memmap arrays in {save_memmap}")
             sequences = np.memmap(
