@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=m-full-50
+#SBATCH --job-name=m-small-10
 #SBATCH --partition=cpu-single
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=120gb
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=24gb
 #SBATCH --time=24:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
@@ -24,17 +24,17 @@ GENOME="mouse_GRCm38"
 #GENOME="human_GRCh37"
 
 # Where to save
-OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/processed_full_50kb/
+OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/processed_small_10kb/
 
 # Create output directory if it doesn't exist
 mkdir -p ${OUT_DIR}
 
 # Load the genome
 python ${SPLICEVO_DIR}/scripts/data_load.py \
-    --config ${SPLICEVO_DIR}/configs/genomes_helix.json \
+    --config ${SPLICEVO_DIR}/configs/genomes_helix_small.json \
     --genome_id ${GENOME} \
     --output_dir ${OUT_DIR} \
-    --window_size 50000 \
-    --context_size 5000 \
-    --n_cpus 4 \
+    --window_size 10000 \
+    --context_size 1000 \
+    --n_cpus 2 \
     --quiet

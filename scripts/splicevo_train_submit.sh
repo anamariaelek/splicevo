@@ -49,7 +49,7 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Inputs
 SUBSET="small"
-SPECIES="mouse_human"
+SPECIES="mouse_rat_human"
 KB="5"
 TRAINING_CONFIG=${HOME}/projects/splicevo/configs/training_transformer_fast.yaml
 DATA_TRAIN_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}_${KB}kb/${SPECIES}/train/

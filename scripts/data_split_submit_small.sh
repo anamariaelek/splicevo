@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=split-full-50
+#SBATCH --job-name=split-small-50
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=10gb
@@ -27,9 +27,9 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
 
 # Split the data
-SUBSET="full"
+SUBSET="small"
 SPECIES="mouse_human"
-KB="50"
+KB="10"
 INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/processed_${SUBSET}_${KB}kb/
 OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/splits_${SUBSET}_${KB}kb/${SPECIES}/
 
@@ -38,5 +38,5 @@ python ${SPLICEVO_DIR}/scripts/data_split.py \
     --output_dir ${OUTPUT_DIR} \
     --orthology_file ${ORTHOLOGY_FILE} \
     --pov_genome mouse_GRCm38 \
-    --test_chromosomes 2 4 \
+    --test_chromosomes 15 \
     --quiet

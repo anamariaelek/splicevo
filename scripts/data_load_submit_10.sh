@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=m-full-50
+#SBATCH --job-name=r-full-10
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=120gb
@@ -20,11 +20,11 @@ SPLICEVO_DIR=${HOME}/projects/splicevo/
 
 # Genome to process
 GENOME="mouse_GRCm38"
-#GENOME="rat_Rnor_5.0"
+GENOME="rat_Rnor_5.0"
 #GENOME="human_GRCh37"
 
 # Where to save
-OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/processed_full_50kb/
+OUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/processed_full_10kb/
 
 # Create output directory if it doesn't exist
 mkdir -p ${OUT_DIR}
@@ -34,7 +34,7 @@ python ${SPLICEVO_DIR}/scripts/data_load.py \
     --config ${SPLICEVO_DIR}/configs/genomes_helix.json \
     --genome_id ${GENOME} \
     --output_dir ${OUT_DIR} \
-    --window_size 50000 \
-    --context_size 5000 \
+    --window_size 10000 \
+    --context_size 1000 \
     --n_cpus 4 \
     --quiet

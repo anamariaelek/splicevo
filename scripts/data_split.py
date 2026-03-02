@@ -818,3 +818,4 @@ if args.quiet:
     sys.stdout = original_stdout
     sys.stderr = original_stderr
     log_file_handle.close()
+

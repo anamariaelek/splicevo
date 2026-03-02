@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=split-full-50
+#SBATCH --job-name=split-full-10
 #SBATCH --partition=cpu-single
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=10gb
@@ -29,7 +29,7 @@ ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
 # Split the data
 SUBSET="full"
 SPECIES="mouse_human"
-KB="50"
+KB="10"
 INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/processed_${SUBSET}_${KB}kb/
 OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/splits_${SUBSET}_${KB}kb/${SPECIES}/
 
