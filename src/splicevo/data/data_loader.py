@@ -1154,20 +1154,22 @@ class MultiGenomeDataLoader:
             print(f"Saving sparse labels data ({len(all_labels_sparse)} entries)...")
             labels_df = pd.DataFrame(all_labels_sparse)
             # Convert to appropriate dtypes for efficiency
-            labels_df['sample_idx'] = labels_df['sample_idx'].astype(np.int32)
-            labels_df['position'] = labels_df['position'].astype(np.int16)
+            labels_df['sample_idx'] = labels_df['sample_idx'].astype(np.int64)
+            labels_df['position'] = labels_df['position'].astype(np.int32)  # int32 supports up to 2.1 billion, enough for any sequence
             labels_df['label'] = labels_df['label'].astype(np.int8)
-            labels_df.to_parquet(save_memmap / 'labels.parquet', compression='snappy', index=False)
+            # Use pyarrow engine to preserve dtypes and prevent automatic downcasting
+            labels_df.to_parquet(save_memmap / 'labels.parquet', compression='snappy', index=False, engine='pyarrow')
             print(f"Sparse labels data saved to {save_memmap / 'labels.parquet'}")
             
             # Save sparse usage data as parquet
             print(f"Saving sparse usage data ({len(all_usage_sparse)} entries)...")
             usage_df = pd.DataFrame(all_usage_sparse)
             # Convert to appropriate dtypes for efficiency
-            usage_df['sample_idx'] = usage_df['sample_idx'].astype(np.int32)
-            usage_df['position'] = usage_df['position'].astype(np.int16)
-            usage_df['condition_idx'] = usage_df['condition_idx'].astype(np.int8)
-            usage_df.to_parquet(save_memmap / 'usage.parquet', compression='snappy', index=False)
+            usage_df['sample_idx'] = usage_df['sample_idx'].astype(np.int64)
+            usage_df['position'] = usage_df['position'].astype(np.int32)  # int32 supports up to 2.1 billion
+            usage_df['condition_idx'] = usage_df['condition_idx'].astype(np.int16)  # Conditions are small numbers
+            # Use pyarrow engine to preserve dtypes
+            usage_df.to_parquet(save_memmap / 'usage.parquet', compression='snappy', index=False, engine='pyarrow')
             print(f"Sparse usage data saved to {save_memmap / 'usage.parquet'}")
             
             # Trim sequences array to actual size (we over-allocated by 10%)
