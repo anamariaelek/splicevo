@@ -13,7 +13,9 @@ from datetime import datetime
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import precision_recall_curve, auc, mean_squared_error
+from sklearn.metrics import precision_recall_curve, auc, mean_squared_error, confusion_matrix
+from matplotlib import colors as mpl_colors
+from scipy.stats import pearsonr, spearmanr
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
@@ -248,6 +250,57 @@ def evaluate_splice_site_classification(true_labels, pred_probs, output_dir: Pat
     
     results['pr_auc'] = pr_auc_scores
     
+    # Confusion matrix
+    log_fn("Generating confusion matrix...")
+    cm = confusion_matrix(true_labels.flatten(), pred_labels.flatten(), labels=[0, 1, 2])
+    
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(
+        cm, annot=True, fmt='d', cmap='Blues',
+        xticklabels=['Non-splice', 'Donor', 'Acceptor'],
+        yticklabels=['Non-splice', 'Donor', 'Acceptor'],
+        norm=mpl_colors.LogNorm()
+    )
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.title('Confusion Matrix for Splice Site Predictions')
+    plt.tight_layout()
+    
+    confusion_plot = output_dir / "confusion_matrix.png"
+    plt.savefig(confusion_plot, dpi=150)
+    plt.close()
+    log_fn(f"Saved confusion matrix to {confusion_plot}")
+    
+    # Probability distributions for correct/incorrect predictions
+    log_fn("Plotting probability distributions...")
+    correct_donor_probs = pred_probs[(true_labels == 1) & (pred_labels == 1), 1]
+    incorrect_donor_probs = pred_probs[(true_labels != 1) & (pred_labels == 1), 1]
+    correct_acceptor_probs = pred_probs[(true_labels == 2) & (pred_labels == 2), 2]
+    incorrect_acceptor_probs = pred_probs[(true_labels != 2) & (pred_labels == 2), 2]
+    
+    plt.figure(figsize=(9, 4))
+    plt.subplot(1, 2, 1)
+    sns.kdeplot(correct_donor_probs, label=f'TP Donors (n={len(correct_donor_probs):,})', color='g')
+    sns.kdeplot(incorrect_donor_probs, label=f'FP Donors (n={len(incorrect_donor_probs):,})', color='r')
+    plt.title('Donor Splice Site Prediction Probabilities')
+    plt.xlabel('Predicted Probability')
+    plt.ylabel('Density')
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    sns.kdeplot(correct_acceptor_probs, label=f'TP Acceptors (n={len(correct_acceptor_probs):,})', color='g')
+    sns.kdeplot(incorrect_acceptor_probs, label=f'FP Acceptors (n={len(incorrect_acceptor_probs):,})', color='r')
+    plt.title('Acceptor Splice Site Prediction Probabilities')
+    plt.xlabel('Predicted Probability')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.tight_layout()
+    
+    prob_dist_plot = output_dir / "probability_distributions.png"
+    plt.savefig(prob_dist_plot, dpi=150)
+    plt.close()
+    log_fn(f"Saved probability distributions to {prob_dist_plot}")
+    
     # Top-k accuracy
     log_fn("Calculating top-k accuracy...")
     def top_k_accuracy(y_true, y_scores):
@@ -292,7 +345,6 @@ def calculate_condition_correlations(all_data_df: pd.DataFrame, group_by=['tissu
         
         if len(true_vals) < 2:
             continue
-        
         correlation = np.corrcoef(true_vals, pred_vals)[0, 1]
         
         # Build result dict with proper column names
@@ -346,6 +398,10 @@ def save_results_summary(
         },
         'top_k_acc': {
             str(k): float(v) for k, v in eval_results.get('top_k_acc', {}).items()
+        },
+        'overall_sse_correlation': {
+            'pearson': float(eval_results.get('overall_sse_correlation', {}).get('pearson', 0)),
+            'spearman': float(eval_results.get('overall_sse_correlation', {}).get('spearman', 0))
         },
         'timestamp': datetime.now().isoformat()
     }
