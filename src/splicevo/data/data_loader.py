@@ -9,6 +9,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 import json
 import gc
+import gzip
 
 from ..io.genome import GenomeData
 from ..io.gene_annotation import GTFProcessor, Transcript
@@ -1256,3 +1257,877 @@ class MultiGenomeDataLoader:
         print(f"  Total acceptor sites: {total_acceptors}")
         
         return sequences, metadata
+
+    def to_fasta(self,
+                 window_size: int = 1000,
+                 context_size: int = 4500,
+                 alpha_threshold: Optional[int] = None,
+                 n_workers: Optional[int] = None,
+                 use_parallel: bool = True,
+                 save_dir: Optional[Union[str, Path]] = None) -> Tuple[List[str], pd.DataFrame]:
+        """
+        Convert loaded data to FASTA sequences for ML training.
+        
+        Labels and usage data are saved in sparse parquet format, same as to_arrays method.
+        Sequences are saved as FASTA file instead of memory-mapped one-hot encoded arrays.
+        
+        Args:
+            window_size: Size of the window containing splice sites
+            context_size: Size of context on each side of the window
+            alpha_threshold: Minimum alpha value (set lower values to 0)
+            n_workers: Number of parallel workers (None for CPU count)
+            use_parallel: Whether to use parallel processing for genes
+            save_dir: Optional path to save FASTA and other files
+        
+        Returns:
+            Tuple of (sequences, metadata_df)
+            - sequences: List of DNA sequence strings
+            - metadata_df: DataFrame with sample metadata
+        """
+        if not self.loaded_data:
+            raise ValueError("No data loaded. Call load_all_genomes_data() first.")
+
+        if n_workers is None:
+            n_workers = min(mp.cpu_count(), 8)
+
+        # Pre-build index for O(1) splice site lookup
+        print("Building splice site index...")
+        splice_site_index = {}
+        for site in self.loaded_data:
+            key = (site.genome_id, site.chromosome, site.position, site.strand)
+            splice_site_index[key] = site
+        print(f"Indexed {len(splice_site_index)} splice sites")
+
+        # Get all splice sites info
+        df = self.get_dataframe()
+
+        n_conditions = len(self.usage_conditions)
+        condition_to_idx = {cond['condition_key']: idx for idx, cond in enumerate(self.usage_conditions)}
+
+        loaded_genomes = df['genome_id'].unique()
+        total_window = context_size + window_size + context_size
+
+        # Collect sequences and metadata
+        print("Collecting sequences from all genes...")
+        all_sequences = []
+        all_labels_sparse = []
+        all_usage_sparse = []
+        all_metadata_rows = []
+
+        for genome_id in loaded_genomes:
+            print(f"Processing genome {genome_id}...")
+            df_genome = df[df['genome_id'] == genome_id]
+            genes = df_genome['gene_id'].unique()
+            
+            print(f"  Processing {len(genes)} genes...")
+            
+            # Pre-load genome once
+            print(f"  Pre-loading genome...")
+            genome_cache = {genome_id: self.genomes[genome_id].load_genome()}
+
+            # Prepare gene data for parallel processing
+            gene_tasks = []
+            for gene_id in genes:
+                df_gene = df_genome[df_genome['gene_id'] == gene_id]
+                gene_tasks.append((genome_id, gene_id, df_gene))
+            
+            # Process genes
+            if use_parallel and len(gene_tasks) > 10:
+                print(f"  Using {n_workers} parallel workers...")
+                
+                from concurrent.futures import ThreadPoolExecutor
+                
+                with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                    future_to_gene = {}
+                    for genome_id, gene_id, df_gene in gene_tasks:
+                        future = executor.submit(
+                            self._process_gene_windows_fasta,
+                            genome_id, gene_id, df_gene,
+                            splice_site_index, condition_to_idx, n_conditions,
+                            window_size, context_size, total_window,
+                            genome_cache
+                        )
+                        future_to_gene[future] = gene_id
+                    
+                    for future in tqdm(as_completed(future_to_gene), 
+                                     total=len(gene_tasks),
+                                     desc=f"  {genome_id} genes",
+                                     unit="gene",
+                                     mininterval=0.5):
+                        try:
+                            seq_list, labels_sparse, usage_sparse, metadata_rows = future.result(timeout=120)
+                            
+                            # Adjust sample_idx to global indices
+                            current_base = len(all_sequences)
+                            for item in labels_sparse:
+                                item['sample_idx'] += current_base
+                            for item in usage_sparse:
+                                item['sample_idx'] += current_base
+                            
+                            all_sequences.extend(seq_list)
+                            all_labels_sparse.extend(labels_sparse)
+                            all_usage_sparse.extend(usage_sparse)
+                            all_metadata_rows.extend(metadata_rows)
+                                
+                        except Exception as e:
+                            gene_id = future_to_gene[future]
+                            print(f"\n  Warning: Failed to process gene {gene_id}: {e}")
+            else:
+                # Sequential processing
+                for genome_id, gene_id, df_gene in tqdm(gene_tasks, 
+                                                       desc=f"  {genome_id} genes",
+                                                       unit="gene"):
+                    try:
+                        seq_list, labels_sparse, usage_sparse, metadata_rows = self._process_gene_windows_fasta(
+                            genome_id, gene_id, df_gene,
+                            splice_site_index, condition_to_idx, n_conditions,
+                            window_size, context_size, total_window,
+                            genome_cache
+                        )
+                        
+                        # Adjust sample_idx to global indices
+                        current_base = len(all_sequences)
+                        for item in labels_sparse:
+                            item['sample_idx'] += current_base
+                        for item in usage_sparse:
+                            item['sample_idx'] += current_base
+                        
+                        all_sequences.extend(seq_list)
+                        all_labels_sparse.extend(labels_sparse)
+                        all_usage_sparse.extend(usage_sparse)
+                        all_metadata_rows.extend(metadata_rows)
+                    
+                    except Exception as e:
+                        print(f"Warning: Failed to process gene {gene_id}: {e}")
+        
+        n_samples = len(all_sequences)
+        
+        # Save files if save_dir specified
+        if save_dir:
+            save_dir = Path(save_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save sequences as compressed FASTA
+            fasta_path = save_dir / 'sequences.fasta.gz'
+            print(f"Saving {n_samples} sequences to compressed FASTA file: {fasta_path}")
+            with gzip.open(fasta_path, 'wt') as f:
+                for i, seq in enumerate(all_sequences):
+                    metadata_row = all_metadata_rows[i]
+                    gene_id = metadata_row['gene_id']
+                    window_start = metadata_row['window_start']
+                    window_end = metadata_row['window_end']
+                    f.write(f">{gene_id}:{window_start}-{window_end}\n{seq}\n")
+            
+            # Save sparse labels data as parquet
+            print(f"Saving sparse labels data ({len(all_labels_sparse)} entries)...")
+            labels_df = pd.DataFrame(all_labels_sparse)
+            # Convert to appropriate dtypes for efficiency
+            labels_df['sample_idx'] = labels_df['sample_idx'].astype(np.int64)
+            labels_df['position'] = labels_df['position'].astype(np.int32)
+            labels_df['label'] = labels_df['label'].astype(np.int8)
+            labels_df.to_parquet(save_dir / 'labels.parquet', compression='snappy', index=False, engine='pyarrow')
+            print(f"Sparse labels data saved to {save_dir / 'labels.parquet'}")
+            
+            # Save sparse usage data as parquet
+            print(f"Saving sparse usage data ({len(all_usage_sparse)} entries)...")
+            usage_df = pd.DataFrame(all_usage_sparse)
+            # Convert to appropriate dtypes for efficiency
+            usage_df['sample_idx'] = usage_df['sample_idx'].astype(np.int64)
+            usage_df['position'] = usage_df['position'].astype(np.int32)
+            usage_df['condition_idx'] = usage_df['condition_idx'].astype(np.int16)
+            usage_df.to_parquet(save_dir / 'usage.parquet', compression='snappy', index=False, engine='pyarrow')
+            print(f"Sparse usage data saved to {save_dir / 'usage.parquet'}")
+            
+            # Save metadata
+            metadata_dict = {
+                'sequences_format': 'fasta.gz',
+                'sequences_count': n_samples,
+                'sequence_length': total_window,
+                'labels_format': 'sparse',
+                'labels_sparse_entries': len(all_labels_sparse),
+                'window_size': window_size,
+                'context_size': context_size,
+                'n_conditions': n_conditions,
+                'usage_format': 'sparse',
+                'usage_sparse_entries': len(all_usage_sparse)
+            }
+            
+            with open(save_dir / 'metadata.json', 'w') as f:
+                json.dump(metadata_dict, f, indent=2)
+            
+            print(f"Compressed FASTA files saved to: {save_dir}")
+            print(f"Sparse labels statistics:")
+            print(f"  Total entries: {len(all_labels_sparse)}")
+            print(f"Sparse usage statistics:")
+            print(f"  Total entries: {len(all_usage_sparse)}")
+            if len(all_usage_sparse) > 0:
+                sparsity = 100 * len(all_usage_sparse) / (n_samples * window_size * n_conditions)
+                print(f"  Sparsity: {sparsity:.4f}%")
+        else:
+            print(f"Collected {len(all_labels_sparse)} sparse label entries")
+            print(f"Collected {len(all_usage_sparse)} sparse usage entries")
+            if len(all_usage_sparse) > 0:
+                sparsity = 100 * len(all_usage_sparse) / (n_samples * window_size * n_conditions)
+                print(f"  Sparsity: {sparsity:.4f}%")
+        
+        metadata = pd.DataFrame(all_metadata_rows)
+        
+        # Save metadata to CSV if using save_dir
+        if save_dir:
+            metadata.to_csv(save_dir / 'metadata.csv', index=False)
+            print(f"Saved metadata to {save_dir / 'metadata.csv'}")
+        
+        # Validation
+        assert len(all_sequences) == n_samples, "Sequences count mismatch"
+        assert len(metadata) == n_samples, "Metadata mismatch"
+
+        print(f"Created {n_samples} windowed examples")
+        print(f"  Sequence length: {total_window}")
+        
+        # Calculate and display label statistics from sparse format
+        total_donors = len([e for e in all_labels_sparse if e['label'] == 1])
+        total_acceptors = len([e for e in all_labels_sparse if e['label'] == 2])
+        
+        if save_dir:
+            print(f"  Sequences stored as compressed FASTA: sequences.fasta.gz")
+            print(f"  Labels stored in sparse format: labels.parquet")
+            print(f"  Usage stored in sparse format: usage.parquet")
+        
+        print(f"  Total donor sites: {total_donors}")
+        print(f"  Total acceptor sites: {total_acceptors}")
+        
+        return all_sequences, metadata
+
+    def to_fasta_per_gene(self,
+                          context_size: int = 4500,
+                          alpha_threshold: Optional[int] = None,
+                          n_workers: Optional[int] = None,
+                          use_parallel: bool = True,
+                          save_dir: Optional[Union[str, Path]] = None) -> Tuple[List[str], pd.DataFrame]:
+        """
+        Convert loaded data to FASTA sequences with one sequence per gene (not windowed).
+        
+        Each sequence contains the entire gene plus context on both sides. Gene lengths
+        will vary, so sequences have different lengths. Labels and usage data are saved
+        in sparse parquet format with positions relative to gene start.
+        
+        Args:
+            context_size: Size of context on each side of the gene
+            alpha_threshold: Minimum alpha value (set lower values to 0)
+            n_workers: Number of parallel workers (None for CPU count)
+            use_parallel: Whether to use parallel processing for genes
+            save_dir: Optional path to save FASTA and other files
+        
+        Returns:
+            Tuple of (sequences, metadata_df)
+            - sequences: List of DNA sequence strings (variable length)
+            - metadata_df: DataFrame with sample metadata
+        """
+        if not self.loaded_data:
+            raise ValueError("No data loaded. Call load_all_genomes_data() first.")
+
+        if n_workers is None:
+            n_workers = min(mp.cpu_count(), 8)
+
+        # Pre-build index for O(1) splice site lookup
+        print("Building splice site index...")
+        splice_site_index = {}
+        for site in self.loaded_data:
+            key = (site.genome_id, site.chromosome, site.position, site.strand)
+            splice_site_index[key] = site
+        print(f"Indexed {len(splice_site_index)} splice sites")
+
+        # Get all splice sites info and group by gene
+        df = self.get_dataframe()
+        
+        n_conditions = len(self.usage_conditions)
+        condition_to_idx = {cond['condition_key']: idx for idx, cond in enumerate(self.usage_conditions)}
+
+        loaded_genomes = df['genome_id'].unique()
+
+        # Collect sequences and metadata
+        print("Processing genes (one sequence per gene)...")
+        all_sequences = []
+        all_labels_sparse = []
+        all_usage_sparse = []
+        all_metadata_rows = []
+
+        for genome_id in loaded_genomes:
+            print(f"Processing genome {genome_id}...")
+            df_genome = df[df['genome_id'] == genome_id]
+            genes = df_genome['gene_id'].unique()
+            
+            print(f"  Processing {len(genes)} genes...")
+            
+            # Pre-load genome once
+            print(f"  Pre-loading genome...")
+            genome_cache = {genome_id: self.genomes[genome_id].load_genome()}
+
+            # Prepare gene data for parallel processing
+            gene_tasks = []
+            for gene_id in genes:
+                df_gene = df_genome[df_genome['gene_id'] == gene_id]
+                gene_tasks.append((genome_id, gene_id, df_gene))
+            
+            # Process genes
+            if use_parallel and len(gene_tasks) > 10:
+                print(f"  Using {n_workers} parallel workers...")
+                
+                from concurrent.futures import ThreadPoolExecutor
+                
+                with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                    future_to_gene = {}
+                    for genome_id, gene_id, df_gene in gene_tasks:
+                        future = executor.submit(
+                            self._process_whole_gene_fasta,
+                            genome_id, gene_id, df_gene,
+                            splice_site_index, condition_to_idx, n_conditions,
+                            context_size, genome_cache
+                        )
+                        future_to_gene[future] = gene_id
+                    
+                    for future in tqdm(as_completed(future_to_gene), 
+                                     total=len(gene_tasks),
+                                     desc=f"  {genome_id} genes",
+                                     unit="gene",
+                                     mininterval=0.5):
+                        try:
+                            gene_seq, labels_sparse, usage_sparse, metadata_row = future.result(timeout=120)
+                            
+                            if gene_seq:  # Only add if gene was successfully processed
+                                # Adjust sample_idx to global indices
+                                current_idx = len(all_sequences)
+                                for item in labels_sparse:
+                                    item['sample_idx'] = current_idx
+                                for item in usage_sparse:
+                                    item['sample_idx'] = current_idx
+                                
+                                all_sequences.append(gene_seq)
+                                all_labels_sparse.extend(labels_sparse)
+                                all_usage_sparse.extend(usage_sparse)
+                                all_metadata_rows.append(metadata_row)
+                                
+                        except Exception as e:
+                            gene_id = future_to_gene[future]
+                            print(f"\n  Warning: Failed to process gene {gene_id}: {e}")
+            else:
+                # Sequential processing
+                for genome_id, gene_id, df_gene in tqdm(gene_tasks, 
+                                                       desc=f"  {genome_id} genes",
+                                                       unit="gene"):
+                    try:
+                        gene_seq, labels_sparse, usage_sparse, metadata_row = self._process_whole_gene_fasta(
+                            genome_id, gene_id, df_gene,
+                            splice_site_index, condition_to_idx, n_conditions,
+                            context_size, genome_cache
+                        )
+                        
+                        if gene_seq:  # Only add if gene was successfully processed
+                            # Adjust sample_idx to global indices
+                            current_idx = len(all_sequences)
+                            for item in labels_sparse:
+                                item['sample_idx'] = current_idx
+                            for item in usage_sparse:
+                                item['sample_idx'] = current_idx
+                            
+                            all_sequences.append(gene_seq)
+                            all_labels_sparse.extend(labels_sparse)
+                            all_usage_sparse.extend(usage_sparse)
+                            all_metadata_rows.append(metadata_row)
+                    
+                    except Exception as e:
+                        print(f"Warning: Failed to process gene {gene_id}: {e}")
+        
+        n_samples = len(all_sequences)
+        
+        # Calculate sequence length statistics for metadata
+        if all_sequences:
+            seq_lengths = [len(seq) for seq in all_sequences]
+            min_length = min(seq_lengths)
+            max_length = max(seq_lengths)
+            mean_length = sum(seq_lengths) / len(seq_lengths)
+        else:
+            min_length = max_length = mean_length = 0
+        
+        # Save files if save_dir specified
+        if save_dir:
+            save_dir = Path(save_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save sequences as compressed FASTA
+            fasta_path = save_dir / 'sequences.fasta.gz'
+            print(f"Saving {n_samples} gene sequences to compressed FASTA file: {fasta_path}")
+            with gzip.open(fasta_path, 'wt') as f:
+                for i, seq in enumerate(all_sequences):
+                    gene_id = all_metadata_rows[i]['gene_id']
+                    f.write(f">{gene_id}\n{seq}\n")
+            
+            # Save sparse labels data as parquet
+            print(f"Saving sparse labels data ({len(all_labels_sparse)} entries)...")
+            labels_df = pd.DataFrame(all_labels_sparse)
+            labels_df['sample_idx'] = labels_df['sample_idx'].astype(np.int64)
+            labels_df['position'] = labels_df['position'].astype(np.int32)
+            labels_df['label'] = labels_df['label'].astype(np.int8)
+            labels_df.to_parquet(save_dir / 'labels.parquet', compression='snappy', index=False, engine='pyarrow')
+            print(f"Sparse labels data saved to {save_dir / 'labels.parquet'}")
+            
+            # Save sparse usage data as parquet
+            print(f"Saving sparse usage data ({len(all_usage_sparse)} entries)...")
+            usage_df = pd.DataFrame(all_usage_sparse)
+            usage_df['sample_idx'] = usage_df['sample_idx'].astype(np.int64)
+            usage_df['position'] = usage_df['position'].astype(np.int32)
+            usage_df['condition_idx'] = usage_df['condition_idx'].astype(np.int16)
+            usage_df.to_parquet(save_dir / 'usage.parquet', compression='snappy', index=False, engine='pyarrow')
+            print(f"Sparse usage data saved to {save_dir / 'usage.parquet'}")
+            
+            # Save metadata
+            metadata_dict = {
+                'sequences_format': 'fasta.gz',
+                'sequences_count': n_samples,
+                'sequence_length_min': int(min_length),
+                'sequence_length_max': int(max_length),
+                'sequence_length_mean': float(mean_length),
+                'labels_format': 'sparse',
+                'labels_sparse_entries': len(all_labels_sparse),
+                'context_size': context_size,
+                'n_conditions': n_conditions,
+                'usage_format': 'sparse',
+                'usage_sparse_entries': len(all_usage_sparse),
+                'processing_mode': 'per_gene'
+            }
+            
+            with open(save_dir / 'metadata.json', 'w') as f:
+                json.dump(metadata_dict, f, indent=2)
+            
+            print(f"Compressed FASTA files saved to: {save_dir}")
+            print(f"Sequence length statistics:")
+            print(f"  Min length: {min_length}")
+            print(f"  Max length: {max_length}")
+            print(f"  Mean length: {mean_length:.1f}")
+            print(f"Sparse labels statistics:")
+            print(f"  Total entries: {len(all_labels_sparse)}")
+            print(f"Sparse usage statistics:")
+            print(f"  Total entries: {len(all_usage_sparse)}")
+        else:
+            print(f"Collected {len(all_labels_sparse)} sparse label entries")
+            print(f"Collected {len(all_usage_sparse)} sparse usage entries")
+        
+        metadata = pd.DataFrame(all_metadata_rows)
+        
+        # Save metadata to CSV if using save_dir
+        if save_dir:
+            metadata.to_csv(save_dir / 'metadata.csv', index=False)
+            print(f"Saved metadata to {save_dir / 'metadata.csv'}")
+        
+        # Validation
+        assert len(all_sequences) == n_samples, "Sequences count mismatch"
+        assert len(metadata) == n_samples, "Metadata mismatch"
+
+        print(f"Created {n_samples} gene sequences")
+        print(f"  Variable lengths: {min_length} - {max_length} bp")
+        
+        # Calculate and display label statistics from sparse format
+        total_donors = len([e for e in all_labels_sparse if e['label'] == 1])
+        total_acceptors = len([e for e in all_labels_sparse if e['label'] == 2])
+        
+        if save_dir:
+            print(f"  Sequences stored as compressed FASTA: sequences.fasta.gz")
+            print(f"  Labels stored in sparse format: labels.parquet")
+            print(f"  Usage stored in sparse format: usage.parquet")
+        
+        print(f"  Total donor sites: {total_donors}")
+        print(f"  Total acceptor sites: {total_acceptors}")
+        
+        return all_sequences, metadata
+
+    def _process_whole_gene_fasta(self,
+                                 genome_id: str,
+                                 gene_id: str,
+                                 df_gene: pd.DataFrame,
+                                 splice_site_index: Dict,
+                                 condition_to_idx: Dict[str, int],
+                                 n_conditions: int,
+                                 context_size: int,
+                                 genome_cache: Optional[Dict] = None) -> Tuple[Optional[str], List[Dict], List[Dict], Optional[Dict]]:
+        """
+        Process a single complete gene for FASTA output (parallelizable).
+        
+        Creates one sequence containing the entire gene plus context, with labels 
+        and usage positioned relative to the gene start.
+        
+        Returns:
+            Tuple of (sequence, labels_sparse, usage_sparse_list, metadata_row)
+        """
+        labels_sparse = []
+        usage_sparse_list = []
+        
+        # Use cached genome if available, otherwise load it
+        if genome_cache is not None and genome_id in genome_cache:
+            genome = genome_cache[genome_id]
+        else:
+            genome = self.genomes[genome_id].load_genome()
+        
+        chrom = df_gene['chromosome'].iloc[0]
+        strand = df_gene['strand'].iloc[0]
+        
+        # Get gene boundaries
+        gene_start = df_gene['position'].min()
+        gene_end = df_gene['position'].max()
+        gene_length = gene_end - gene_start + 1
+        
+        # Extend the gene for context
+        seq_start = gene_start - context_size
+        seq_end = gene_end + context_size
+        total_length = seq_end - seq_start + 1
+        
+        # Adjust boundaries to valid range
+        actual_start = max(0, seq_start)
+        
+        # Get chromosome length if available
+        try:
+            chrom_length = len(genome._genome[chrom])
+            actual_end = min(seq_end, chrom_length)
+        except (KeyError, AttributeError):
+            actual_end = seq_end
+        
+        # Calculate padding needed if out of chr range
+        left_pad = actual_start - seq_start
+        right_pad = seq_end - actual_end
+        
+        # Get sequence with valid coordinates
+        try:
+            seq = genome.get_seq(chrom, actual_start + 1, actual_end, rc=False)
+        except Exception:
+            return None, [], [], None
+        
+        # Ensure seq is a string
+        if not isinstance(seq, str):
+            seq = str(seq).upper()
+        else:
+            seq = seq.upper()
+        
+        # For negative strand genes, apply complement
+        if strand == '-':
+            seq = complement_sequence(seq)
+        
+        # Add padding with 'N' if out of chr range
+        if left_pad > 0:
+            seq = 'N' * left_pad + seq
+        
+        if right_pad > 0:
+            seq = seq + 'N' * right_pad
+        
+        # Ensure sequence has expected length
+        if len(seq) != total_length:
+            # Adjust sequence to expected length
+            if len(seq) < total_length:
+                seq = seq + 'N' * (total_length - len(seq))
+            else:
+                seq = seq[:total_length]
+
+        # Initialize labels array
+        labels = np.zeros(total_length, dtype=np.int8)
+
+        # Use sparse dictionaries for usage arrays
+        usage_alpha_dict = {}
+        usage_beta_dict = {}
+        usage_sse_dict = {}
+
+        donor_sites = []
+        acceptor_sites = []
+
+        # Mark positions and add usage stats for each site in the gene
+        for _, site_row in df_gene.iterrows():
+            site_pos = site_row['position']
+            site_type = site_row['site_type']
+
+            # Calculate position within the sequence (relative to sequence start)
+            seq_pos = site_pos - seq_start
+
+            if 0 <= seq_pos < total_length:
+                lookup_key = (genome_id, chrom, site_pos, strand)
+                splice_site = splice_site_index.get(lookup_key)
+
+                if splice_site is not None:
+                    labels[seq_pos] = site_type
+                    if site_type == 1 and seq_pos not in donor_sites:
+                        donor_sites.append(seq_pos)
+                    elif site_type == 2 and seq_pos not in acceptor_sites:
+                        acceptor_sites.append(seq_pos)
+
+                    # Look up usage stats
+                    usage_stats = self.get_usage_stats(genome_id, chrom, site_pos, strand)
+
+                    # Store only non-NaN usage stats (sparse representation)
+                    for condition_key, stats in usage_stats.items():
+                        if condition_key in condition_to_idx:
+                            cond_idx = condition_to_idx[condition_key]
+                            if seq_pos not in usage_alpha_dict:
+                                usage_alpha_dict[seq_pos] = {}
+                                usage_beta_dict[seq_pos] = {}
+                                usage_sse_dict[seq_pos] = {}
+                            usage_alpha_dict[seq_pos][cond_idx] = stats['alpha']
+                            usage_beta_dict[seq_pos][cond_idx] = stats['beta']
+                            usage_sse_dict[seq_pos][cond_idx] = stats['sse']
+
+        # Store sparse usage coordinates
+        for seq_pos in usage_alpha_dict:
+            for cond_idx in usage_alpha_dict[seq_pos].keys():
+                usage_sparse_list.append({
+                    'sample_idx': 0,  # Will be adjusted by caller
+                    'position': seq_pos,
+                    'strand': strand,
+                    'condition_idx': cond_idx,
+                    'alpha': usage_alpha_dict[seq_pos][cond_idx],
+                    'beta': usage_beta_dict[seq_pos][cond_idx],
+                    'sse': usage_sse_dict[seq_pos][cond_idx]
+                })
+
+        # Store sparse labels (only non-zero positions)
+        for pos, label_val in enumerate(labels):
+            if label_val != 0:
+                labels_sparse.append({
+                    'sample_idx': 0,  # Will be adjusted by caller
+                    'position': pos,
+                    'strand': strand,
+                    'label': label_val
+                })
+
+        # Create metadata for this gene
+        metadata_row = {
+            'genome_id': genome_id,
+            'chromosome': chrom,
+            'gene_id': gene_id,
+            'strand': strand,
+            'gene_start': gene_start,
+            'gene_end': gene_end,
+            'gene_length': gene_length,
+            'sequence_start': seq_start,
+            'sequence_end': seq_end,
+            'sequence_length': total_length,
+            'context_size': context_size,
+            'n_donor_sites': len(donor_sites),
+            'n_acceptor_sites': len(acceptor_sites),
+        }
+
+        return seq, labels_sparse, usage_sparse_list, metadata_row
+
+    def _process_gene_windows_fasta(self,
+                                   genome_id: str,
+                                   gene_id: str,
+                                   df_gene: pd.DataFrame,
+                                   splice_site_index: Dict,
+                                   condition_to_idx: Dict[str, int],
+                                   n_conditions: int,
+                                   window_size: int,
+                                   context_size: int,
+                                   total_window: int,
+                                   genome_cache: Optional[Dict] = None) -> Tuple[List[str], List[Dict], List[Dict], List[Dict]]:
+        """
+        Process windows for a single gene for FASTA output (parallelizable).
+        
+        Similar to _process_gene_windows but returns raw DNA sequences instead of one-hot encoded arrays.
+        
+        Returns:
+            Tuple of (sequences, labels_sparse, usage_sparse_list, metadata_rows)
+        """
+        sequences = []
+        labels_list = []
+        usage_sparse_list = []
+        metadata_rows = []
+        
+        # Use cached genome if available, otherwise load it
+        if genome_cache is not None and genome_id in genome_cache:
+            genome = genome_cache[genome_id]
+        else:
+            genome = self.genomes[genome_id].load_genome()
+        
+        chrom = df_gene['chromosome'].iloc[0]
+        strand = df_gene['strand'].iloc[0]
+        
+        # Get 5'-most and 3'-most positions
+        orig_min_pos = df_gene['position'].min()
+        orig_max_pos = df_gene['position'].max()
+        min_pos = orig_min_pos
+        max_pos = orig_max_pos
+
+        # Always expand region so that the last window is padded with genomic sequence up to the end of the window
+        gene_length = max_pos - min_pos + 1
+        n_windows = ((gene_length - 1) // window_size) + 1
+        expanded_length = n_windows * window_size
+        pad_needed = expanded_length - gene_length
+        pad_left = 0
+        pad_right = pad_needed
+        # For short genes, pad symmetrically
+        if gene_length < window_size:
+            pad_left = pad_needed // 2
+            pad_right = pad_needed - pad_left
+        min_pos = min_pos - pad_left
+        max_pos = max_pos + pad_right
+
+        # Extend the gene range for specified context
+        requested_start = min_pos - context_size
+        requested_end = max_pos + context_size
+        
+        # Adjust boundaries to valid range
+        actual_start = max(0, requested_start)
+        
+        # Get chromosome length if available
+        try:
+            chrom_length = len(genome._genome[chrom])
+            actual_end = min(requested_end, chrom_length)
+        except (KeyError, AttributeError):
+            actual_end = requested_end
+        
+        # Calculate additional padding needed if out of chr range
+        left_pad = actual_start - requested_start
+        right_pad = requested_end - actual_end
+        
+        # Get sequence with valid coordinates
+        try:
+            seq = genome.get_seq(chrom, actual_start + 1, actual_end, rc=False)
+        except Exception:
+            return sequences, labels_list, usage_sparse_list, metadata_rows
+        
+        # Ensure seq is a string
+        if not isinstance(seq, str):
+            seq = str(seq).upper()
+        else:
+            seq = seq.upper()
+        
+        # For negative strand genes, apply complement
+        if strand == '-':
+            seq = complement_sequence(seq)
+        
+        # Add padding with 'N' if out of chr range
+        if left_pad > 0:
+            seq = 'N' * left_pad + seq
+        
+        if right_pad > 0:
+            seq = seq + 'N' * right_pad
+
+        # Split gene into windows shifted by window_size
+        n_windows = ((max_pos - min_pos + 1) - 1) // window_size + 1
+        for window_idx in range(n_windows):
+            window_start = window_idx * window_size
+            seq_window = seq[window_start:window_start + total_window]
+
+            # If at the end, pad with N if needed
+            if len(seq_window) < total_window:
+                n_n = total_window - len(seq_window)
+                seq_window = seq_window + 'N' * (n_n)
+
+            # Calculate the genomic position of this window
+            window_genomic_start = requested_start + window_start
+            window_genomic_end = window_genomic_start + total_window
+            
+            # The central window spans from context_size to context_size+window_size
+            window_center_genomic_start = window_genomic_start + context_size
+            window_center_genomic_end = window_center_genomic_start + window_size
+
+            # Find splice sites in this window's central region
+            sites_in_window = df_gene[
+                (df_gene['position'] >= window_center_genomic_start) &
+                (df_gene['position'] < window_center_genomic_end)
+            ]
+
+            # Skip windows with no splice sites
+            if len(sites_in_window) == 0:
+                continue
+
+            # Initialize label array for this window
+            labels = np.zeros(window_size, dtype=np.int8)
+
+            # Use sparse dictionaries for usage arrays
+            usage_alpha_dict = {}
+            usage_beta_dict = {}
+            usage_sse_dict = {}
+
+            donor_sites = []
+            acceptor_sites = []
+
+            # Mark positions and add usage stats for each site
+            for _, site_row in sites_in_window.iterrows():
+                site_pos = site_row['position']
+                site_type = site_row['site_type']
+
+                # Calculate position within the window
+                window_pos = site_pos - window_center_genomic_start
+
+                if 0 <= window_pos < window_size:
+                    lookup_key = (genome_id, chrom, site_pos, strand)
+                    splice_site = splice_site_index.get(lookup_key)
+
+                    if splice_site is not None:
+                        labels[window_pos] = site_type
+                        if site_type == 1 and window_pos not in donor_sites:
+                            donor_sites.append(window_pos)
+                        elif site_type == 2 and window_pos not in acceptor_sites:
+                            acceptor_sites.append(window_pos)
+
+                        # Look up usage stats on-demand
+                        usage_stats = self.get_usage_stats(genome_id, chrom, site_pos, strand)
+
+                        # Store only non-NaN usage stats (sparse representation)
+                        for condition_key, stats in usage_stats.items():
+                            if condition_key in condition_to_idx:
+                                cond_idx = condition_to_idx[condition_key]
+                                if window_pos not in usage_alpha_dict:
+                                    usage_alpha_dict[window_pos] = {}
+                                    usage_beta_dict[window_pos] = {}
+                                    usage_sse_dict[window_pos] = {}
+                                usage_alpha_dict[window_pos][cond_idx] = stats['alpha']
+                                usage_beta_dict[window_pos][cond_idx] = stats['beta']
+                                usage_sse_dict[window_pos][cond_idx] = stats['sse']
+
+            # Store sparse usage coordinates
+            global_window_idx = len(sequences)
+
+            for window_pos in usage_alpha_dict:
+                for cond_idx in usage_alpha_dict[window_pos].keys():
+                    usage_sparse_list.append({
+                        'sample_idx': global_window_idx,
+                        'position': window_pos,
+                        'strand': strand,
+                        'condition_idx': cond_idx,
+                        'alpha': usage_alpha_dict[window_pos][cond_idx],
+                        'beta': usage_beta_dict[window_pos][cond_idx],
+                        'sse': usage_sse_dict[window_pos][cond_idx]
+                    })
+
+            # Store sparse labels (only non-zero positions)
+            labels_sparse_list = []
+            for pos, label_val in enumerate(labels):
+                if label_val != 0:
+                    labels_sparse_list.append({
+                        'sample_idx': global_window_idx,
+                        'position': pos,
+                        'strand': strand,
+                        'label': label_val
+                    })
+
+            # Store this window's sequence (raw DNA string)
+            sequences.append(seq_window)
+            labels_list.extend(labels_sparse_list)
+
+            # Track metadata for this window
+            central_start = max(window_center_genomic_start, orig_min_pos)
+            central_end = min(window_center_genomic_end, orig_max_pos + 1)
+
+            metadata_row = {
+                'genome_id': genome_id,
+                'chromosome': chrom,
+                'gene_id': gene_id,
+                'strand': strand,
+                'window_with_context_start': window_genomic_start,
+                'window_with_context_end': window_genomic_end,
+                'window_start': window_center_genomic_start,
+                'window_end': window_center_genomic_end,
+                'central_gene_start': central_start,
+                'central_gene_end': central_end,
+                'n_donor_sites': len(donor_sites),
+                'n_acceptor_sites': len(acceptor_sites),
+            }
+            metadata_rows.append(metadata_row)
+
+        return sequences, labels_list, usage_sparse_list, metadata_rows

@@ -22,11 +22,12 @@ parser = argparse.ArgumentParser(description="Load splicing data from a single g
 parser.add_argument("--output_dir", type=str, required=True, help="Base directory to save results (genome will be saved to output_dir/genome_id/)")
 parser.add_argument("--config", type=str, required=True, help="Path to genome configuration JSON file")
 parser.add_argument("--genome_id", type=str, required=True, help="Genome ID to process (must match config)")
-parser.add_argument("--window_size", type=int, default=1000, help="Window size for sequences")
-parser.add_argument("--context_size", type=int, default=450, help="Context size on each side")
+parser.add_argument("--window_size", type=int, default=1000, help="Window size for sequences (only used if --per_gene not set)")
+parser.add_argument("--context_size", type=int, default=1000, help="Context size on each side")
 parser.add_argument("--alpha_threshold", type=int, default=5, help="Minimum alpha value threshold")
 parser.add_argument("--n_cpus", type=int, default=8, help="Number of CPU cores to use")
-parser.add_argument("--dry_run", action='store_true', help="Don't extract arrrays, just metadata")
+parser.add_argument("--per_gene", action='store_true', help="Process entire genes instead of fixed-size windows")
+parser.add_argument("--dry_run", action='store_true', help="Don't extract sequences, just metadata")
 parser.add_argument("--quiet", action='store_true', help="Suppress console output")
 args = parser.parse_args()
 
@@ -37,6 +38,7 @@ n_cpus = args.n_cpus
 window_size = args.window_size
 context_size = args.context_size
 alpha_threshold = args.alpha_threshold
+per_gene = args.per_gene
 dry_run = args.dry_run
 quiet = args.quiet
 
@@ -49,8 +51,9 @@ if debugging:
     output_dir=os.path.join(home, "sds/sd17d003/Anamaria/splicevo/data/processed_small/")
     n_cpus = 4
     window_size = 1000
-    context_size = 450
+    context_size = 4500
     alpha_threshold = 5
+    per_gene = True
     dry_run = False
     quiet = False
 
@@ -95,6 +98,10 @@ def get_memory_usage():
 
 log_print(f"Data loading started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 log_print(f"Genome ID: {genome_id}")
+log_print(f"Processing mode: {'per-gene' if per_gene else 'windowed'}")
+if not per_gene:
+    log_print(f"Window size: {window_size}")
+log_print(f"Context size: {context_size}")
 log_print(f"Output directory: {genome_output_dir}")
 log_print("=" * 60)
 
@@ -252,37 +259,53 @@ log_print(f"Loading splice sites completed in {step4_time:.2f} seconds")
 log_print(f"Memory usage after step 4: {mem_after_step4:.2f} GB\n")
 
 # Step 5: Extract sequences and labels
-log_print( "\nStep 5: Extracting sequences and labels...")
+processing_mode_desc = "per-gene sequences" if per_gene else "windowed sequences"
+log_print(f"\nStep 5: Extracting {processing_mode_desc} and labels...")
 step5_start = time.time()
 
-# If not a dry run, extract arrays
+# If not a dry run, extract sequences
 if not dry_run:
-    # Get all sequences and save directly to memmap
-    # Labels and usage are automatically saved as sparse parquet files
-    log_print(f"Converting to arrays and saving to memmap (window={window_size}, context={context_size})...")
-    sequences, metadata = loader.to_arrays(
-        window_size=window_size,
-        context_size=context_size,
-        alpha_threshold=alpha_threshold,
-        n_workers=n_cpus,
-        use_parallel=True,
-        save_memmap=genome_output_dir
-    )
-    log_print(f"Generated {len(sequences)} sequence windows")
-    log_print(f"Sequence shape: {sequences.shape}")
-    log_print(f"Labels and usage saved in sparse parquet format")
+    if per_gene:
+        # Process entire genes (variable length sequences)
+        log_print(f"Converting to compressed FASTA per gene (context={context_size})...")
+        sequences, metadata = loader.to_fasta_per_gene(
+            context_size=context_size,
+            alpha_threshold=alpha_threshold,
+            n_workers=n_cpus,
+            use_parallel=True,
+            save_dir=genome_output_dir
+        )
+        log_print(f"Generated {len(sequences)} gene sequences")
+        if sequences:
+            seq_lengths = [len(seq) for seq in sequences]
+            log_print(f"Sequence length range: {min(seq_lengths)} - {max(seq_lengths)} bp")
+        log_print(f"Labels and usage saved in sparse parquet format")
+    else:
+        # Process with fixed-size windows  
+        log_print(f"Converting to compressed FASTA sequences and saving (window={window_size}, context={context_size})...")
+        sequences, metadata = loader.to_fasta(
+            window_size=window_size,
+            context_size=context_size,
+            alpha_threshold=alpha_threshold,
+            n_workers=n_cpus,
+            use_parallel=True,
+            save_dir=genome_output_dir
+        )
+        log_print(f"Generated {len(sequences)} sequence windows")
+        log_print(f"Sequence length: {len(sequences[0]) if sequences else 0}")
+        log_print(f"Labels and usage saved in sparse parquet format")
         
     step5_time = time.time() - step5_start
     
     # Force garbage collection and log memory
     gc.collect()
     mem_after_step5 = get_memory_usage()
-    log_print(f"Arrays extracted and saved in {step5_time:.2f} seconds")
+    log_print(f"Compressed FASTA {processing_mode_desc} extracted and saved in {step5_time:.2f} seconds")
     log_print(f"Memory usage after step 5: {mem_after_step5:.2f} GB")
     log_print(f"Memory increase from step 4 to 5: {mem_after_step5 - mem_after_step4:.2f} GB\n")
 else:
-    log_print("Dry run specified, skipping array extraction.")
-    sequences = np.array([])
+    log_print("Dry run specified, skipping sequence extraction.")
+    sequences = []
     metadata = pd.DataFrame()
     step5_time = time.time() - step5_start
     log_print(f"Dry run completed in {step5_time:.2f} seconds\n")
@@ -306,30 +329,41 @@ if len(conditions_df) > 0:
         }
 
 # Save consolidated metadata.json (includes both summary and metadata info)
+processing_mode = "per_gene" if per_gene else "windowed"
 metadata_json = {
     # Summary information
     'genome_id': genome_id,
     'n_sequences': int(len(sequences)),
     'n_splice_sites': int(len(loader.loaded_data)),
-    'window_size': window_size,
-    'context_size': context_size,
     'alpha_threshold': alpha_threshold,
     'genome_config': genome_config,
     'created_at': datetime.now().isoformat(),
-    
-    # Array shapes and dtypes
-    'sequences_shape': list(sequences.shape),
-    'sequences_dtype': str(sequences.dtype),
+    'processing_mode': processing_mode,
+    # Sequence format and info
+    'sequences_format': 'fasta.gz',
+    'context_size': context_size,
     'labels_format': 'sparse',
     'usage_conditions': usage_condition_names,
     'usage_condition_mapping': usage_condition_mapping,
-    
-    # File paths
+# File paths
     'files': {
-        'sequences': os.path.join(genome_output_dir, 'sequences.mmap'),
+        'sequences': os.path.join(genome_output_dir, 'sequences.fasta.gz'),
         'metadata': os.path.join(genome_output_dir, 'metadata.csv'),
     }
 }
+
+# Add sequence length info based on processing mode
+if per_gene and sequences:
+    seq_lengths = [len(seq) for seq in sequences]
+    metadata_json['sequence_length_min'] = min(seq_lengths)
+    metadata_json['sequence_length_max'] = max(seq_lengths)
+    metadata_json['sequence_length_mean'] = sum(seq_lengths) / len(seq_lengths)
+elif not per_gene and sequences:
+    metadata_json['window_size'] = window_size
+    metadata_json['sequence_length'] = len(sequences[0])
+else:
+    metadata_json['sequence_length'] = 0
+
 
 # Check for sparse labels file
 labels_sparse_path = os.path.join(genome_output_dir, 'labels.parquet')
@@ -376,7 +410,7 @@ log_print(f"Step 1 (Configuration): {format_time(step1_time)}")
 log_print(f"Step 2 (Genome loading): {format_time(step2_time)}")
 log_print(f"Step 3 (Usage files): {format_time(step3_time)}")
 log_print(f"Step 4 (Splice site loading): {format_time(step4_time)}")
-log_print(f"Step 5 (Array extraction): {format_time(step5_time)}")
+log_print(f"Step 5 (Compressed FASTA extraction - {processing_mode}): {format_time(step5_time)}")
 log_print(f"Step 6 (Metadata saving): {format_time(step6_time)}")
 log_print("=" * 60)
 

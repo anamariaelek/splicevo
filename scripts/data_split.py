@@ -15,6 +15,7 @@ import pandas as pd
 from pathlib import Path
 import psutil
 import gc
+import gzip
 
 parser = argparse.ArgumentParser(description="Split loaded data into train/test sets")
 parser.add_argument("--input_dir", type=str, required=True, 
@@ -155,7 +156,27 @@ if not os.path.exists(pov_genome_dir):
     log_print(f"ERROR: POV genome directory not found: {pov_genome_dir}")
     sys.exit(1)
 
-pov_metadata = pd.read_csv(os.path.join(pov_genome_dir, 'metadata.csv'), dtype={'genome_id': str, 'gene_id': str, 'chromosome': str, 'window_start': int, 'window_end': int})
+# Check processing mode to determine column names
+pov_meta_path = os.path.join(pov_genome_dir, 'metadata.json')
+with open(pov_meta_path, 'r') as f:
+    pov_json_meta = json.load(f)
+
+is_per_gene = pov_json_meta.get('processing_mode') == 'per_gene'
+
+# Determine column names based on processing mode
+if is_per_gene:
+    start_col = 'sequence_start'
+    end_col = 'sequence_end'
+else:
+    start_col = 'window_start'
+    end_col = 'window_end'
+
+# Read metadata with appropriate dtype handling
+metadata_dtypes = {'genome_id': str, 'gene_id': str, 'chromosome': str}
+metadata_dtypes[start_col] = int
+metadata_dtypes[end_col] = int
+
+pov_metadata = pd.read_csv(os.path.join(pov_genome_dir, 'metadata.csv'), dtype=metadata_dtypes)
 # Convert chromosome to string for consistent comparison
 pov_metadata['chromosome'] = pov_metadata['chromosome'].astype(str)
 
@@ -220,9 +241,15 @@ log_print(f"  Loading genome metadata for overlap detection...")
 genome_metadata_cache = {}
 for genome_id in genome_dirs:
     genome_dir = os.path.join(input_dir, genome_id)
+    
+    # Read metadata with appropriate dtypes
+    meta_dtypes = {'genome_id': str, 'gene_id': str, 'chromosome': str}
+    meta_dtypes[start_col] = int
+    meta_dtypes[end_col] = int
+    
     genome_metadata_cache[genome_id] = pd.read_csv(
         os.path.join(genome_dir, 'metadata.csv'), 
-        dtype={'genome_id': str, 'gene_id': str, 'chromosome': str, 'window_start': int, 'window_end': int}
+        dtype=meta_dtypes
     )
     genome_metadata_cache[genome_id]['chromosome'] = genome_metadata_cache[genome_id]['chromosome'].astype(str)
 
@@ -242,8 +269,8 @@ for (genome_id, gene_id), split in gene_split_mapping.items():
                 train_genes_by_genome_chrom[genome_id][chrom] = []
             train_genes_by_genome_chrom[genome_id][chrom].append({
                 'gene_id': gene_id,
-                'start': metadata_row['window_start'].values[0],
-                'end': metadata_row['window_end'].values[0]
+                'start': metadata_row[start_col].values[0],
+                'end': metadata_row[end_col].values[0]
             })
 
 # Check for overlaps using pre-indexed train genes
@@ -256,8 +283,8 @@ for (genome_id, gene_id), split in list(gene_split_mapping.items()):
         if test_gene_row.empty:
             continue
         
-        test_start = test_gene_row['window_start'].values[0]
-        test_end = test_gene_row['window_end'].values[0]
+        test_start = test_gene_row[start_col].values[0]
+        test_end = test_gene_row[end_col].values[0]
         test_chrom = str(test_gene_row['chromosome'].values[0])
         
         # Fast lookup: only check train genes on same chromosome
@@ -371,9 +398,21 @@ first_genome_dir = os.path.join(input_dir, sorted(genome_dirs)[0])
 with open(os.path.join(first_genome_dir, 'metadata.json'), 'r') as f:
     first_meta = json.load(f)
 
-seq_dtype = first_meta['sequences_dtype']
-seq_window_size = first_meta['sequences_shape'][1]
-window_size = seq_window_size  # Same for sequences and labels
+# Check if we're in per-gene mode
+is_per_gene_mode = first_meta.get('processing_mode') == 'per_gene'
+sequences_format = first_meta.get('sequences_format', 'memmap')
+
+if is_per_gene_mode or sequences_format == 'fasta.gz':
+    # FASTA format - no fixed window size
+    seq_dtype = 'str'
+    seq_window_size = None
+    window_size = None
+else:
+    # Legacy memmap format
+    seq_dtype = first_meta['sequences_dtype']
+    seq_window_size = first_meta['sequences_shape'][1]
+    window_size = seq_window_size  # Same for sequences and labels
+
 n_usage_conditions = len(common_usage_conditions)
 
 # Initialize memory-mapped output files
@@ -435,12 +474,51 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
         seq_metadata['species_id'] = genome_idx
         test_metadata_list.append(seq_metadata)
     
-    # Open memmap files without loading into memory (memory efficient)
-    seq_shape = tuple(meta['sequences_shape'])
+    # Check if we're dealing with per-gene or windowed format
+    is_per_gene = meta.get('processing_mode') == 'per_gene'
+    sequences_format = meta.get('sequences_format', 'memmap')
     
-    log_print(f"    Opening sequences memmap (not loading into memory)...")
-    sequences_mmap = np.memmap(os.path.join(genome_dir, 'sequences.mmap'), 
-                              dtype=seq_dtype, mode='r', shape=seq_shape)
+    if is_per_gene or sequences_format == 'fasta.gz':
+        # FASTA format - load sequences as strings
+        fasta_path = os.path.join(genome_dir, 'sequences.fasta.gz')
+        sequences = []
+        sequence_ids = []
+        
+        log_print(f"    Loading FASTA sequences from {fasta_path}...")
+        with gzip.open(fasta_path, 'rt') as f:
+            seq_id = None
+            seq_lines = []
+            
+            for line in f:
+                line = line.strip()
+                if line.startswith('>'):
+                    # Save previous sequence
+                    if seq_id is not None:
+                        sequences.append(''.join(seq_lines))
+                        sequence_ids.append(seq_id)
+                    # Start new sequence
+                    seq_id = line[1:]  # Remove >
+                    seq_lines = []
+                else:
+                    seq_lines.append(line)
+            
+            # Don't forget the last sequence
+            if seq_id is not None:
+                sequences.append(''.join(seq_lines))
+                sequence_ids.append(seq_id)
+        
+        log_print(f"    Loaded {len(sequences)} sequences from FASTA")
+        
+    else:
+        # Legacy memmap format
+        seq_shape = tuple(meta['sequences_shape'])
+        seq_dtype = meta['sequences_dtype']
+        
+        log_print(f"    Opening sequences memmap (not loading into memory)...")
+        sequences_mmap = np.memmap(os.path.join(genome_dir, 'sequences.mmap'), 
+                                  dtype=seq_dtype, mode='r', shape=seq_shape)
+        sequences = sequences_mmap
+        sequence_ids = None
     
     # Load sparse labels data
     labels_sparse_path = os.path.join(genome_dir, 'labels.parquet')
@@ -502,71 +580,115 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
     
     # Process train sequences
     if train_indices:
-        # Initialize mmap files on first write
-        if train_sequences_mmap is None:
-            log_print(f"    Initializing train mmap files...")
-            train_sequences_mmap = np.memmap(os.path.join(train_dir, 'sequences.mmap'), 
-                                            dtype=seq_dtype, mode='w+', 
-                                            shape=(train_count, seq_window_size, 4))
+        if is_per_gene or sequences_format == 'fasta.gz':
+            # FASTA format - write sequences as FASTA
+            train_fasta_path = os.path.join(train_dir, 'sequences.fasta.gz')
+            
+            # Initialize file on first write
+            if 'train_fasta_initialized' not in globals():
+                log_print(f"    Initializing train FASTA file...")
+                with gzip.open(train_fasta_path, 'wt') as f:
+                    pass  # Create empty file
+                globals()['train_fasta_initialized'] = True
+            
+            # Append train sequences to FASTA
+            log_print(f"    Writing {len(train_indices)} train sequences to FASTA...")
+            with gzip.open(train_fasta_path, 'at') as f:
+                for i, idx in enumerate(train_indices):
+                    seq = sequences[idx]
+                    if sequence_ids:
+                        seq_id = sequence_ids[idx]
+                    else:
+                        seq_id = f"seq_{train_offset + i}"
+                    f.write(f">{seq_id}\n{seq}\n")
+        else:
+            # Legacy memmap format
+            if train_sequences_mmap is None:
+                log_print(f"    Initializing train mmap files...")
+                train_sequences_mmap = np.memmap(os.path.join(train_dir, 'sequences.mmap'), 
+                                                dtype=seq_dtype, mode='w+', 
+                                                shape=(train_count, seq_window_size, 4))
+            
+            # Write train data in batches to avoid memory spikes
+            n_train = len(train_indices)
+            batch_size = 1000
+            
+            log_print(f"    Writing {n_train} train sequences in batches of {batch_size}...")
+            for batch_start in range(0, n_train, batch_size):
+                batch_end = min(batch_start + batch_size, n_train)
+                batch_indices = train_indices[batch_start:batch_end]
+                batch_size_actual = len(batch_indices)
+                
+                train_sequences_mmap[train_offset:train_offset + batch_size_actual] = sequences[batch_indices]
+                train_offset += batch_size_actual
+            
+        # Handle sparse labels data for train
+        if labels_sparse_df is not None:
+            # Filter to train samples, remap sample_idx to target indices
+            train_labels = labels_sparse_df[labels_sparse_df['sample_idx'].isin(train_indices)].copy()
+            # Create mapping from source to target indices
+            idx_map = {src: train_offset + i for i, src in enumerate(train_indices)}
+            train_labels['sample_idx'] = train_labels['sample_idx'].map(idx_map)
+            train_labels_list.append(train_labels)
         
-        # Write train data in batches to avoid memory spikes
-        n_train = len(train_indices)
-        batch_size = 1000  # Process 1000 sequences at a time
+        # Handle sparse usage data for train
+        if usage_sparse_df is not None:
+            # Filter to train samples and remap
+            train_sparse = usage_sparse_df[usage_sparse_df['sample_idx'].isin(train_indices)].copy()
+            # Remap condition indices to common conditions
+            train_sparse = remap_sparse_condition_indices(train_sparse, 
+                                                         genome_usage_conditions,
+                                                         common_usage_conditions)
+            # Adjust sample_idx to global train offset
+            idx_map = {orig: new for new, orig in enumerate(train_indices, start=train_offset)}
+            train_sparse['sample_idx'] = train_sparse['sample_idx'].map(idx_map)
+            train_usage_sparse_list.append(train_sparse)
         
-        log_print(f"    Writing {n_train} train sequences in batches of {batch_size}...")
-        for batch_start in range(0, n_train, batch_size):
-            batch_end = min(batch_start + batch_size, n_train)
-            batch_indices = train_indices[batch_start:batch_end]
-            batch_size_actual = len(batch_indices)
-            
-            # Copy batch directly from source memmap to dest memmap (memory efficient)
-            train_sequences_mmap[train_offset:train_offset + batch_size_actual] = sequences_mmap[batch_indices]
-            
-            # Handle sparse labels data
-            if labels_sparse_df is not None:
-                # Filter to batch samples, remap sample_idx to target indices
-                batch_labels = labels_sparse_df[labels_sparse_df['sample_idx'].isin(batch_indices)].copy()
-                # Create mapping from source to target indices
-                idx_map = {src: train_offset + i for i, src in enumerate(batch_indices)}
-                batch_labels['sample_idx'] = batch_labels['sample_idx'].map(idx_map)
-                train_labels_list.append(batch_labels)
-            
-            # Handle sparse usage data
-            if usage_sparse_df is not None:
-                # Filter to batch samples and remap
-                batch_sparse = usage_sparse_df[usage_sparse_df['sample_idx'].isin(batch_indices)].copy()
-                # Remap condition indices to common conditions
-                batch_sparse = remap_sparse_condition_indices(batch_sparse, 
-                                                             genome_usage_conditions,
-                                                             common_usage_conditions)
-                # Adjust sample_idx to global train offset
-                idx_map = {orig: new for new, orig in enumerate(batch_indices, start=train_offset)}
-                batch_sparse['sample_idx'] = batch_sparse['sample_idx'].map(idx_map)
-                train_usage_sparse_list.append(batch_sparse)
-            
-            train_offset += batch_size_actual
+        train_offset += len(train_indices)
     
     # Process test sequences
     if test_indices:
-        # Initialize mmap files on first write
-        if test_sequences_mmap is None:
-            log_print(f"    Initializing test mmap files...")
-            test_sequences_mmap = np.memmap(os.path.join(test_dir, 'sequences.mmap'),
-                                            dtype=seq_dtype, mode='w+', 
-                                           shape=(test_count, seq_window_size, 4))
-        
-        # Write test data in batches to avoid memory spikes
-        n_test = len(test_indices)
-        batch_size = 1000  # Process 1000 sequences at a time
-        
-        log_print(f"    Writing {n_test} test sequences in batches of {batch_size}...")
-        for batch_start in range(0, n_test, batch_size):
-            batch_end = min(batch_start + batch_size, n_test)
-            batch_indices = test_indices[batch_start:batch_end]
-            batch_size_actual = len(batch_indices)
+        if is_per_gene or sequences_format == 'fasta.gz':
+            # FASTA format - write sequences as FASTA
+            test_fasta_path = os.path.join(test_dir, 'sequences.fasta.gz')
             
-            # Copy batch directly from source memmap to dest memmap (memory efficient)
-            test_sequences_mmap[test_offset:test_offset + batch_size_actual] = sequences_mmap[batch_indices]
+            # Initialize file on first write
+            if 'test_fasta_initialized' not in globals():
+                log_print(f"    Initializing test FASTA file...")
+                with gzip.open(test_fasta_path, 'wt') as f:
+                    pass  # Create empty file
+                globals()['test_fasta_initialized'] = True
+            
+            # Append test sequences to FASTA
+            log_print(f"    Writing {len(test_indices)} test sequences to FASTA...")
+            with gzip.open(test_fasta_path, 'at') as f:
+                for i, idx in enumerate(test_indices):
+                    seq = sequences[idx]
+                    if sequence_ids:
+                        seq_id = sequence_ids[idx]
+                    else:
+                        seq_id = f"seq_{test_offset + i}"
+                    f.write(f">{seq_id}\n{seq}\n")
+        else:
+            # Legacy memmap format
+            if test_sequences_mmap is None:
+                log_print(f"    Initializing test mmap files...")
+                test_sequences_mmap = np.memmap(os.path.join(test_dir, 'sequences.mmap'),
+                                                dtype=seq_dtype, mode='w+', 
+                                               shape=(test_count, seq_window_size, 4))
+            
+            # Write test data in batches to avoid memory spikes
+            n_test = len(test_indices)
+            batch_size = 1000
+            
+            log_print(f"    Writing {n_test} test sequences in batches of {batch_size}...")
+            for batch_start in range(0, n_test, batch_size):
+                batch_end = min(batch_start + batch_size, n_test)
+                batch_indices = test_indices[batch_start:batch_end]
+                batch_size_actual = len(batch_indices)
+                
+                test_sequences_mmap[test_offset:test_offset + batch_size_actual] = sequences[batch_indices]
+                test_offset += batch_size_actual
             
             # Handle sparse labels data
             if labels_sparse_df is not None:
@@ -594,7 +716,14 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
     
     log_print(f"    Genome {genome_id} processed")
     # Close references to free file handles
-    del sequences_mmap, metadata
+    if not (is_per_gene or sequences_format == 'fasta.gz'):
+        if 'sequences_mmap' in locals():
+            del sequences_mmap
+    if 'sequences' in locals():
+        del sequences
+    if 'sequence_ids' in locals():
+        del sequence_ids
+    del metadata
     if usage_sparse_df is not None:
         del usage_sparse_df
     gc.collect()
@@ -671,8 +800,10 @@ if train_usage_sparse_list:
     train_usage_sparse.to_parquet(os.path.join(train_dir, 'usage.parquet'), 
                                   compression='snappy', index=False)
     log_print(f"    Train sparse usage: {len(train_usage_sparse)} entries")
-    sparsity = 100 * len(train_usage_sparse) / (train_offset * window_size * n_usage_conditions)
-    log_print(f"    Train sparsity: {sparsity:.4f}%")
+    # Only calculate sparsity if we have window_size (not per-gene mode)
+    if 'window_size' in globals() and window_size and n_usage_conditions > 0:
+        sparsity = 100 * len(train_usage_sparse) / (train_offset * window_size * n_usage_conditions)
+        log_print(f"    Train sparsity: {sparsity:.4f}%")
     del train_usage_sparse
 
 if test_usage_sparse_list:
@@ -684,8 +815,10 @@ if test_usage_sparse_list:
     test_usage_sparse.to_parquet(os.path.join(test_dir, 'usage.parquet'), 
                                  compression='snappy', index=False)
     log_print(f"    Test sparse usage: {len(test_usage_sparse)} entries")
-    sparsity = 100 * len(test_usage_sparse) / (test_offset * window_size * n_usage_conditions)
-    log_print(f"    Test sparsity: {sparsity:.4f}%")
+    # Only calculate sparsity if we have window_size (not per-gene mode)
+    if 'window_size' in globals() and window_size and n_usage_conditions > 0:
+        sparsity = 100 * len(test_usage_sparse) / (test_offset * window_size * n_usage_conditions)
+        log_print(f"    Test sparsity: {sparsity:.4f}%")
     del test_usage_sparse
 
 # Helper function to create metadata.json
@@ -693,13 +826,14 @@ def create_split_metadata(output_split_dir, n_sequences, common_usage_conditions
                          genome_dirs_list, input_dir, pov_genome):
     """Create metadata.json for a train/test split."""
     
-    # Load window_size and context_size from POV genome config
+    # Load metadata from POV genome config
     pov_summary_path = os.path.join(input_dir, pov_genome, 'metadata.json')
     with open(pov_summary_path, 'r') as f:
         pov_summary = json.load(f)
     
-    window_size = pov_summary.get('window_size', 1000)
-    context_size = pov_summary.get('context_size', 450)
+    # Check if we're in per-gene mode
+    is_per_gene = pov_summary.get('processing_mode') == 'per_gene'
+    sequences_format = pov_summary.get('sequences_format', 'memmap')
     
     # Create usage condition mapping (index -> condition info)
     usage_condition_mapping = {}
@@ -709,17 +843,55 @@ def create_split_metadata(output_split_dir, n_sequences, common_usage_conditions
             'display_name': cond_key
         }
     
-    # Build consolidated metadata
-    metadata = {
-        'sequences_shape': [n_sequences, seq_window_size, 4],
-        'sequences_dtype': seq_dtype,
-        'labels_format': 'sparse',
-        'window_size': window_size,
-        'context_size': context_size,
-        'usage_conditions': common_usage_conditions,
-        'usage_condition_mapping': usage_condition_mapping,
-        'species_condition_mapping': species_condition_mapping,
-    }
+    # Build consolidated metadata based on format
+    if is_per_gene or sequences_format == 'fasta.gz':
+        # FASTA format metadata
+        metadata = {
+            'sequences_format': 'fasta.gz',
+            'sequences_count': n_sequences,
+            'labels_format': 'sparse',
+            'usage_conditions': common_usage_conditions,
+            'usage_condition_mapping': usage_condition_mapping,
+            'processing_mode': pov_summary.get('processing_mode', 'per_gene'),
+        }
+        
+        # Add context size and sequence length info if available
+        if 'context_size' in pov_summary:
+            metadata['context_size'] = pov_summary['context_size']
+        
+        if is_per_gene:
+            # Per-gene mode: sequences have variable lengths
+            if 'sequence_length_min' in pov_summary:
+                metadata['sequence_length_min'] = pov_summary['sequence_length_min']
+            if 'sequence_length_max' in pov_summary:
+                metadata['sequence_length_max'] = pov_summary['sequence_length_max']
+            if 'sequence_length_mean' in pov_summary:
+                metadata['sequence_length_mean'] = pov_summary['sequence_length_mean']
+        else:
+            # Windowed mode: fixed sequence length
+            if 'window_size' in pov_summary:
+                metadata['window_size'] = pov_summary['window_size']
+            if 'sequence_length' in pov_summary:
+                metadata['sequence_length'] = pov_summary['sequence_length']
+    else:
+        # Legacy memmap format
+        window_size = pov_summary.get('window_size', 1000)
+        context_size = pov_summary.get('context_size', 450)
+        # Calculate expected window size for legacy format
+        expected_seq_length = context_size + window_size + context_size
+        
+        metadata = {
+            'sequences_shape': [n_sequences, expected_seq_length, 4],
+            'sequences_dtype': 'float32',
+            'labels_format': 'sparse',
+            'window_size': window_size,
+            'context_size': context_size,
+            'usage_conditions': common_usage_conditions,
+            'usage_condition_mapping': usage_condition_mapping,
+        }
+    
+    # Add species condition mapping to all metadata formats
+    metadata['species_condition_mapping'] = species_condition_mapping
     
     # Add labels info if present (sparse format only)
     labels_sparse_path = os.path.join(output_split_dir, 'labels.parquet')
