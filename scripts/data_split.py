@@ -580,6 +580,8 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
     
     # Process train sequences
     if train_indices:
+        train_base_offset = train_offset
+
         if is_per_gene or sequences_format == 'fasta.gz':
             # FASTA format - write sequences as FASTA
             train_fasta_path = os.path.join(train_dir, 'sequences.fasta.gz')
@@ -599,7 +601,7 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
                     if sequence_ids:
                         seq_id = sequence_ids[idx]
                     else:
-                        seq_id = f"seq_{train_offset + i}"
+                        seq_id = f"seq_{train_base_offset + i}"
                     f.write(f">{seq_id}\n{seq}\n")
         else:
             # Legacy memmap format
@@ -612,6 +614,7 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
             # Write train data in batches to avoid memory spikes
             n_train = len(train_indices)
             batch_size = 1000
+            write_offset = train_base_offset
             
             log_print(f"    Writing {n_train} train sequences in batches of {batch_size}...")
             for batch_start in range(0, n_train, batch_size):
@@ -619,15 +622,15 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
                 batch_indices = train_indices[batch_start:batch_end]
                 batch_size_actual = len(batch_indices)
                 
-                train_sequences_mmap[train_offset:train_offset + batch_size_actual] = sequences[batch_indices]
-                train_offset += batch_size_actual
+                train_sequences_mmap[write_offset:write_offset + batch_size_actual] = sequences[batch_indices]
+                write_offset += batch_size_actual
             
         # Handle sparse labels data for train
         if labels_sparse_df is not None:
             # Filter to train samples, remap sample_idx to target indices
             train_labels = labels_sparse_df[labels_sparse_df['sample_idx'].isin(train_indices)].copy()
             # Create mapping from source to target indices
-            idx_map = {src: train_offset + i for i, src in enumerate(train_indices)}
+            idx_map = {src: train_base_offset + i for i, src in enumerate(train_indices)}
             train_labels['sample_idx'] = train_labels['sample_idx'].map(idx_map)
             train_labels_list.append(train_labels)
         
@@ -640,7 +643,7 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
                                                          genome_usage_conditions,
                                                          common_usage_conditions)
             # Adjust sample_idx to global train offset
-            idx_map = {orig: new for new, orig in enumerate(train_indices, start=train_offset)}
+            idx_map = {orig: new for new, orig in enumerate(train_indices, start=train_base_offset)}
             train_sparse['sample_idx'] = train_sparse['sample_idx'].map(idx_map)
             train_usage_sparse_list.append(train_sparse)
         
@@ -648,6 +651,8 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
     
     # Process test sequences
     if test_indices:
+        test_base_offset = test_offset
+
         if is_per_gene or sequences_format == 'fasta.gz':
             # FASTA format - write sequences as FASTA
             test_fasta_path = os.path.join(test_dir, 'sequences.fasta.gz')
@@ -667,7 +672,7 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
                     if sequence_ids:
                         seq_id = sequence_ids[idx]
                     else:
-                        seq_id = f"seq_{test_offset + i}"
+                        seq_id = f"seq_{test_base_offset + i}"
                     f.write(f">{seq_id}\n{seq}\n")
         else:
             # Legacy memmap format
@@ -680,6 +685,7 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
             # Write test data in batches to avoid memory spikes
             n_test = len(test_indices)
             batch_size = 1000
+            write_offset = test_base_offset
             
             log_print(f"    Writing {n_test} test sequences in batches of {batch_size}...")
             for batch_start in range(0, n_test, batch_size):
@@ -687,32 +693,27 @@ for genome_idx, genome_id in enumerate(sorted(genome_dirs)):
                 batch_indices = test_indices[batch_start:batch_end]
                 batch_size_actual = len(batch_indices)
                 
-                test_sequences_mmap[test_offset:test_offset + batch_size_actual] = sequences[batch_indices]
-                test_offset += batch_size_actual
-            
-            # Handle sparse labels data
-            if labels_sparse_df is not None:
-                # Filter to batch samples, remap sample_idx to target indices
-                batch_labels = labels_sparse_df[labels_sparse_df['sample_idx'].isin(batch_indices)].copy()
-                # Create mapping from source to target indices
-                idx_map = {src: test_offset + i for i, src in enumerate(batch_indices)}
-                batch_labels['sample_idx'] = batch_labels['sample_idx'].map(idx_map)
-                test_labels_list.append(batch_labels)
-            
-            # Handle sparse usage data
-            if usage_sparse_df is not None:
-                # Filter to batch samples and remap
-                batch_sparse = usage_sparse_df[usage_sparse_df['sample_idx'].isin(batch_indices)].copy()
-                # Remap condition indices to common conditions
-                batch_sparse = remap_sparse_condition_indices(batch_sparse, 
-                                                             genome_usage_conditions,
-                                                             common_usage_conditions)
-                # Adjust sample_idx to global test offset
-                idx_map = {orig: new for new, orig in enumerate(batch_indices, start=test_offset)}
-                batch_sparse['sample_idx'] = batch_sparse['sample_idx'].map(idx_map)
-                test_usage_sparse_list.append(batch_sparse)
-            
-            test_offset += batch_size_actual
+                test_sequences_mmap[write_offset:write_offset + batch_size_actual] = sequences[batch_indices]
+                write_offset += batch_size_actual
+
+        # Handle sparse labels data for test
+        if labels_sparse_df is not None:
+            test_labels = labels_sparse_df[labels_sparse_df['sample_idx'].isin(test_indices)].copy()
+            idx_map = {src: test_base_offset + i for i, src in enumerate(test_indices)}
+            test_labels['sample_idx'] = test_labels['sample_idx'].map(idx_map)
+            test_labels_list.append(test_labels)
+
+        # Handle sparse usage data for test
+        if usage_sparse_df is not None:
+            test_sparse = usage_sparse_df[usage_sparse_df['sample_idx'].isin(test_indices)].copy()
+            test_sparse = remap_sparse_condition_indices(test_sparse,
+                                                        genome_usage_conditions,
+                                                        common_usage_conditions)
+            idx_map = {orig: new for new, orig in enumerate(test_indices, start=test_base_offset)}
+            test_sparse['sample_idx'] = test_sparse['sample_idx'].map(idx_map)
+            test_usage_sparse_list.append(test_sparse)
+
+        test_offset += len(test_indices)
     
     log_print(f"    Genome {genome_id} processed")
     # Close references to free file handles
@@ -770,8 +771,8 @@ if train_labels_list:
     log_print(f"\n  Saving sparse labels data...")
     train_labels_sparse = pd.concat(train_labels_list, ignore_index=True)
     # Convert to efficient dtypes
-    train_labels_sparse['sample_idx'] = train_labels_sparse['sample_idx'].astype(np.int32)
-    train_labels_sparse['position'] = train_labels_sparse['position'].astype(np.int16)
+    train_labels_sparse['sample_idx'] = train_labels_sparse['sample_idx'].astype(np.int64)
+    train_labels_sparse['position'] = train_labels_sparse['position'].astype(np.int32)
     train_labels_sparse['label'] = train_labels_sparse['label'].astype(np.int8)
     train_labels_sparse.to_parquet(os.path.join(train_dir, 'labels.parquet'), 
                                    compression='snappy', index=False)
@@ -781,8 +782,8 @@ if train_labels_list:
 if test_labels_list:
     test_labels_sparse = pd.concat(test_labels_list, ignore_index=True)
     # Convert to efficient dtypes
-    test_labels_sparse['sample_idx'] = test_labels_sparse['sample_idx'].astype(np.int32)
-    test_labels_sparse['position'] = test_labels_sparse['position'].astype(np.int16)
+    test_labels_sparse['sample_idx'] = test_labels_sparse['sample_idx'].astype(np.int64)
+    test_labels_sparse['position'] = test_labels_sparse['position'].astype(np.int32)
     test_labels_sparse['label'] = test_labels_sparse['label'].astype(np.int8)
     test_labels_sparse.to_parquet(os.path.join(test_dir, 'labels.parquet'), 
                                   compression='snappy', index=False)
@@ -794,9 +795,9 @@ if train_usage_sparse_list:
     log_print(f"\n  Saving sparse usage data...")
     train_usage_sparse = pd.concat(train_usage_sparse_list, ignore_index=True)
     # Convert to efficient dtypes
-    train_usage_sparse['sample_idx'] = train_usage_sparse['sample_idx'].astype(np.int32)
-    train_usage_sparse['position'] = train_usage_sparse['position'].astype(np.int16)
-    train_usage_sparse['condition_idx'] = train_usage_sparse['condition_idx'].astype(np.int8)
+    train_usage_sparse['sample_idx'] = train_usage_sparse['sample_idx'].astype(np.int64)
+    train_usage_sparse['position'] = train_usage_sparse['position'].astype(np.int32)
+    train_usage_sparse['condition_idx'] = train_usage_sparse['condition_idx'].astype(np.int16)
     train_usage_sparse.to_parquet(os.path.join(train_dir, 'usage.parquet'), 
                                   compression='snappy', index=False)
     log_print(f"    Train sparse usage: {len(train_usage_sparse)} entries")
@@ -809,9 +810,9 @@ if train_usage_sparse_list:
 if test_usage_sparse_list:
     test_usage_sparse = pd.concat(test_usage_sparse_list, ignore_index=True)
     # Convert to efficient dtypes
-    test_usage_sparse['sample_idx'] = test_usage_sparse['sample_idx'].astype(np.int32)
-    test_usage_sparse['position'] = test_usage_sparse['position'].astype(np.int16)
-    test_usage_sparse['condition_idx'] = test_usage_sparse['condition_idx'].astype(np.int8)
+    test_usage_sparse['sample_idx'] = test_usage_sparse['sample_idx'].astype(np.int64)
+    test_usage_sparse['position'] = test_usage_sparse['position'].astype(np.int32)
+    test_usage_sparse['condition_idx'] = test_usage_sparse['condition_idx'].astype(np.int16)
     test_usage_sparse.to_parquet(os.path.join(test_dir, 'usage.parquet'), 
                                  compression='snappy', index=False)
     log_print(f"    Test sparse usage: {len(test_usage_sparse)} entries")

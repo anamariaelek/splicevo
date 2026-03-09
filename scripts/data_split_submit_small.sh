@@ -29,9 +29,12 @@ ORTHOLOGY_FILE=${HOME}/sds/sd17d003/Anamaria/genomes/mazin/ortholog_groups.tsv
 # Split the data
 SUBSET="small"
 SPECIES="mouse_human"
-KB="10"
-INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/processed_${SUBSET}_${KB}kb/
-OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data_/splits_${SUBSET}_${KB}kb/${SPECIES}/
+KB=""
+if [ "$KB" != "" ]; then
+    SUBSET="${SUBSET}_${KB}kb"
+fi
+INPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/processed_${SUBSET}/
+OUTPUT_DIR=${HOME}/sds/sd17d003/Anamaria/splicevo/data/splits_${SUBSET}/${SPECIES}/
 
 python ${SPLICEVO_DIR}/scripts/data_split.py \
     --input_dir ${INPUT_DIR} --genome_ids mouse_GRCm38 human_GRCh37 \

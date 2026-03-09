@@ -1841,8 +1841,11 @@ class MultiGenomeDataLoader:
             site_pos = site_row['position']
             site_type = site_row['site_type']
 
-            # Calculate position within the sequence (relative to sequence start)
+            # Calculate position within the sequence (relative to sequence start, for indexing)
             seq_pos = site_pos - seq_start
+            
+            # Calculate position relative to gene start (for storage in labels/usage)
+            gene_pos = site_pos - gene_start
 
             if 0 <= seq_pos < total_length:
                 lookup_key = (genome_id, chrom, site_pos, strand)
@@ -1850,10 +1853,10 @@ class MultiGenomeDataLoader:
 
                 if splice_site is not None:
                     labels[seq_pos] = site_type
-                    if site_type == 1 and seq_pos not in donor_sites:
-                        donor_sites.append(seq_pos)
-                    elif site_type == 2 and seq_pos not in acceptor_sites:
-                        acceptor_sites.append(seq_pos)
+                    if site_type == 1 and gene_pos not in donor_sites:
+                        donor_sites.append(gene_pos)
+                    elif site_type == 2 and gene_pos not in acceptor_sites:
+                        acceptor_sites.append(gene_pos)
 
                     # Look up usage stats
                     usage_stats = self.get_usage_stats(genome_id, chrom, site_pos, strand)
@@ -1862,33 +1865,34 @@ class MultiGenomeDataLoader:
                     for condition_key, stats in usage_stats.items():
                         if condition_key in condition_to_idx:
                             cond_idx = condition_to_idx[condition_key]
-                            if seq_pos not in usage_alpha_dict:
-                                usage_alpha_dict[seq_pos] = {}
-                                usage_beta_dict[seq_pos] = {}
-                                usage_sse_dict[seq_pos] = {}
-                            usage_alpha_dict[seq_pos][cond_idx] = stats['alpha']
-                            usage_beta_dict[seq_pos][cond_idx] = stats['beta']
-                            usage_sse_dict[seq_pos][cond_idx] = stats['sse']
+                            if gene_pos not in usage_alpha_dict:
+                                usage_alpha_dict[gene_pos] = {}
+                                usage_beta_dict[gene_pos] = {}
+                                usage_sse_dict[gene_pos] = {}
+                            usage_alpha_dict[gene_pos][cond_idx] = stats['alpha']
+                            usage_beta_dict[gene_pos][cond_idx] = stats['beta']
+                            usage_sse_dict[gene_pos][cond_idx] = stats['sse']
 
-        # Store sparse usage coordinates
-        for seq_pos in usage_alpha_dict:
-            for cond_idx in usage_alpha_dict[seq_pos].keys():
+        # Store sparse usage coordinates (positions relative to gene start)
+        for gene_pos in usage_alpha_dict:
+            for cond_idx in usage_alpha_dict[gene_pos].keys():
                 usage_sparse_list.append({
                     'sample_idx': 0,  # Will be adjusted by caller
-                    'position': seq_pos,
+                    'position': gene_pos,
                     'strand': strand,
                     'condition_idx': cond_idx,
-                    'alpha': usage_alpha_dict[seq_pos][cond_idx],
-                    'beta': usage_beta_dict[seq_pos][cond_idx],
-                    'sse': usage_sse_dict[seq_pos][cond_idx]
+                    'alpha': usage_alpha_dict[gene_pos][cond_idx],
+                    'beta': usage_beta_dict[gene_pos][cond_idx],
+                    'sse': usage_sse_dict[gene_pos][cond_idx]
                 })
 
-        # Store sparse labels (only non-zero positions)
-        for pos, label_val in enumerate(labels):
+        # Store sparse labels (only non-zero positions, relative to gene start)
+        for seq_pos, label_val in enumerate(labels):
             if label_val != 0:
+                gene_pos = seq_pos - context_size  # Convert from sequence position to gene position
                 labels_sparse.append({
                     'sample_idx': 0,  # Will be adjusted by caller
-                    'position': pos,
+                    'position': gene_pos,
                     'strand': strand,
                     'label': label_val
                 })
